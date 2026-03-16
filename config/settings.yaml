@@ -1,0 +1,62 @@
+polymarket:
+  clob_host: "https://clob.polymarket.com"
+  gamma_host: "https://gamma-api.polymarket.com"
+  data_host: "https://data-api.polymarket.com"
+  chain_id: 137
+  signature_type: 1  # 0 for EOA, 1 for proxy/email wallet
+
+scanning:
+  interval_seconds: 300  # 5 minutes
+  min_volume_24h: 10000  # $10K minimum daily volume
+  min_liquidity: 5000    # $5K minimum order book depth
+  max_markets: 200       # Max markets to track simultaneously
+  target_categories:
+    - "Politics"
+    - "Geopolitics"
+    - "Fed"
+    - "AI"
+    - "Tech"
+    - "Culture"
+    - "Earnings"
+    - "Elections"
+    - "Trump"
+    - "Midterms"
+    - "Economy"
+  exclude_categories:
+    - "Crypto Prices"  # Fee-enabled, HFT dominated
+    - "Sports"         # Fees being rolled out
+
+trading:
+  mode: "paper"  # "paper" or "live"
+  bankroll: 500.0
+  max_position_pct: 0.05        # 5% of bankroll per position
+  max_total_exposure_pct: 0.40  # 40% total
+  max_correlated_exposure_pct: 0.20  # 20% in related markets
+  min_edge_ai: 0.05             # 5% minimum edge for AI strategy
+  min_edge_arb: 0.02            # 2% minimum edge for arbitrage
+  min_edge_obvious_no: 0.01     # 1% minimum for obvious NO
+  kelly_fraction: 0.5           # Half-Kelly
+  prefer_maker: true            # Always use limit orders when possible
+  daily_loss_limit_pct: 0.10    # 10% daily loss circuit breaker
+  max_obvious_no_pct: 0.10      # Max 10% bankroll in obvious NO positions
+
+claude:
+  model_primary: "claude-sonnet-4-6"
+  model_highstakes: "claude-opus-4-6"
+  highstakes_threshold: 50.0    # Use Opus for positions > $50
+  max_tokens: 2000
+  temperature: 0.3              # Lower = more deterministic
+  max_assessments_per_cycle: 10 # Don't burn API budget in one scan
+
+alerts:
+  enabled: true
+  imessage_enabled: false       # Enable after VAYU bridge is set up
+  daily_report_time: "21:00"    # 9 PM PT daily summary
+
+database:
+  path: "data/markets.db"
+  wal_mode: true
+
+logging:
+  level: "INFO"  # DEBUG for development
+  file: "data/logs/polyedge.log"

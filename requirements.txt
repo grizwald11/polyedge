@@ -1,0 +1,38 @@
+# PolyEdge - Polymarket Trading Bot
+# Phase 1: Core + Scanner
+
+# Polymarket SDK
+py-clob-client>=0.34.0
+
+# AI
+anthropic>=0.40.0
+
+# HTTP
+httpx>=0.27.0
+aiohttp>=3.9.0
+
+# Config
+pyyaml>=6.0
+pydantic>=2.0
+python-dotenv>=1.0
+
+# Database
+# (sqlite3 is built-in)
+
+# Testing
+pytest>=8.0
+pytest-asyncio>=0.24.0
+
+# Logging
+# (built-in)
+
+# Phase 2+ dependencies (install when needed):
+# chromadb>=0.5.0
+# sentence-transformers>=3.0
+# fastapi>=0.115.0
+# uvicorn>=0.32.0
+# apscheduler>=3.10
+# pandas>=2.2
+# numpy>=2.0
+# feedparser>=6.0
+# jinja2>=3.1

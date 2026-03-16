@@ -1,0 +1,38 @@
+# Secrets
+.env
+config/.env
+
+# Database
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Vector store
+data/chroma/
+
+# Logs
+data/logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
