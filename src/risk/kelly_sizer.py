@@ -1,0 +1,99 @@
+"""Kelly position sizer — half-Kelly with caps.
+
+Calculates optimal position size based on edge and probability,
+then applies half-Kelly fraction and hard caps.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from src.config import Settings
+
+logger = logging.getLogger(__name__)
+
+
+class KellySizer:
+    """Half-Kelly position sizing with configurable caps."""
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def calculate_position_size(
+        self,
+        edge: float,
+        probability: float,
+        bankroll: float,
+        current_exposure: float = 0.0,
+    ) -> int:
+        """Calculate optimal number of contracts to buy.
+
+        Uses half-Kelly formula with hard caps:
+        - Max position = bankroll * max_position_pct
+        - Reduced if near total exposure limit
+
+        Args:
+            edge: Our probability - market price (positive = favorable)
+            probability: Our estimated true probability
+            bankroll: Total bankroll in dollars
+            current_exposure: Current total exposure in dollars
+
+        Returns:
+            Number of contracts (integers, minimum 1 if any edge exists)
+        """
+        if edge <= 0 or probability <= 0 or probability >= 1 or bankroll <= 0:
+            return 0
+
+        # Kelly fraction: f = (p * b - q) / b
+        # where p = probability of winning, q = 1-p, b = odds (payout ratio)
+        # For binary markets: b = (1 - market_price) / market_price
+        # Simplified: f = p - q / b = p - (1-p) * price / (1-price)
+        # Even simpler: f = edge / (1 - market_price) where market_price = probability - edge...
+        # Actually: Kelly f = edge / odds_against
+        # market_price = probability - edge (approx)
+        market_price = probability - edge
+        if market_price <= 0 or market_price >= 1:
+            return 0
+
+        # Payout if win: (1 - market_price) per contract
+        # Risk if lose: market_price per contract
+        b = (1.0 - market_price) / market_price  # odds
+
+        q = 1.0 - probability
+        kelly_fraction = (probability * b - q) / b
+
+        if kelly_fraction <= 0:
+            return 0
+
+        # Apply half-Kelly
+        half_kelly = kelly_fraction * self.settings.trading.kelly_fraction
+
+        # Dollar amount to risk
+        kelly_dollars = half_kelly * bankroll
+
+        # Cap 1: Max position percentage
+        max_position = bankroll * self.settings.trading.max_position_pct
+        kelly_dollars = min(kelly_dollars, max_position)
+
+        # Cap 2: Don't exceed remaining exposure room
+        max_total = bankroll * self.settings.trading.max_total_exposure_pct
+        remaining = max_total - current_exposure
+        if remaining <= 0:
+            return 0
+        kelly_dollars = min(kelly_dollars, remaining)
+
+        # Convert dollars to contracts
+        # Cost per contract = market_price
+        contracts = int(kelly_dollars / market_price) if market_price > 0 else 0
+
+        # Minimum 1 contract if we have any edge and room
+        if contracts == 0 and kelly_fraction > 0 and remaining >= market_price:
+            contracts = 1
+
+        logger.debug(
+            f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "
+            f"kelly_f={kelly_fraction:.3f}, half={half_kelly:.3f}, "
+            f"${kelly_dollars:.2f} → {contracts} contracts"
+        )
+
+        return contracts

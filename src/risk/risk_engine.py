@@ -1,0 +1,171 @@
+"""Risk engine — 10-point pre-trade risk check.
+
+Every trade must pass ALL checks before execution.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
+from src.config import Settings
+from src.core.models import Market, RiskCheckResult, Signal, StrategyName
+from src.execution.position_manager import PositionManager
+from src.risk.circuit_breaker import CircuitBreaker
+
+logger = logging.getLogger(__name__)
+
+
+class RiskEngine:
+    """Central risk gate — all trades must pass."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        position_manager: PositionManager,
+        circuit_breaker: CircuitBreaker,
+    ):
+        self.settings = settings
+        self.positions = position_manager
+        self.circuit_breaker = circuit_breaker
+        self._cooldowns: dict[str, datetime] = {}  # market_id -> last exit time
+        self.cooldown_seconds = 3600  # 1 hour cooldown after exit
+
+    def check_all(
+        self,
+        signal: Signal,
+        market: Market,
+        proposed_size: float,
+        proposed_cost: float,
+    ) -> RiskCheckResult:
+        """Run all 10 risk checks on a proposed trade.
+
+        Args:
+            signal: The trading signal
+            market: Market being traded
+            proposed_size: Number of contracts
+            proposed_cost: Total cost in dollars (price * size)
+
+        Returns:
+            RiskCheckResult with pass/fail and details
+        """
+        failed = []
+        warnings = []
+        bankroll = self.settings.trading.bankroll
+
+        # 1. Balance check
+        total_exposure = self.positions.get_total_exposure()
+        available = bankroll - total_exposure
+        if proposed_cost > available:
+            failed.append(f"Insufficient balance: need ${proposed_cost:.2f}, available ${available:.2f}")
+
+        # 2. Position size limit (max 5% of bankroll per position)
+        max_position = bankroll * self.settings.trading.max_position_pct
+        if proposed_cost > max_position:
+            failed.append(
+                f"Position too large: ${proposed_cost:.2f} > "
+                f"${max_position:.2f} ({self.settings.trading.max_position_pct:.0%} limit)"
+            )
+
+        # 3. Total exposure limit (max 40% of bankroll)
+        new_total = total_exposure + proposed_cost
+        max_total = bankroll * self.settings.trading.max_total_exposure_pct
+        if new_total > max_total:
+            failed.append(
+                f"Total exposure exceeded: ${new_total:.2f} > "
+                f"${max_total:.2f} ({self.settings.trading.max_total_exposure_pct:.0%} limit)"
+            )
+
+        # 4. Correlated exposure (max 20% — same strategy)
+        strategy_exposure = self.positions.get_strategy_exposure(signal.strategy)
+        max_correlated = bankroll * self.settings.trading.max_correlated_exposure_pct
+        if strategy_exposure + proposed_cost > max_correlated:
+            failed.append(
+                f"Correlated exposure exceeded for {signal.strategy.value}: "
+                f"${strategy_exposure + proposed_cost:.2f} > ${max_correlated:.2f}"
+            )
+
+        # 5. Circuit breaker
+        if self.circuit_breaker.is_halted():
+            halt_reason = self.circuit_breaker.halt_reason or "Unknown"
+            failed.append(f"Circuit breaker active: {halt_reason}")
+
+        # 6. Market liquidity check
+        if market.liquidity > 0 and proposed_cost > market.liquidity * 0.10:
+            failed.append(
+                f"Order too large for liquidity: ${proposed_cost:.2f} > "
+                f"10% of ${market.liquidity:.2f} book depth"
+            )
+        elif market.liquidity > 0 and proposed_cost > market.liquidity * 0.05:
+            warnings.append("Order >5% of book depth — expect slippage")
+
+        # 7. Existing position check
+        if self.positions.has_position(signal.market_id):
+            failed.append(f"Already have position in {signal.market_id}")
+
+        # 8. Edge minimum check
+        min_edge = self._get_min_edge(signal.strategy)
+        if abs(signal.edge) < min_edge:
+            failed.append(
+                f"Edge too small: {signal.edge:.1%} < {min_edge:.1%} minimum "
+                f"for {signal.strategy.value}"
+            )
+
+        # 9. Resolution date check
+        days = market.days_to_resolution
+        if days is not None and days < 1:
+            failed.append(f"Market resolves in <1 day ({days:.1f} days)")
+        elif days is not None and days > 365:
+            warnings.append(f"Long-dated market: {days:.0f} days to resolution")
+
+        # 10. Cooldown check
+        if signal.market_id in self._cooldowns:
+            last_exit = self._cooldowns[signal.market_id]
+            elapsed = (datetime.now(timezone.utc) - last_exit).total_seconds()
+            if elapsed < self.cooldown_seconds:
+                remaining = self.cooldown_seconds - elapsed
+                failed.append(f"Cooldown active: {remaining:.0f}s remaining for {signal.market_id}")
+
+        # Obvious NO specific: max 10% bankroll in obvious-no positions
+        if signal.strategy == StrategyName.OBVIOUS_NO:
+            no_exposure = self.positions.get_strategy_exposure(StrategyName.OBVIOUS_NO)
+            max_no = bankroll * self.settings.trading.max_obvious_no_pct
+            if no_exposure + proposed_cost > max_no:
+                failed.append(
+                    f"Obvious NO exposure limit: ${no_exposure + proposed_cost:.2f} > "
+                    f"${max_no:.2f} ({self.settings.trading.max_obvious_no_pct:.0%} limit)"
+                )
+
+        passed = len(failed) == 0
+        result = RiskCheckResult(
+            passed=passed,
+            failed_checks=failed,
+            warnings=warnings,
+            approved_size=proposed_size if passed else 0.0,
+        )
+
+        if not passed:
+            logger.info(
+                f"Risk REJECTED {signal.market_id}: {', '.join(failed)}"
+            )
+        elif warnings:
+            logger.info(
+                f"Risk PASSED {signal.market_id} with warnings: {', '.join(warnings)}"
+            )
+
+        return result
+
+    def record_exit(self, market_id: str):
+        """Record a position exit for cooldown tracking."""
+        self._cooldowns[market_id] = datetime.now(timezone.utc)
+
+    def _get_min_edge(self, strategy: StrategyName) -> float:
+        """Get minimum edge threshold for a strategy."""
+        if strategy == StrategyName.AI_PROBABILITY:
+            return self.settings.trading.min_edge_ai
+        elif strategy == StrategyName.CROSS_ARB:
+            return self.settings.trading.min_edge_arb
+        elif strategy == StrategyName.OBVIOUS_NO:
+            return self.settings.trading.min_edge_obvious_no
+        else:
+            return self.settings.trading.min_edge_ai
