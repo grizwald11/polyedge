@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.config import Settings
-from src.core.gamma_client import GammaClient, parse_market
+from src.core.kalshi_client import KalshiClient
+from src.core.market_discovery import MarketDiscovery, parse_market
 from src.core.models import Market, MarketCategory, MarketToken
 from src.data.market_scanner import MarketScanner
 from src.storage.database import Database
@@ -14,18 +15,19 @@ from src.storage.database import Database
 class TestMarketScannerFilter:
     @pytest.fixture
     def scanner(self, tmp_db, settings):
-        gamma = GammaClient()
-        return MarketScanner(gamma, tmp_db, settings)
+        kalshi = KalshiClient()
+        discovery = MarketDiscovery(kalshi)
+        return MarketScanner(discovery, tmp_db, settings)
 
     def test_filters_low_volume(self, scanner, sample_market, sample_market_low_volume):
         result = scanner.filter_markets([sample_market, sample_market_low_volume])
         assert len(result) == 1
-        assert result[0].condition_id == sample_market.condition_id
+        assert result[0].ticker == sample_market.ticker
 
     def test_filters_crypto(self, scanner, sample_market, sample_market_crypto):
         result = scanner.filter_markets([sample_market, sample_market_crypto])
         assert len(result) == 1
-        assert result[0].condition_id == sample_market.condition_id
+        assert result[0].ticker == sample_market.ticker
 
     def test_filters_inactive(self, scanner, sample_market):
         inactive = sample_market.model_copy()
@@ -41,7 +43,7 @@ class TestMarketScannerFilter:
 
     def test_filters_non_binary(self, scanner):
         multi = Market(
-            condition_id="multi",
+            ticker="MULTI-001",
             question="Who wins?",
             tokens=[
                 MarketToken(token_id="a", outcome="Alice", price=0.4),
@@ -66,27 +68,26 @@ class TestMarketScannerFilter:
 class TestMarketScannerRank:
     @pytest.fixture
     def scanner(self, tmp_db, settings):
-        gamma = GammaClient()
-        return MarketScanner(gamma, tmp_db, settings)
+        kalshi = KalshiClient()
+        discovery = MarketDiscovery(kalshi)
+        return MarketScanner(discovery, tmp_db, settings)
 
     def test_ranks_by_score(self, scanner, sample_market, sample_market_politics):
-        # Both markets should be ranked, higher scored first
         ranked = scanner.rank_markets([sample_market, sample_market_politics])
         assert len(ranked) == 2
-        # Just verify both are present and ordering is deterministic
-        ids = {m.condition_id for m in ranked}
-        assert sample_market.condition_id in ids
-        assert sample_market_politics.condition_id in ids
+        ids = {m.ticker for m in ranked}
+        assert sample_market.ticker in ids
+        assert sample_market_politics.ticker in ids
 
     def test_respects_max_markets(self, scanner):
         scanner.settings.scanning.max_markets = 2
         markets = [
             Market(
-                condition_id=f"m{i}",
+                ticker=f"M-{i}",
                 question=f"Market {i}?",
                 tokens=[
-                    MarketToken(token_id=f"y{i}", outcome="Yes", price=0.5),
-                    MarketToken(token_id=f"n{i}", outcome="No", price=0.5),
+                    MarketToken(token_id=f"M-{i}_yes", outcome="Yes", price=0.5),
+                    MarketToken(token_id=f"M-{i}_no", outcome="No", price=0.5),
                 ],
                 volume_24h=float(i * 10000),
                 active=True,
@@ -104,12 +105,13 @@ class TestMarketScannerRank:
 class TestMarketScannerStore:
     @pytest.fixture
     def scanner(self, tmp_db, settings):
-        gamma = GammaClient()
-        return MarketScanner(gamma, tmp_db, settings)
+        kalshi = KalshiClient()
+        discovery = MarketDiscovery(kalshi)
+        return MarketScanner(discovery, tmp_db, settings)
 
     def test_stores_market(self, scanner, sample_market, tmp_db):
         scanner.store_markets([sample_market])
-        stored = tmp_db.get_market(sample_market.condition_id)
+        stored = tmp_db.get_market(sample_market.ticker)
         assert stored is not None
         assert stored["question"] == sample_market.question
 
@@ -120,22 +122,22 @@ class TestMarketScannerStore:
 
     def test_upsert_updates(self, scanner, sample_market, tmp_db):
         scanner.store_markets([sample_market])
-        # Update volume
         updated = sample_market.model_copy()
         updated.volume_24h = 999999.0
         scanner.store_markets([updated])
-        stored = tmp_db.get_market(sample_market.condition_id)
+        stored = tmp_db.get_market(sample_market.ticker)
         assert stored["volume_24h"] == 999999.0
 
 
 class TestMarketScannerFullCycle:
     @pytest.mark.asyncio
-    async def test_run_scan_cycle(self, tmp_db, settings, gamma_markets_response):
-        gamma = GammaClient()
-        scanner = MarketScanner(gamma, tmp_db, settings)
+    async def test_run_scan_cycle(self, tmp_db, settings, kalshi_markets_response):
+        kalshi = KalshiClient()
+        discovery = MarketDiscovery(kalshi)
+        scanner = MarketScanner(discovery, tmp_db, settings)
 
-        # Mock the gamma client to return our test data
-        scanner.gamma.get_all_active_markets = AsyncMock(return_value=gamma_markets_response)
+        # Mock the discovery to return our test data
+        discovery.get_all_active_markets = AsyncMock(return_value=kalshi_markets_response)
 
         markets = await scanner.run_scan_cycle()
 

@@ -1,35 +1,36 @@
 """Market scanner — discovers, filters, ranks, and stores qualifying markets.
 
 Runs on a configurable interval (default 5 minutes). Fetches all active markets
-from the Gamma API, applies volume/liquidity/category filters, ranks by
+from Kalshi, applies volume/liquidity/category filters, ranks by
 opportunity score, and persists to the database.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
 from src.config import Settings
-from src.core.gamma_client import GammaClient, parse_market
-from src.core.models import Market, MarketCategory, MarketSnapshot
+from src.core.market_discovery import MarketDiscovery, parse_market
+from src.core.models import Market, MarketCategory, MarketSnapshot, kalshi_taker_fee, dollars_to_cents
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
 
 class MarketScanner:
-    """Scans Polymarket for qualifying trading opportunities."""
+    """Scans Kalshi for qualifying trading opportunities."""
 
-    def __init__(self, gamma: GammaClient, db: Database, settings: Settings):
-        self.gamma = gamma
+    def __init__(self, discovery: MarketDiscovery, db: Database, settings: Settings):
+        self.discovery = discovery
         self.db = db
         self.settings = settings
 
     async def scan_all_markets(self) -> list[Market]:
-        """Fetch all active markets from Gamma API and parse into models."""
-        raw_markets = await self.gamma.get_all_active_markets()
+        """Fetch all active markets from Kalshi API and parse into models."""
+        raw_markets = await self.discovery.get_all_active_markets()
         markets = []
         for raw in raw_markets:
             market = parse_market(raw)
@@ -97,6 +98,7 @@ class MarketScanner:
         - Spread: wider spread = more potential edge (but also more risk)
         - Time to resolution: moderate time horizons preferred (7-90 days)
         - Category priority: target categories get a boost
+        - Fee-adjusted: factor in Kalshi fees when scoring
         """
         scored = []
         target_cats = set(self.settings.scanning.target_categories)
@@ -106,7 +108,6 @@ class MarketScanner:
 
             # Volume score (log-scaled, normalized to 0-40 range)
             if m.volume_24h > 0:
-                import math
                 score += min(40, math.log10(m.volume_24h) * 10)
 
             # Spread score (wider spread = more potential mispricing, 0-20 range)
@@ -144,6 +145,14 @@ class MarketScanner:
             elif 0.10 <= mid_price <= 0.90:
                 score += 5  # Some edge potential
 
+            # Fee penalty: higher fees at mid-prices reduce attractiveness
+            # Kalshi taker fee = ceil(0.07 * contracts * p * (1-p))
+            # At p=0.50: fee ~= 1.75 cents per contract
+            # At p=0.90: fee ~= 0.63 cents per contract
+            if mid_price > 0:
+                fee_per_contract = 0.07 * mid_price * (1 - mid_price)
+                score -= fee_per_contract * 20  # Small penalty
+
             scored.append((score, m))
 
         # Sort by score descending
@@ -170,7 +179,7 @@ class MarketScanner:
 
                 # Log snapshot
                 snapshot = MarketSnapshot(
-                    market_id=m.condition_id,
+                    market_id=m.ticker,
                     timestamp=now,
                     yes_price=m.yes_price,
                     no_price=m.no_price,
@@ -181,7 +190,7 @@ class MarketScanner:
                 self.db.log_snapshot(snapshot)
                 stored += 1
             except Exception as e:
-                logger.warning(f"Failed to store market {m.condition_id}: {e}")
+                logger.warning(f"Failed to store market {m.ticker}: {e}")
 
         logger.info(f"Stored {stored}/{len(markets)} markets with snapshots")
 

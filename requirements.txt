@@ -1,8 +1,11 @@
-# PolyEdge - Polymarket Trading Bot
+# PolyEdge - Kalshi Trading Bot
 # Phase 1: Core + Scanner
 
-# Polymarket SDK
-py-clob-client>=0.34.0
+# Kalshi SDK
+kalshi-python>=2.1.0
+
+# RSA signing for Kalshi API auth
+cryptography>=42.0
 
 # AI
 anthropic>=0.40.0

@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 
 from src.config import load_settings
-from src.core.gamma_client import GammaClient
-from src.core.polymarket_client import PolymarketClient
+from src.core.kalshi_client import KalshiClient
+from src.core.market_discovery import MarketDiscovery
 from src.data.market_scanner import MarketScanner
 from src.storage.database import Database
 
@@ -82,38 +82,36 @@ async def main():
     logger.info(f"  Bankroll: ${settings.trading.bankroll:,.2f}")
     logger.info(f"  Scan interval: {settings.scanning.interval_seconds}s")
     logger.info(f"  Min volume: ${settings.scanning.min_volume_24h:,.0f}")
+    logger.info(f"  Kalshi API: {settings.kalshi.active_host}")
     logger.info("=" * 60)
 
     # Initialize components
     db = Database(settings.database.path, settings.database.wal_mode)
-    gamma = GammaClient(settings.polymarket.gamma_host)
 
-    # Initialize CLOB client (may not have credentials in Phase 1)
-    clob = PolymarketClient(
-        host=settings.polymarket.clob_host,
-        chain_id=settings.polymarket.chain_id,
-        private_key=settings.private_key,
-        funder=settings.funder_address,
-        signature_type=settings.polymarket.signature_type,
+    kalshi = KalshiClient(
+        host=settings.kalshi.active_host,
+        api_key_id=settings.kalshi_api_key_id,
+        private_key_path=settings.kalshi_private_key_path,
     )
 
-    # Check CLOB health
-    healthy = await clob.health_check()
+    # Check Kalshi API health
+    healthy = await kalshi.health_check()
     if healthy:
-        logger.info("CLOB API: healthy")
+        logger.info("Kalshi API: healthy")
     else:
-        logger.warning("CLOB API: unreachable (continuing with Gamma API only)")
+        logger.warning("Kalshi API: unreachable (continuing in offline mode)")
 
     # Check balance if authenticated
-    if settings.private_key:
-        balance = await clob.get_balance()
+    if settings.kalshi_api_key_id and settings.kalshi_private_key_path:
+        balance = await kalshi.get_balance()
         if balance is not None:
-            logger.info(f"Wallet balance: ${balance:,.2f} USDC")
+            logger.info(f"Account balance: ${balance:,.2f}")
         else:
             logger.warning("Could not fetch balance (auth may not be configured)")
 
-    # Create scanner
-    scanner = MarketScanner(gamma, db, settings)
+    # Create discovery and scanner
+    discovery = MarketDiscovery(kalshi)
+    scanner = MarketScanner(discovery, db, settings)
 
     # Run initial scan
     logger.info("Running initial market scan...")
@@ -139,7 +137,7 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")
     finally:
-        await gamma.close()
+        await discovery.close()
         logger.info("PolyEdge stopped.")
 
 

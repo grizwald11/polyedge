@@ -6,12 +6,51 @@ from src.core.models import (
     Market, MarketToken, MarketCategory, Signal, StrategyName, Direction,
     Order, Side, OrderType, OrderStatus, CalibrationRecord, ForecastResult,
     RiskCheckResult, Position, MarketSnapshot,
+    cents_to_dollars, dollars_to_cents, kalshi_taker_fee, kalshi_maker_fee,
 )
+
+
+class TestPriceConversion:
+    def test_cents_to_dollars(self):
+        assert cents_to_dollars(50) == 0.50
+        assert cents_to_dollars(1) == 0.01
+        assert cents_to_dollars(99) == 0.99
+
+    def test_dollars_to_cents(self):
+        assert dollars_to_cents(0.50) == 50
+        assert dollars_to_cents(0.01) == 1
+        assert dollars_to_cents(0.99) == 99
+
+    def test_roundtrip(self):
+        for c in [1, 25, 50, 75, 99]:
+            assert dollars_to_cents(cents_to_dollars(c)) == c
+
+
+class TestFeeCalculation:
+    def test_taker_fee_midprice(self):
+        # At 50 cents, 1 contract: ceil(0.07 * 1 * 0.50 * 0.50) = ceil(0.0175) = 1
+        fee = kalshi_taker_fee(1, 50)
+        assert fee == 1
+
+    def test_taker_fee_extreme_price(self):
+        # At 90 cents, 1 contract: ceil(0.07 * 1 * 0.90 * 0.10) = ceil(0.0063) = 1
+        fee = kalshi_taker_fee(1, 90)
+        assert fee == 1
+
+    def test_taker_fee_multiple_contracts(self):
+        # At 50 cents, 10 contracts: ceil(0.07 * 10 * 0.50 * 0.50) = ceil(0.175) = 1
+        fee = kalshi_taker_fee(10, 50)
+        assert fee == 1
+
+    def test_maker_fee(self):
+        # At 50 cents, 10 contracts: ceil(0.0175 * 10 * 0.50 * 0.50) = ceil(0.04375) = 1
+        fee = kalshi_maker_fee(10, 50)
+        assert fee == 1
 
 
 class TestMarketModel:
     def test_basic_construction(self, sample_market):
-        assert sample_market.condition_id == "0xabc123def456"
+        assert sample_market.ticker == "FED-RATE-CUT-MAY26"
         assert sample_market.category == MarketCategory.FED_MACRO
         assert sample_market.active is True
         assert len(sample_market.tokens) == 2
@@ -35,12 +74,12 @@ class TestMarketModel:
         assert 44 <= days <= 46  # ~45 days
 
     def test_days_to_resolution_none(self):
-        m = Market(condition_id="x", question="test")
+        m = Market(ticker="x", question="test")
         assert m.days_to_resolution is None
 
     def test_non_binary_market(self):
         m = Market(
-            condition_id="x",
+            ticker="x",
             question="Who wins?",
             tokens=[
                 MarketToken(token_id="a", outcome="Alice", price=0.4),
@@ -51,7 +90,7 @@ class TestMarketModel:
         assert m.is_binary is False
 
     def test_empty_tokens(self):
-        m = Market(condition_id="x", question="test")
+        m = Market(ticker="x", question="test")
         assert m.yes_token is None
         assert m.no_token is None
         assert m.yes_price == 0.0

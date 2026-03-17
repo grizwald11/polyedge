@@ -17,12 +17,12 @@ from src.core.models import Market, MarketSnapshot, Signal, Order, Trade, Calibr
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
--- Markets
+-- Markets (Kalshi uses ticker as primary key)
 CREATE TABLE IF NOT EXISTS markets (
-    condition_id TEXT PRIMARY KEY,
+    ticker TEXT PRIMARY KEY,
     question TEXT NOT NULL,
     description TEXT DEFAULT '',
     category TEXT DEFAULT 'Other',
@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS markets (
     closed INTEGER DEFAULT 0,
     resolution_source TEXT DEFAULT '',
     slug TEXT DEFAULT '',
-    neg_risk INTEGER DEFAULT 0,
-    event_slug TEXT DEFAULT '',
+    subtitle TEXT DEFAULT '',
+    event_ticker TEXT DEFAULT '',
     first_seen TEXT NOT NULL,
     last_updated TEXT NOT NULL
 );
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     spread REAL DEFAULT 0,
     volume_1h REAL DEFAULT 0,
     liquidity REAL DEFAULT 0,
-    FOREIGN KEY (market_id) REFERENCES markets(condition_id)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_market_time ON market_snapshots(market_id, timestamp);
 
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS signals (
     timestamp TEXT NOT NULL,
     acted_on INTEGER DEFAULT 0,
     order_id TEXT,
-    FOREIGN KEY (market_id) REFERENCES markets(condition_id)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_signals_market ON signals(market_id);
 CREATE INDEX IF NOT EXISTS idx_signals_strategy ON signals(strategy);
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS orders (
     fill_price REAL,
     cancelled_at TEXT,
     rejection_reason TEXT,
-    FOREIGN KEY (market_id) REFERENCES markets(condition_id)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_orders_market ON orders(market_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS calibration_records (
     actual_outcome INTEGER,  -- NULL = unresolved, 1 = YES, 0 = NO
     predicted_at TEXT NOT NULL,
     resolved_at TEXT,
-    FOREIGN KEY (market_id) REFERENCES markets(condition_id)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_market ON calibration_records(market_id);
 CREATE INDEX IF NOT EXISTS idx_calibration_resolved ON calibration_records(actual_outcome);
@@ -201,12 +201,12 @@ class Database:
         try:
             conn.execute("""
                 INSERT INTO markets (
-                    condition_id, question, description, category, tags, tokens,
+                    ticker, question, description, category, tags, tokens,
                     end_date, volume_24h, volume_total, liquidity, spread,
-                    active, closed, resolution_source, slug, neg_risk, event_slug,
+                    active, closed, resolution_source, slug, subtitle, event_ticker,
                     first_seen, last_updated
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(condition_id) DO UPDATE SET
+                ON CONFLICT(ticker) DO UPDATE SET
                     question=excluded.question,
                     description=excluded.description,
                     category=excluded.category,
@@ -222,7 +222,7 @@ class Database:
                     resolution_source=excluded.resolution_source,
                     last_updated=excluded.last_updated
             """, (
-                market.condition_id,
+                market.ticker,
                 market.question,
                 market.description,
                 market.category.value,
@@ -237,8 +237,8 @@ class Database:
                 int(market.closed),
                 market.resolution_source,
                 market.slug,
-                int(market.neg_risk),
-                market.event_slug,
+                market.subtitle,
+                market.event_ticker,
                 now,
                 now,
             ))
@@ -262,12 +262,12 @@ class Database:
         finally:
             conn.close()
 
-    def get_market(self, condition_id: str) -> Optional[dict]:
-        """Get a single market by condition ID."""
+    def get_market(self, ticker: str) -> Optional[dict]:
+        """Get a single market by ticker."""
         conn = self._get_conn()
         try:
             row = conn.execute(
-                "SELECT * FROM markets WHERE condition_id=?", (condition_id,)
+                "SELECT * FROM markets WHERE ticker=?", (ticker,)
             ).fetchone()
             return dict(row) if row else None
         finally:

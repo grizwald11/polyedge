@@ -2,15 +2,50 @@
 
 All data flowing through PolyEdge is typed through these models.
 Models are designed for Phase 1 but include fields needed by later phases.
+
+Kalshi prices are in cents (1-99). We store prices in dollars (0.01-0.99)
+internally for consistency. Use cents_to_dollars() and dollars_to_cents()
+for conversion at the API boundary.
 """
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+
+# ──────────────────────────────────────────────
+# Price Conversion Helpers
+# ──────────────────────────────────────────────
+
+def cents_to_dollars(cents: int | float) -> float:
+    """Convert Kalshi cents (1-99) to dollars (0.01-0.99)."""
+    return float(cents) / 100.0
+
+
+def dollars_to_cents(dollars: float) -> int:
+    """Convert dollars (0.01-0.99) to Kalshi cents (1-99)."""
+    return int(round(dollars * 100))
+
+
+# ──────────────────────────────────────────────
+# Fee Calculation Helpers
+# ──────────────────────────────────────────────
+
+def kalshi_taker_fee(contracts: int, price_cents: int) -> float:
+    """Calculate Kalshi taker fee in cents. Formula: ceil(0.07 * contracts * price * (1-price))."""
+    p = price_cents / 100.0
+    return math.ceil(0.07 * contracts * p * (1 - p))
+
+
+def kalshi_maker_fee(contracts: int, price_cents: int) -> float:
+    """Calculate Kalshi maker fee in cents. Formula: ceil(0.0175 * contracts * price * (1-price))."""
+    p = price_cents / 100.0
+    return math.ceil(0.0175 * contracts * p * (1 - p))
 
 
 # ──────────────────────────────────────────────
@@ -78,13 +113,13 @@ class MarketToken(BaseModel):
     """A single outcome token (YES or NO) within a market."""
     token_id: str
     outcome: str  # "Yes" or "No"
-    price: float = 0.0
+    price: float = 0.0  # In dollars (0.01-0.99)
     winner: Optional[bool] = None
 
 
 class Market(BaseModel):
-    """A single prediction market from Polymarket."""
-    condition_id: str
+    """A single prediction market from Kalshi."""
+    ticker: str
     question: str
     description: str = ""
     category: MarketCategory = MarketCategory.OTHER
@@ -99,9 +134,10 @@ class Market(BaseModel):
     closed: bool = False
     resolution_source: str = ""
     slug: str = ""
-    image: str = ""
-    neg_risk: bool = False
-    event_slug: str = ""
+    subtitle: str = ""
+    event_ticker: str = ""
+    result: str = ""
+    status: str = ""
 
     # Convenience properties
     @property
@@ -186,13 +222,13 @@ class Signal(BaseModel):
 # ──────────────────────────────────────────────
 
 class Order(BaseModel):
-    """An order placed on Polymarket."""
+    """An order placed on Kalshi."""
     id: Optional[str] = None
     market_id: str
     token_id: str
     side: Side
     price: float
-    size: float  # Number of shares
+    size: float  # Number of contracts
     cost: float = 0.0  # price * size
     order_type: OrderType = OrderType.GTC
     fee_rate_bps: int = 0
@@ -213,7 +249,7 @@ class Position(BaseModel):
     market_question: str = ""
     token_id: str
     direction: Direction
-    size: float  # Shares held
+    size: float  # Contracts held
     avg_entry_price: float
     current_price: float = 0.0
     unrealized_pnl: float = 0.0

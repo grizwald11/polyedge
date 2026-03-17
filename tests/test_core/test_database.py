@@ -25,7 +25,7 @@ class TestDatabaseInit:
 class TestMarketOperations:
     def test_upsert_and_get(self, tmp_db, sample_market):
         tmp_db.upsert_market(sample_market)
-        stored = tmp_db.get_market(sample_market.condition_id)
+        stored = tmp_db.get_market(sample_market.ticker)
         assert stored is not None
         assert stored["question"] == sample_market.question
         assert stored["category"] == "Fed/Macro"
@@ -35,7 +35,7 @@ class TestMarketOperations:
         updated = sample_market.model_copy()
         updated.volume_24h = 250000.0
         tmp_db.upsert_market(updated)
-        stored = tmp_db.get_market(sample_market.condition_id)
+        stored = tmp_db.get_market(sample_market.ticker)
         assert stored["volume_24h"] == 250000.0
 
     def test_get_active_markets(self, tmp_db, sample_market, sample_market_politics):
@@ -58,7 +58,7 @@ class TestSnapshotOperations:
     def test_log_snapshot(self, tmp_db, sample_market):
         tmp_db.upsert_market(sample_market)
         snapshot = MarketSnapshot(
-            market_id=sample_market.condition_id,
+            market_id=sample_market.ticker,
             yes_price=0.34,
             no_price=0.66,
             spread=0.02,
@@ -82,7 +82,7 @@ class TestSignalOperations:
         tmp_db.log_signal(sample_signal)
         s2 = sample_signal.model_copy()
         s2.edge = 0.12
-        s2.market_id = sample_market.condition_id  # Same market (FK)
+        s2.market_id = sample_market.ticker  # Same market (FK)
         tmp_db.log_signal(s2)
         signals = tmp_db.get_recent_signals()
         assert len(signals) == 2
@@ -92,16 +92,16 @@ class TestTradeOperations:
     def _insert_prereqs(self, tmp_db):
         """Insert prerequisite market for FK constraints."""
         from src.core.models import Market, MarketToken, MarketCategory
-        m = Market(condition_id="mkt_001", question="Test?", category=MarketCategory.OTHER,
-                   tokens=[MarketToken(token_id="tok_001", outcome="Yes", price=0.5)],
+        m = Market(ticker="MKT-001", question="Test?", category=MarketCategory.OTHER,
+                   tokens=[MarketToken(token_id="MKT-001_yes", outcome="Yes", price=0.5)],
                    volume_24h=50000, active=True)
         tmp_db.upsert_market(m)
 
     def _insert_prereqs_multi(self, tmp_db):
         from src.core.models import Market, MarketToken, MarketCategory
-        for mid in ["m1", "m2"]:
-            m = Market(condition_id=mid, question=f"Test {mid}?", category=MarketCategory.OTHER,
-                       tokens=[MarketToken(token_id=f"t_{mid}", outcome="Yes", price=0.5)],
+        for mid in ["M1", "M2"]:
+            m = Market(ticker=mid, question=f"Test {mid}?", category=MarketCategory.OTHER,
+                       tokens=[MarketToken(token_id=f"{mid}_yes", outcome="Yes", price=0.5)],
                        volume_24h=50000, active=True)
             tmp_db.upsert_market(m)
 
@@ -109,8 +109,8 @@ class TestTradeOperations:
         self._insert_prereqs(tmp_db)
         trade = Trade(
             order_id="ord_001",
-            market_id="mkt_001",
-            token_id="tok_001",
+            market_id="MKT-001",
+            token_id="MKT-001_yes",
             side=Side.BUY,
             price=0.34,
             size=50.0,
@@ -125,12 +125,12 @@ class TestTradeOperations:
     def test_daily_pnl(self, tmp_db):
         self._insert_prereqs_multi(tmp_db)
         t1 = Trade(
-            order_id="o1", market_id="m1", token_id="t1",
+            order_id="o1", market_id="M1", token_id="M1_yes",
             side=Side.BUY, price=0.34, size=50,
             realized_pnl=5.0, strategy=StrategyName.AI_PROBABILITY,
         )
         t2 = Trade(
-            order_id="o2", market_id="m2", token_id="t2",
+            order_id="o2", market_id="M2", token_id="M2_yes",
             side=Side.BUY, price=0.50, size=30,
             realized_pnl=-3.0, strategy=StrategyName.AI_PROBABILITY,
         )
@@ -142,7 +142,7 @@ class TestTradeOperations:
     def test_trades_today(self, tmp_db):
         self._insert_prereqs_multi(tmp_db)
         trade = Trade(
-            order_id="o1", market_id="m1", token_id="t1",
+            order_id="o1", market_id="M1", token_id="M1_yes",
             side=Side.BUY, price=0.40, size=25,
             strategy=StrategyName.OBVIOUS_NO,
         )
@@ -154,15 +154,15 @@ class TestTradeOperations:
 class TestCalibrationOperations:
     def _insert_market(self, tmp_db, mid):
         from src.core.models import Market, MarketToken, MarketCategory
-        m = Market(condition_id=mid, question=f"Test {mid}?", category=MarketCategory.OTHER,
-                   tokens=[MarketToken(token_id=f"t_{mid}", outcome="Yes", price=0.5)],
+        m = Market(ticker=mid, question=f"Test {mid}?", category=MarketCategory.OTHER,
+                   tokens=[MarketToken(token_id=f"{mid}_yes", outcome="Yes", price=0.5)],
                    volume_24h=50000, active=True)
         tmp_db.upsert_market(m)
 
     def test_log_calibration(self, tmp_db):
-        self._insert_market(tmp_db, "m1")
+        self._insert_market(tmp_db, "M1")
         record = CalibrationRecord(
-            market_id="m1",
+            market_id="M1",
             market_question="Will X happen?",
             predicted_probability=0.65,
             market_price_at_prediction=0.50,
@@ -171,15 +171,15 @@ class TestCalibrationOperations:
         assert row_id > 0
 
     def test_unresolved_predictions(self, tmp_db):
-        self._insert_market(tmp_db, "m1")
-        self._insert_market(tmp_db, "m2")
+        self._insert_market(tmp_db, "M1")
+        self._insert_market(tmp_db, "M2")
         r1 = CalibrationRecord(
-            market_id="m1",
+            market_id="M1",
             predicted_probability=0.65,
             market_price_at_prediction=0.50,
         )
         r2 = CalibrationRecord(
-            market_id="m2",
+            market_id="M2",
             predicted_probability=0.30,
             market_price_at_prediction=0.40,
             actual_outcome=False,
@@ -189,7 +189,7 @@ class TestCalibrationOperations:
         tmp_db.log_calibration(r2)
         unresolved = tmp_db.get_unresolved_predictions()
         assert len(unresolved) == 1
-        assert unresolved[0]["market_id"] == "m1"
+        assert unresolved[0]["market_id"] == "M1"
 
 
 class TestStats:
@@ -204,19 +204,19 @@ class TestStats:
         tmp_db.log_signal(sample_signal)
         # Insert market for trade FK
         from src.core.models import Market, MarketToken, MarketCategory
-        m = Market(condition_id="m1", question="Test?", category=MarketCategory.OTHER,
-                   tokens=[MarketToken(token_id="t1", outcome="Yes", price=0.5)],
+        m = Market(ticker="M1", question="Test?", category=MarketCategory.OTHER,
+                   tokens=[MarketToken(token_id="M1_yes", outcome="Yes", price=0.5)],
                    volume_24h=50000, active=True)
         tmp_db.upsert_market(m)
         trade = Trade(
-            order_id="o1", market_id="m1", token_id="t1",
+            order_id="o1", market_id="M1", token_id="M1_yes",
             side=Side.BUY, price=0.40, size=25,
             realized_pnl=8.50,
             strategy=StrategyName.AI_PROBABILITY,
         )
         tmp_db.log_trade(trade)
         stats = tmp_db.get_stats()
-        assert stats["active_markets"] == 2  # sample_market + m1
+        assert stats["active_markets"] == 2  # sample_market + M1
         assert stats["total_signals"] == 1
         assert stats["total_trades"] == 1
         assert abs(stats["total_pnl"] - 8.50) < 0.01

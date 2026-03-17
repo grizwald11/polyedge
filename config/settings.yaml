@@ -1,9 +1,7 @@
-polymarket:
-  clob_host: "https://clob.polymarket.com"
-  gamma_host: "https://gamma-api.polymarket.com"
-  data_host: "https://data-api.polymarket.com"
-  chain_id: 137
-  signature_type: 1  # 0 for EOA, 1 for proxy/email wallet
+kalshi:
+  host: "https://api.elections.kalshi.com/trade-api/v2"
+  demo_host: "https://demo-api.kalshi.co/trade-api/v2"
+  use_demo: true
 
 scanning:
   interval_seconds: 300  # 5 minutes

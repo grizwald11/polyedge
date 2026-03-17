@@ -10,12 +10,14 @@ import yaml
 from pydantic import BaseModel, Field
 
 
-class PolymarketConfig(BaseModel):
-    clob_host: str = "https://clob.polymarket.com"
-    gamma_host: str = "https://gamma-api.polymarket.com"
-    data_host: str = "https://data-api.polymarket.com"
-    chain_id: int = 137
-    signature_type: int = 1
+class KalshiConfig(BaseModel):
+    host: str = "https://api.elections.kalshi.com/trade-api/v2"
+    demo_host: str = "https://demo-api.kalshi.co/trade-api/v2"
+    use_demo: bool = True
+
+    @property
+    def active_host(self) -> str:
+        return self.demo_host if self.use_demo else self.host
 
 
 class ScanningConfig(BaseModel):
@@ -70,7 +72,7 @@ class LoggingConfig(BaseModel):
 class Settings(BaseModel):
     """Root settings model — all configuration flows through here."""
 
-    polymarket: PolymarketConfig = Field(default_factory=PolymarketConfig)
+    kalshi: KalshiConfig = Field(default_factory=KalshiConfig)
     scanning: ScanningConfig = Field(default_factory=ScanningConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
@@ -79,8 +81,8 @@ class Settings(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     # Secrets loaded from environment
-    private_key: Optional[str] = None
-    funder_address: Optional[str] = None
+    kalshi_api_key_id: Optional[str] = None
+    kalshi_private_key_path: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     live_enabled: bool = False
 
@@ -99,8 +101,8 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     settings = Settings(**yaml_data)
 
     # Overlay secrets from environment
-    settings.private_key = os.environ.get("PRIVATE_KEY")
-    settings.funder_address = os.environ.get("FUNDER_ADDRESS")
+    settings.kalshi_api_key_id = os.environ.get("KALSHI_API_KEY_ID")
+    settings.kalshi_private_key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
     settings.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     settings.live_enabled = os.environ.get("POLYEDGE_LIVE_ENABLED", "false").lower() == "true"
 

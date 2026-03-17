@@ -36,14 +36,14 @@ def tmp_db(tmp_path) -> Database:
 def sample_market() -> Market:
     """A sample binary market for testing."""
     return Market(
-        condition_id="0xabc123def456",
+        ticker="FED-RATE-CUT-MAY26",
         question="Will the Federal Reserve cut rates at the May 2026 meeting?",
         description="Resolves YES if the FOMC announces a rate cut at the May 2026 meeting.",
         category=MarketCategory.FED_MACRO,
         tags=["Fed", "Interest Rates", "FOMC"],
         tokens=[
-            MarketToken(token_id="tok_yes_001", outcome="Yes", price=0.34),
-            MarketToken(token_id="tok_no_001", outcome="No", price=0.66),
+            MarketToken(token_id="FED-RATE-CUT-MAY26_yes", outcome="Yes", price=0.34),
+            MarketToken(token_id="FED-RATE-CUT-MAY26_no", outcome="No", price=0.66),
         ],
         end_date=datetime.now(timezone.utc) + timedelta(days=45),
         volume_24h=125000.0,
@@ -53,7 +53,7 @@ def sample_market() -> Market:
         active=True,
         closed=False,
         resolution_source="https://federalreserve.gov",
-        slug="will-fed-cut-rates-may-2026",
+        slug="FED-RATE-CUT-MAY26",
     )
 
 
@@ -61,14 +61,14 @@ def sample_market() -> Market:
 def sample_market_politics() -> Market:
     """A politics market for testing."""
     return Market(
-        condition_id="0xpol_market_001",
+        ticker="TRUMP-GOP-2028",
         question="Will Trump win the 2028 Republican primary?",
         description="Resolves YES if Trump wins the 2028 GOP presidential primary.",
         category=MarketCategory.POLITICS,
         tags=["Politics", "Elections", "Trump", "Primaries"],
         tokens=[
-            MarketToken(token_id="tok_yes_pol", outcome="Yes", price=0.55),
-            MarketToken(token_id="tok_no_pol", outcome="No", price=0.45),
+            MarketToken(token_id="TRUMP-GOP-2028_yes", outcome="Yes", price=0.55),
+            MarketToken(token_id="TRUMP-GOP-2028_no", outcome="No", price=0.45),
         ],
         end_date=datetime.now(timezone.utc) + timedelta(days=200),
         volume_24h=500000.0,
@@ -83,14 +83,14 @@ def sample_market_politics() -> Market:
 def sample_market_low_volume() -> Market:
     """A low-volume market that should be filtered out."""
     return Market(
-        condition_id="0xlow_vol_001",
+        ticker="ALIENS-2026",
         question="Will aliens contact Earth in 2026?",
         description="Resolves YES if verified alien contact occurs.",
         category=MarketCategory.OTHER,
         tags=["Culture"],
         tokens=[
-            MarketToken(token_id="tok_yes_low", outcome="Yes", price=0.03),
-            MarketToken(token_id="tok_no_low", outcome="No", price=0.97),
+            MarketToken(token_id="ALIENS-2026_yes", outcome="Yes", price=0.03),
+            MarketToken(token_id="ALIENS-2026_no", outcome="No", price=0.97),
         ],
         end_date=datetime.now(timezone.utc) + timedelta(days=300),
         volume_24h=500.0,  # Below min threshold
@@ -104,13 +104,13 @@ def sample_market_low_volume() -> Market:
 def sample_market_crypto() -> Market:
     """A crypto price market that should be excluded."""
     return Market(
-        condition_id="0xcrypto_001",
+        ticker="BTC-15MIN",
         question="Bitcoin up or down in 15 minutes?",
         category=MarketCategory.CRYPTO,
         tags=["Crypto Prices", "BTC"],
         tokens=[
-            MarketToken(token_id="tok_yes_btc", outcome="Yes", price=0.50),
-            MarketToken(token_id="tok_no_btc", outcome="No", price=0.50),
+            MarketToken(token_id="BTC-15MIN_yes", outcome="Yes", price=0.50),
+            MarketToken(token_id="BTC-15MIN_no", outcome="No", price=0.50),
         ],
         volume_24h=1000000.0,
         active=True,
@@ -122,7 +122,7 @@ def sample_signal(sample_market) -> Signal:
     """A sample trading signal."""
     return Signal(
         strategy=StrategyName.AI_PROBABILITY,
-        market_id=sample_market.condition_id,
+        market_id=sample_market.ticker,
         market_question=sample_market.question,
         direction=Direction.BUY_YES,
         edge=0.08,
@@ -151,69 +151,72 @@ def sample_forecast() -> ForecastResult:
 
 
 # ──────────────────────────────────────
-# Gamma API mock response fixtures
+# Kalshi API mock response fixtures
 # ──────────────────────────────────────
 
 @pytest.fixture
-def gamma_market_response() -> dict:
-    """Raw Gamma API market response for mocking."""
+def kalshi_market_response() -> dict:
+    """Raw Kalshi API market response for mocking."""
     return {
-        "conditionId": "0xabc123def456",
-        "question": "Will the Federal Reserve cut rates at the May 2026 meeting?",
-        "description": "Resolves YES if the FOMC announces a rate cut.",
-        "tags": ["Fed", "Interest Rates"],
-        "clobTokenIds": '["tok_yes_001", "tok_no_001"]',
-        "outcomes": '["Yes", "No"]',
-        "outcomePrices": '["0.34", "0.66"]',
-        "endDate": (datetime.now(timezone.utc) + timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "volume24hr": "125000",
-        "volume": "3500000",
-        "liquidity": "45000",
-        "spread": "0.02",
-        "active": True,
-        "closed": False,
-        "resolutionSource": "https://federalreserve.gov",
-        "slug": "will-fed-cut-rates-may-2026",
-        "negRisk": False,
-        "eventSlug": "fed-may-2026",
+        "ticker": "FED-RATE-CUT-MAY26",
+        "title": "Will the Federal Reserve cut rates at the May 2026 meeting?",
+        "subtitle": "FOMC rate decision",
+        "category": "Economics",
+        "rules_primary": "Resolves YES if the FOMC announces a rate cut.",
+        "yes_bid": 33,
+        "yes_ask": 35,
+        "no_bid": 65,
+        "no_ask": 67,
+        "last_price": 34,
+        "volume_24h": 125000,
+        "volume": 3500000,
+        "open_interest": 45000,
+        "close_time": (datetime.now(timezone.utc) + timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": "open",
+        "result": "",
+        "event_ticker": "FED-MAY-2026",
+        "settlement_source_url": "https://federalreserve.gov",
     }
 
 
 @pytest.fixture
-def gamma_markets_response(gamma_market_response) -> list[dict]:
-    """Multiple Gamma API market responses."""
+def kalshi_markets_response(kalshi_market_response) -> list[dict]:
+    """Multiple Kalshi API market responses."""
     politics = {
-        "conditionId": "0xpol_001",
-        "question": "Will Trump be the Republican nominee in 2028?",
-        "tags": ["Politics", "Elections"],
-        "clobTokenIds": '["tok_y_p", "tok_n_p"]',
-        "outcomes": '["Yes", "No"]',
-        "outcomePrices": '["0.55", "0.45"]',
-        "volume24hr": "500000",
-        "volume": "15000000",
-        "active": True,
-        "closed": False,
+        "ticker": "TRUMP-GOP-2028",
+        "title": "Will Trump be the Republican nominee in 2028?",
+        "subtitle": "GOP primary",
+        "category": "Politics",
+        "yes_bid": 54,
+        "yes_ask": 56,
+        "last_price": 55,
+        "volume_24h": 500000,
+        "volume": 15000000,
+        "status": "open",
+        "result": "",
     }
     low_vol = {
-        "conditionId": "0xlow_001",
-        "question": "Will aliens make contact in 2026?",
-        "tags": ["Culture"],
-        "clobTokenIds": '["tok_y_l", "tok_n_l"]',
-        "outcomes": '["Yes", "No"]',
-        "outcomePrices": '["0.03", "0.97"]',
-        "volume24hr": "500",
-        "active": True,
-        "closed": False,
+        "ticker": "ALIENS-2026",
+        "title": "Will aliens make contact in 2026?",
+        "subtitle": "",
+        "category": "Science",
+        "yes_bid": 2,
+        "yes_ask": 4,
+        "last_price": 3,
+        "volume_24h": 500,
+        "status": "open",
+        "result": "",
     }
     crypto = {
-        "conditionId": "0xcrypto_001",
-        "question": "Bitcoin up or down in 15 minutes?",
-        "tags": ["Crypto Prices", "BTC"],
-        "clobTokenIds": '["tok_y_c", "tok_n_c"]',
-        "outcomes": '["Yes", "No"]',
-        "outcomePrices": '["0.50", "0.50"]',
-        "volume24hr": "1000000",
-        "active": True,
-        "closed": False,
+        "ticker": "BTC-15MIN",
+        "title": "Bitcoin up or down in 15 minutes?",
+        "subtitle": "",
+        "category": "Crypto",
+        "yes_bid": 49,
+        "yes_ask": 51,
+        "last_price": 50,
+        "volume_24h": 1000000,
+        "status": "open",
+        "result": "",
     }
-    return [gamma_market_response, politics, low_vol, crypto]
+    return [kalshi_market_response, politics, low_vol, crypto]
