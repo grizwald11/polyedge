@@ -172,6 +172,42 @@ class TestCalculatePositionSize:
             f"+ fee ${fee_dollars:.2f} = ${total:.2f} exceeds cap ${max_position:.2f}"
         )
 
+class TestCalibrationMultiplier:
+    def test_default_multiplier_is_one(self, sizer):
+        assert sizer.calibration_multiplier == 1.0
+
+    def test_excellent_brier_keeps_full_sizing(self, sizer):
+        sizer.update_calibration_multiplier(0.08)
+        assert sizer.calibration_multiplier == 1.0
+
+    def test_fair_brier_reduces_to_75(self, sizer):
+        sizer.update_calibration_multiplier(0.25)
+        assert sizer.calibration_multiplier == 0.75
+
+    def test_poor_brier_reduces_to_50(self, sizer):
+        sizer.update_calibration_multiplier(0.35)
+        assert sizer.calibration_multiplier == 0.50
+
+    def test_terrible_brier_reduces_to_25(self, sizer):
+        sizer.update_calibration_multiplier(0.50)
+        assert sizer.calibration_multiplier == 0.25
+
+    def test_none_brier_resets_to_full(self, sizer):
+        sizer.update_calibration_multiplier(0.50)
+        assert sizer.calibration_multiplier == 0.25
+        sizer.update_calibration_multiplier(None)
+        assert sizer.calibration_multiplier == 1.0
+
+    def test_multiplier_reduces_contracts(self, sizer):
+        """Poor calibration should produce fewer contracts."""
+        full = sizer.calculate_position_size(0.10, 0.60, 500.0)
+        sizer.update_calibration_multiplier(0.35)  # 50% multiplier
+        reduced = sizer.calculate_position_size(0.10, 0.60, 500.0)
+        assert reduced <= full
+        assert reduced >= 1  # Still at least 1
+
+
+class TestFeeUnit:
     def test_fee_unit_is_dollars(self, sizer):
         """25 contracts at $0.50 should NOT be reduced — fee is only ~1 cent."""
         # fee_cents = ceil(0.0175 * 25 * 0.50 * 0.50) = ceil(0.109) = 1 cent

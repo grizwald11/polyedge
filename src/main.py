@@ -292,6 +292,9 @@ async def scan_and_trade(
                     for cat, adj in adjustments.items():
                         direction = "underestimates" if adj > 0 else "overestimates"
                         logger.info(f"  Claude {direction} {cat} by {abs(adj):.1%}")
+
+                # Adapt Kelly sizing based on calibration quality
+                kelly_sizer.update_calibration_multiplier(report.overall_brier)
             else:
                 logger.info("Calibration: no resolved predictions yet")
         except Exception as e:

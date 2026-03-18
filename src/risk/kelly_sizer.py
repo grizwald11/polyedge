@@ -14,12 +14,21 @@ from src.config import Settings
 logger = logging.getLogger(__name__)
 
 
+# Brier score thresholds for calibration-based sizing
+BRIER_EXCELLENT = 0.10  # Full sizing
+BRIER_GOOD = 0.20       # Full sizing
+BRIER_FAIR = 0.30       # Reduce to 75%
+BRIER_POOR = 0.40       # Reduce to 50%
+# Above 0.40 → reduce to 25%
+
+
 class KellySizer:
     """Half-Kelly position sizing with configurable caps."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.fee_rate = 0.0175 if settings.trading.prefer_maker else 0.07
+        self._calibration_multiplier: float = 1.0
 
     def calculate_position_size(
         self,
@@ -111,10 +120,48 @@ class KellySizer:
             if cost_price + fee_dollars <= kelly_dollars:
                 contracts = 1
 
+        # Apply calibration-based multiplier
+        if self._calibration_multiplier < 1.0 and contracts > 1:
+            contracts = max(1, int(contracts * self._calibration_multiplier))
+
         logger.debug(
             f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "
             f"kelly_f={kelly_fraction:.3f}, half={half_kelly:.3f}, "
             f"${kelly_dollars:.2f} → {contracts} contracts @ ${cost_price:.2f}"
+            f" (cal_mult={self._calibration_multiplier:.2f})"
         )
 
         return contracts
+
+    def update_calibration_multiplier(self, brier_score: float | None) -> None:
+        """Adjust sizing multiplier based on overall Brier score.
+
+        When calibration is poor, automatically reduces position sizes
+        to protect capital until forecasting accuracy improves.
+
+        Args:
+            brier_score: Overall Brier score (0=perfect, 0.25=random). None = no data.
+        """
+        if brier_score is None:
+            self._calibration_multiplier = 1.0
+            return
+
+        if brier_score <= BRIER_GOOD:
+            mult = 1.0
+        elif brier_score <= BRIER_FAIR:
+            mult = 0.75
+        elif brier_score <= BRIER_POOR:
+            mult = 0.50
+        else:
+            mult = 0.25
+
+        if mult != self._calibration_multiplier:
+            logger.info(
+                f"Kelly calibration multiplier: {self._calibration_multiplier:.2f} → {mult:.2f} "
+                f"(Brier={brier_score:.3f})"
+            )
+        self._calibration_multiplier = mult
+
+    @property
+    def calibration_multiplier(self) -> float:
+        return self._calibration_multiplier
