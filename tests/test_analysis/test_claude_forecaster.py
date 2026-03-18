@@ -69,8 +69,29 @@ class TestClaudeForecaster:
         result = forecaster._parse_response(raw)
         assert result.probability == 0.70
 
+    def test_parse_json_with_plain_code_fences(self, forecaster):
+        raw = '```\n{"probability": 0.80, "reasoning": "test"}\n```'
+        result = forecaster._parse_response(raw)
+        assert result.probability == 0.80
+
+    def test_parse_json_embedded_in_prose(self, forecaster):
+        raw = 'Here is my analysis:\n\n{"probability": 0.55, "confidence_low": 0.45, "confidence_high": 0.65, "key_factors_for": ["A"], "key_factors_against": ["B"], "uncertainties": ["C"], "reasoning": "test"}\n\nI hope that helps!'
+        result = forecaster._parse_response(raw)
+        assert result.probability == 0.55
+        assert result.confidence_low == 0.45
+
+    def test_parse_json_after_explanation(self, forecaster):
+        raw = 'Based on my assessment, the probability is approximately 62%.\n\n```json\n{"probability": 0.62, "reasoning": "analysis"}\n```\n\nLet me know if you need more detail.'
+        result = forecaster._parse_response(raw)
+        assert result.probability == 0.62
+
+    def test_parse_probability_from_prose(self, forecaster):
+        raw = 'I estimate the probability: 0.73 based on historical data.'
+        result = forecaster._parse_response(raw)
+        assert result.probability == 0.73
+
     def test_parse_malformed_json(self, forecaster):
-        raw = "This is not JSON at all"
+        raw = "This is not JSON at all and has no probability"
         result = forecaster._parse_response(raw)
         assert result.probability == 0.5  # Fallback
 

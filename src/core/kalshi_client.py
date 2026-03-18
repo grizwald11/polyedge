@@ -52,6 +52,17 @@ class KalshiClient:
             logger.error(f"Failed to load private key: {e}")
             return None
 
+    def _full_path(self, path: str) -> str:
+        """Get the full URL path for signing (e.g. /trade-api/v2/portfolio/balance).
+
+        The httpx base_url handles routing, but signing must use the full path
+        as seen by the Kalshi server.
+        """
+        from urllib.parse import urlparse
+        parsed = urlparse(self.host)
+        base_path = parsed.path.rstrip("/")
+        return base_path + path
+
     def _sign_request(self, method: str, path: str, timestamp: str) -> str:
         """Sign a request using RSA-PSS."""
         key = self._load_private_key()
@@ -84,8 +95,11 @@ class KalshiClient:
         """Generate auth headers for a signed request."""
         if not self.api_key_id or not self.private_key_path:
             return {}
-        timestamp = str(int(time.time()))
-        signature = self._sign_request(method.upper(), path, timestamp)
+        # Kalshi expects timestamp in milliseconds
+        timestamp = str(int(time.time() * 1000))
+        # Sign with the full path (including /trade-api/v2 prefix)
+        full_path = self._full_path(path)
+        signature = self._sign_request(method.upper(), full_path, timestamp)
         return {
             "KALSHI-ACCESS-KEY": self.api_key_id,
             "KALSHI-ACCESS-SIGNATURE": signature,

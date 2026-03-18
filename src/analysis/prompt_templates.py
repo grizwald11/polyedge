@@ -22,16 +22,10 @@ CALIBRATION RULES:
 - Do not anchor too heavily on the current market price, but do consider it as information.
 - Express genuine uncertainty. Avoid false precision.
 
-OUTPUT FORMAT: You must respond with ONLY a valid JSON object (no markdown, no code fences) with these fields:
-{
-  "probability": <float 0.0-1.0>,
-  "confidence_low": <float>,
-  "confidence_high": <float>,
-  "key_factors_for": [<string>, ...],
-  "key_factors_against": [<string>, ...],
-  "uncertainties": [<string>, ...],
-  "reasoning": "<brief explanation>"
-}"""
+CRITICAL: Respond ONLY with a valid JSON object. No explanation, no markdown, no code fences, no text before or after the JSON. Your entire response must be parseable as JSON.
+
+Required JSON schema:
+{"probability": <float 0.01-0.99>, "confidence_low": <float>, "confidence_high": <float>, "key_factors_for": ["<string>", ...], "key_factors_against": ["<string>", ...], "uncertainties": ["<string>", ...], "reasoning": "<brief explanation>"}"""
 
 
 POLITICS_TEMPLATE = """Assess the probability of this POLITICAL market resolving YES.

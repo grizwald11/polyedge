@@ -126,27 +126,62 @@ class ClaudeForecaster:
             )
 
     def _parse_response(self, raw_text: str) -> ForecastResult:
-        """Parse Claude's JSON response into a ForecastResult."""
-        # Strip any markdown code fences
-        text = raw_text.strip()
-        if text.startswith("```"):
-            # Remove opening fence
-            first_newline = text.index("\n")
-            text = text[first_newline + 1:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
+        """Parse Claude's JSON response into a ForecastResult.
 
+        Tries multiple strategies to extract JSON:
+        1. Direct parse of the full response
+        2. Extract from markdown code blocks (```json ... ```)
+        3. Find first { and last } and parse that substring
+        4. Fall back to 0.5 only as last resort
+        """
+        import re
+
+        text = raw_text.strip()
+
+        # Strategy 1: Direct parse
         try:
             data = json.loads(text)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse Claude response as JSON: {e}")
-            # Try to extract probability from text
+            return self._build_forecast(data)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Strategy 2: Extract from markdown code blocks
+        code_block_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+        if code_block_match:
+            try:
+                data = json.loads(code_block_match.group(1).strip())
+                return self._build_forecast(data)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Strategy 3: Find first { and last } and try to parse
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace != -1 and last_brace > first_brace:
+            try:
+                data = json.loads(text[first_brace:last_brace + 1])
+                return self._build_forecast(data)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Strategy 4: Try to extract probability from prose as last resort
+        prob_match = re.search(r"probability[\"'\s:]+\s*(0\.\d+)", text)
+        if prob_match:
+            prob = float(prob_match.group(1))
+            logger.warning(f"Extracted probability {prob} from prose response")
             return ForecastResult(
-                probability=0.5,
-                reasoning=f"JSON parse failed, raw: {raw_text[:200]}",
+                probability=max(0.01, min(0.99, prob)),
+                reasoning=f"Parsed probability from prose. Raw: {raw_text[:200]}",
             )
 
+        logger.warning(f"Failed to parse Claude response as JSON: {raw_text[:200]}")
+        return ForecastResult(
+            probability=0.5,
+            reasoning=f"JSON parse failed, raw: {raw_text[:200]}",
+        )
+
+    def _build_forecast(self, data: dict) -> ForecastResult:
+        """Build a ForecastResult from parsed JSON data."""
         probability = float(data.get("probability", 0.5))
         # Clamp to valid range
         probability = max(0.01, min(0.99, probability))
