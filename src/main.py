@@ -502,7 +502,11 @@ async def main():
     portfolio_risk: PortfolioRisk | None = None
 
     try:
-        news_ingestion = NewsIngestion(settings)
+        news_ingestion = NewsIngestion(
+            rss_feeds=settings.news.rss_feeds,
+            max_article_age_minutes=settings.news.max_article_age_minutes,
+            min_relevance=settings.news.min_relevance,
+        )
         news_strategy = NewsReactiveStrategy(forecaster, news_ingestion, settings, db)
         logger.info("News-reactive strategy enabled")
     except Exception as e:
@@ -525,16 +529,16 @@ async def main():
     except Exception as e:
         logger.info(f"Whale tracker strategy disabled: {e}")
 
-    try:
-        portfolio_risk = PortfolioRisk(position_manager, db)
-    except Exception as e:
-        logger.info(f"Portfolio risk module disabled: {e}")
-
     # Execution
     order_builder = OrderBuilder(settings)
     order_router = OrderRouter(settings, kalshi, db)
     position_manager = PositionManager(db, settings.trading.bankroll)
     fill_tracker = FillTracker(kalshi, db)
+
+    try:
+        portfolio_risk = PortfolioRisk(position_manager, db)
+    except Exception as e:
+        logger.info(f"Portfolio risk module disabled: {e}")
 
     # Sync positions with Kalshi on startup (live mode only)
     if settings.trading.mode == "live" and healthy:
