@@ -85,3 +85,40 @@ class TestCalculatePositionSize:
         quarter = quarter_sizer.calculate_position_size(0.10, 0.60, 500.0)
 
         assert quarter <= full
+
+    def test_order_price_respected_for_cap(self, sizer):
+        """When order_price is higher than derived market_price, contracts
+        should be reduced so that contracts * order_price <= position cap."""
+        # Obvious NO scenario: probability=0.97, edge=0.03
+        # Derived market_price = 0.97 - 0.03 = 0.94
+        # Actual order price = 0.97 (the NO price we pay)
+        # Max position = $25, so max contracts = floor(25 / 0.97) = 25
+        contracts = sizer.calculate_position_size(
+            edge=0.03, probability=0.97, bankroll=500.0,
+            order_price=0.97,
+        )
+        cost = contracts * 0.97
+        max_position = 500.0 * 0.05  # $25
+        assert cost <= max_position, (
+            f"Cost ${cost:.2f} exceeds position limit ${max_position:.2f}"
+        )
+
+    def test_order_price_high_no_price(self, sizer):
+        """Various high NO prices should never breach the position cap."""
+        max_position = 500.0 * 0.05  # $25
+        for no_price in [0.95, 0.96, 0.97, 0.98, 0.99]:
+            edge = 1.0 - no_price  # yes_price
+            contracts = sizer.calculate_position_size(
+                edge=edge, probability=no_price, bankroll=500.0,
+                order_price=no_price,
+            )
+            cost = contracts * no_price
+            assert cost <= max_position, (
+                f"NO@${no_price}: {contracts} contracts cost ${cost:.2f} > ${max_position:.2f}"
+            )
+
+    def test_order_price_none_uses_derived(self, sizer):
+        """When order_price is None, behavior matches the original."""
+        a = sizer.calculate_position_size(0.08, 0.42, 500.0)
+        b = sizer.calculate_position_size(0.08, 0.42, 500.0, order_price=None)
+        assert a == b

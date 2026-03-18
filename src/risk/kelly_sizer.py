@@ -25,6 +25,7 @@ class KellySizer:
         probability: float,
         bankroll: float,
         current_exposure: float = 0.0,
+        order_price: float | None = None,
     ) -> int:
         """Calculate optimal number of contracts to buy.
 
@@ -37,6 +38,10 @@ class KellySizer:
             probability: Our estimated true probability
             bankroll: Total bankroll in dollars
             current_exposure: Current total exposure in dollars
+            order_price: Actual price per contract for the order. If None,
+                derived from probability - edge. Use this to ensure the
+                contract count stays within dollar caps when the order price
+                differs from the Kelly-derived market price.
 
         Returns:
             Number of contracts (integers, minimum 1 if any edge exists)
@@ -82,18 +87,19 @@ class KellySizer:
             return 0
         kelly_dollars = min(kelly_dollars, remaining)
 
-        # Convert dollars to contracts
-        # Cost per contract = market_price
-        contracts = int(kelly_dollars / market_price) if market_price > 0 else 0
+        # Convert dollars to contracts using the actual order price so that
+        # contracts * price never exceeds the dollar cap.
+        cost_price = order_price if order_price and order_price > 0 else market_price
+        contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
 
         # Minimum 1 contract if we have any edge and room
-        if contracts == 0 and kelly_fraction > 0 and remaining >= market_price:
+        if contracts == 0 and kelly_fraction > 0 and remaining >= cost_price:
             contracts = 1
 
         logger.debug(
             f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "
             f"kelly_f={kelly_fraction:.3f}, half={half_kelly:.3f}, "
-            f"${kelly_dollars:.2f} → {contracts} contracts"
+            f"${kelly_dollars:.2f} → {contracts} contracts @ ${cost_price:.2f}"
         )
 
         return contracts

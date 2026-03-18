@@ -110,6 +110,7 @@ async def scan_and_trade(
             probability=signal.probability_estimate,
             bankroll=bankroll,
             current_exposure=current_exposure,
+            order_price=signal.market_price,
         )
 
         # Apply circuit breaker multiplier
