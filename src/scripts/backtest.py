@@ -45,9 +45,10 @@ async def fetch_settled_events(
     pages = 0
     max_pages = (max_events // 200) + 1
 
-    while pages < max_pages:
+    while pages < max_pages and len(all_markets) < max_events:
+        remaining = max_events - len(all_markets)
         params: dict[str, Any] = {
-            "limit": min(200, max_events - len(all_markets)),
+            "limit": min(200, max(1, remaining)),
             "status": "settled",
             "with_nested_markets": "true",
         }
