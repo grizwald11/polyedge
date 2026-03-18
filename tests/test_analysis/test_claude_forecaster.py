@@ -6,6 +6,7 @@ import json
 import pytest
 
 from src.analysis.claude_forecaster import ClaudeForecaster
+from src.analysis.news_researcher import NewsResearcher
 from src.config import Settings
 from src.core.models import Market, MarketToken, MarketCategory, ForecastResult
 
@@ -150,3 +151,41 @@ class TestClaudeForecaster:
         f = ClaudeForecaster(s)
         with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
             f._get_client()
+
+    @pytest.mark.asyncio
+    async def test_assess_market_calls_news_researcher(self, forecaster, sample_market):
+        """Forecaster should call NewsResearcher when no news_context is provided."""
+        mock_response = _mock_claude_response(0.42)
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        forecaster._client = mock_client
+
+        forecaster.news_researcher.get_context = AsyncMock(
+            return_value='RECENT NEWS CONTEXT:\n[1] "Test" (reuters.com)\nSome news...'
+        )
+
+        result = await forecaster.assess_market(sample_market)
+
+        forecaster.news_researcher.get_context.assert_awaited_once_with(
+            sample_market.question
+        )
+        assert result.probability == 0.42
+
+    @pytest.mark.asyncio
+    async def test_assess_market_skips_news_when_context_provided(
+        self, forecaster, sample_market
+    ):
+        """Forecaster should NOT call NewsResearcher when news_context is already provided."""
+        mock_response = _mock_claude_response(0.42)
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        forecaster._client = mock_client
+
+        forecaster.news_researcher.get_context = AsyncMock(return_value="")
+
+        result = await forecaster.assess_market(
+            sample_market, news_context="Pre-existing context"
+        )
+
+        forecaster.news_researcher.get_context.assert_not_awaited()
+        assert result.probability == 0.42

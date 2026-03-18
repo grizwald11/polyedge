@@ -69,6 +69,15 @@ class AIProbabilityStrategy:
             news_context=news_context,
         )
 
+        # Confidence gate: skip if confidence interval is too wide
+        ci_width = forecast.confidence_high - forecast.confidence_low
+        if ci_width > 0.40:
+            logger.info(
+                f"Skipping {market.ticker}: confidence interval too wide "
+                f"({ci_width:.2f})"
+            )
+            return None
+
         # Run ensemble (combines Claude + market price)
         ensemble = ensemble_forecast(
             claude_forecast=forecast,

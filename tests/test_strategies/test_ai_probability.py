@@ -133,3 +133,59 @@ class TestAIProbabilityStrategy:
         assert len(signals) == 1
         assert signals[0].market_id == sample_market.ticker
         assert signals[0].market_question == sample_market.question
+
+    @pytest.mark.asyncio
+    async def test_confidence_gate_skips_wide_interval(self, strategy, sample_market):
+        """Skip trades when Claude's confidence interval is wider than 0.40."""
+        wide_forecast = ForecastResult(
+            probability=0.55,
+            confidence_low=0.20,
+            confidence_high=0.80,  # width = 0.60 > 0.40
+            reasoning="Very uncertain",
+            model_used="claude-sonnet-4-6",
+            tokens_used=500,
+            latency_ms=1000,
+        )
+        strategy.forecaster.assess_market = AsyncMock(return_value=wide_forecast)
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        assert len(signals) == 0
+
+    @pytest.mark.asyncio
+    async def test_confidence_gate_allows_narrow_interval(self, strategy, sample_market):
+        """Allow trades when confidence interval is narrow enough."""
+        narrow_forecast = ForecastResult(
+            probability=0.55,
+            confidence_low=0.45,
+            confidence_high=0.65,  # width = 0.20 < 0.40
+            reasoning="Reasonably confident",
+            model_used="claude-sonnet-4-6",
+            tokens_used=500,
+            latency_ms=1000,
+        )
+        strategy.forecaster.assess_market = AsyncMock(return_value=narrow_forecast)
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        # Should generate a signal (0.55 vs market 0.34 = big edge)
+        assert len(signals) == 1
+
+    @pytest.mark.asyncio
+    async def test_confidence_gate_boundary(self, strategy, sample_market):
+        """Exactly 0.40 width should pass (> 0.40 triggers skip)."""
+        boundary_forecast = ForecastResult(
+            probability=0.55,
+            confidence_low=0.35,
+            confidence_high=0.75,  # width = 0.40, exactly at boundary
+            reasoning="Boundary test",
+            model_used="claude-sonnet-4-6",
+            tokens_used=500,
+            latency_ms=1000,
+        )
+        strategy.forecaster.assess_market = AsyncMock(return_value=boundary_forecast)
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        # width == 0.40 should NOT be skipped (only > 0.40 is skipped)
+        assert len(signals) == 1

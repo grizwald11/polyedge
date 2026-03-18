@@ -17,6 +17,7 @@ import anthropic
 from src.config import Settings
 from src.analysis.prompt_templates import SYSTEM_PROMPT, build_prompt
 from src.analysis.market_classifier import classify_market
+from src.analysis.news_researcher import NewsResearcher
 from src.core.models import Market, ForecastResult, MarketCategory
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class ClaudeForecaster:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._client: Optional[anthropic.AsyncAnthropic] = None
+        self.news_researcher = NewsResearcher(brave_api_key=settings.brave_api_key)
 
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
@@ -62,6 +64,16 @@ class ClaudeForecaster:
         model = self._select_model(position_value)
         category = classify_market(market)
 
+        # Enrich with news research if no context was provided
+        if not news_context:
+            news_context = await self.news_researcher.get_context(market.question)
+            if news_context:
+                logger.info(
+                    f"News research found context for '{market.question[:50]}...'"
+                )
+            else:
+                logger.debug(f"No news context for '{market.question[:50]}...'")
+
         # Build the prompt
         close_date = ""
         if market.end_date:
@@ -73,7 +85,7 @@ class ClaudeForecaster:
             market_price=market.yes_price,
             close_date=close_date,
             category=category,
-            news_context=news_context,
+            news_context=news_context or "No additional context available.",
         )
 
         start_time = time.monotonic()

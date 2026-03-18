@@ -21,6 +21,7 @@ CALIBRATION RULES:
 - You must consider both sides of the argument before giving your estimate.
 - Do not anchor too heavily on the current market price, but do consider it as information.
 - Express genuine uncertainty. Avoid false precision.
+- Use the provided news context to inform your assessment. If the news contradicts your prior beliefs, update accordingly.
 
 CRITICAL: Respond ONLY with a valid JSON object. No explanation, no markdown, no code fences, no text before or after the JSON. Your entire response must be parseable as JSON.
 

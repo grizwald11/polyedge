@@ -84,6 +84,7 @@ class Settings(BaseModel):
     kalshi_api_key_id: Optional[str] = None
     kalshi_private_key_path: Optional[str] = None
     anthropic_api_key: Optional[str] = None
+    brave_api_key: Optional[str] = None
     live_enabled: bool = False
 
 
@@ -104,6 +105,7 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     settings.kalshi_api_key_id = os.environ.get("KALSHI_API_KEY_ID")
     settings.kalshi_private_key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
     settings.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    settings.brave_api_key = os.environ.get("BRAVE_API_KEY") or None
     settings.live_enabled = os.environ.get("POLYEDGE_LIVE_ENABLED", "false").lower() == "true"
 
     return settings
