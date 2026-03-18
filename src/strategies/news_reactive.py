@@ -114,6 +114,10 @@ class NewsReactiveStrategy:
             direction = Direction.BUY_NO
             probability_estimate = 1.0 - result.probability
 
+        # Use CI midpoint for confidence (higher CI width = lower confidence)
+        ci_width = result.confidence_high - result.confidence_low
+        confidence = max(0.1, min(0.95, 1.0 - ci_width))
+
         signal = Signal(
             strategy=StrategyName.NEWS_REACTIVE,
             market_id=market.ticker,
@@ -122,7 +126,7 @@ class NewsReactiveStrategy:
             edge=abs_edge,
             probability_estimate=probability_estimate,
             market_price=market.yes_price if edge > 0 else market.no_price,
-            confidence=result.confidence_low,
+            confidence=confidence,
             reasoning=f"News: {item.title[:100]} | {result.reasoning[:200]}",
         )
 

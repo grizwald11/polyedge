@@ -194,5 +194,3 @@ class WhaleMonitor:
             conn.commit()
         except Exception as e:
             logger.warning(f"Failed to log whale trade: {e}")
-        finally:
-            conn.close()

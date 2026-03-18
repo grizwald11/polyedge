@@ -116,9 +116,6 @@ class TestWhaleMonitor:
 
         # Verify logged to DB
         conn = tmp_db._get_conn()
-        try:
-            rows = conn.execute("SELECT * FROM whale_trades").fetchall()
-            assert len(rows) == 1
-            assert rows[0]["market_id"] == "MKT-A"
-        finally:
-            conn.close()
+        rows = conn.execute("SELECT * FROM whale_trades").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["market_id"] == "MKT-A"

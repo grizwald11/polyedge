@@ -158,17 +158,14 @@ class CalibrationAnalyzer:
     def _get_resolved_with_category(self) -> list[dict]:
         """Get all resolved predictions joined with market category."""
         conn = self.db._get_conn()
-        try:
-            rows = conn.execute("""
-                SELECT cr.*, COALESCE(m.category, 'Other') as category
-                FROM calibration_records cr
-                LEFT JOIN markets m ON cr.market_id = m.ticker
-                WHERE cr.actual_outcome IS NOT NULL
-                ORDER BY cr.resolved_at DESC
-            """).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
+        rows = conn.execute("""
+            SELECT cr.*, COALESCE(m.category, 'Other') as category
+            FROM calibration_records cr
+            LEFT JOIN markets m ON cr.market_id = m.ticker
+            WHERE cr.actual_outcome IS NOT NULL
+            ORDER BY cr.resolved_at DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
 
     def _compute_brier(self, records: list[dict]) -> float:
         """Compute overall Brier score."""

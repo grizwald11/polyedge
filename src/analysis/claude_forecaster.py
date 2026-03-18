@@ -359,7 +359,20 @@ class ClaudeForecaster:
                 pass
 
         # Strategy 4: Try to extract probability from prose as last resort
-        prob_match = re.search(r"probability[\"'\s:]+\s*(0\.\d+)", text)
+        # Match various formats: "probability": 0.65, probability: 0.7, probability = 0.50, 65%
+        prob_match = re.search(
+            r'(?:probability|prob)["\'\s:=]+\s*([01]?\.\d+|0|1(?:\.0+)?)', text, re.IGNORECASE
+        )
+        if not prob_match:
+            # Try percentage format: "probability: 65%" or "70%"
+            pct_match = re.search(r'(?:probability|prob)["\'\s:=]+\s*(\d{1,3})%', text, re.IGNORECASE)
+            if pct_match:
+                prob = float(pct_match.group(1)) / 100.0
+                logger.warning(f"Extracted probability {prob} from percentage in prose")
+                return ForecastResult(
+                    probability=max(0.01, min(0.99, prob)),
+                    reasoning=f"Parsed probability from prose (%). Raw: {raw_text[:200]}",
+                )
         if prob_match:
             prob = float(prob_match.group(1))
             logger.warning(f"Extracted probability {prob} from prose response")
@@ -372,6 +385,7 @@ class ClaudeForecaster:
         return ForecastResult(
             probability=0.5,
             reasoning=f"JSON parse failed, raw: {raw_text[:200]}",
+            parse_failed=True,
         )
 
     def _build_forecast(self, data: dict) -> ForecastResult:

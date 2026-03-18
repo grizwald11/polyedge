@@ -132,7 +132,7 @@ class TestMultiModelEnsemble:
         """Empty forecast list returns market price."""
         result = multi_model_ensemble([], market_price=0.50)
         assert abs(result.final_probability - 0.50) < 0.01
-        assert result.confidence == 0.1
+        assert result.confidence == 0.01  # Minimal confidence when no forecasts
 
     def test_disagreement_lowers_confidence(self):
         """High disagreement between models reduces confidence."""

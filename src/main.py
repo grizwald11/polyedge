@@ -108,6 +108,14 @@ async def scan_and_trade(
     except Exception as e:
         logger.error(f"Fill tracker check failed: {e}")
 
+    # Cancel stale open orders (resting > 30 min with no fill)
+    try:
+        stale_cancelled = await order_router.cancel_stale_orders(max_age_seconds=1800)
+        if stale_cancelled:
+            logger.info(f"Cancelled {stale_cancelled} stale open orders")
+    except Exception as e:
+        logger.error(f"Stale order cancellation failed: {e}")
+
     # Check circuit breaker
     if not circuit_breaker.check(bankroll):
         logger.warning("Circuit breaker active — skipping trade cycle")
@@ -235,7 +243,19 @@ async def scan_and_trade(
     logger.info(f"Processing {len(all_signals)} signals ({len(ai_signals)} AI, {len(no_signals)} NO)")
 
     trades_executed = 0
+    max_trades = settings.trading.max_trades_per_cycle
+    acted_markets: set[str] = set()  # Dedup: one trade per market per cycle
     for signal in all_signals:
+        # Enforce max trades per cycle to prevent overtrading
+        if trades_executed >= max_trades:
+            logger.info(f"Max trades per cycle ({max_trades}) reached — deferring remaining signals")
+            break
+
+        # Dedup: skip if we already acted on this market this cycle
+        if signal.market_id in acted_markets:
+            logger.debug(f"Skipping duplicate signal for {signal.market_id}")
+            continue
+
         # Log every signal immediately for analysis (acted_on=False by default)
         signal_id = scanner.db.log_signal(signal)
 
@@ -318,6 +338,7 @@ async def scan_and_trade(
                     pass
 
             trades_executed += 1
+            acted_markets.add(signal.market_id)
 
     logger.info(
         f"Cycle complete: {trades_executed} trades executed, "
@@ -557,7 +578,7 @@ async def main():
     # Risk
     circuit_breaker = CircuitBreaker(settings, db)
     kelly_sizer = KellySizer(settings)
-    risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
+    risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db, portfolio_risk)
 
     # Metrics
     metrics = Metrics()

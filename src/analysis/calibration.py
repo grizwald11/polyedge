@@ -72,25 +72,22 @@ class CalibrationTracker:
             Number of predictions resolved
         """
         conn = self.db._get_conn()
-        try:
-            now = datetime.now(timezone.utc).isoformat()
-            outcome_int = 1 if actual_outcome else 0
-            cursor = conn.execute(
-                """UPDATE calibration_records
-                   SET actual_outcome = ?, resolved_at = ?
-                   WHERE market_id = ? AND actual_outcome IS NULL""",
-                (outcome_int, now, market_id),
+        now = datetime.now(timezone.utc).isoformat()
+        outcome_int = 1 if actual_outcome else 0
+        cursor = conn.execute(
+            """UPDATE calibration_records
+               SET actual_outcome = ?, resolved_at = ?
+               WHERE market_id = ? AND actual_outcome IS NULL""",
+            (outcome_int, now, market_id),
+        )
+        conn.commit()
+        count = cursor.rowcount
+        if count > 0:
+            logger.info(
+                f"Resolved {count} predictions for {market_id}: "
+                f"{'YES' if actual_outcome else 'NO'}"
             )
-            conn.commit()
-            count = cursor.rowcount
-            if count > 0:
-                logger.info(
-                    f"Resolved {count} predictions for {market_id}: "
-                    f"{'YES' if actual_outcome else 'NO'}"
-                )
-            return count
-        finally:
-            conn.close()
+        return count
 
     def calculate_brier_score(
         self,
@@ -170,16 +167,13 @@ class CalibrationTracker:
             {"Politics": {"brier": 0.15, "count": 20}, ...}
         """
         conn = self.db._get_conn()
-        try:
-            rows = conn.execute("""
-                SELECT cr.strategy, m.category,
-                       cr.predicted_probability, cr.actual_outcome
-                FROM calibration_records cr
-                JOIN markets m ON cr.market_id = m.ticker
-                WHERE cr.actual_outcome IS NOT NULL
-            """).fetchall()
-        finally:
-            conn.close()
+        rows = conn.execute("""
+            SELECT cr.strategy, m.category,
+                   cr.predicted_probability, cr.actual_outcome
+            FROM calibration_records cr
+            JOIN markets m ON cr.market_id = m.ticker
+            WHERE cr.actual_outcome IS NOT NULL
+        """).fetchall()
 
         categories: dict[str, list[dict]] = {}
         for r in rows:
@@ -243,19 +237,16 @@ class CalibrationTracker:
     ) -> list[dict]:
         """Get resolved calibration records with optional filters."""
         conn = self.db._get_conn()
-        try:
-            query = "SELECT * FROM calibration_records WHERE actual_outcome IS NOT NULL"
-            params: list = []
+        query = "SELECT * FROM calibration_records WHERE actual_outcome IS NOT NULL"
+        params: list = []
 
-            if strategy:
-                query += " AND strategy = ?"
-                params.append(strategy.value)
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy.value)
 
-            if days:
-                query += " AND predicted_at >= datetime('now', ?)"
-                params.append(f"-{days} days")
+        if days:
+            query += " AND predicted_at >= datetime('now', ?)"
+            params.append(f"-{days} days")
 
-            rows = conn.execute(query, params).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]

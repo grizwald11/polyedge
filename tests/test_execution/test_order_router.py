@@ -261,3 +261,69 @@ class TestLiveGates:
     def test_all_gates_pass(self, live_settings, mock_kalshi, tmp_db):
         router = OrderRouter(live_settings, mock_kalshi, tmp_db)
         assert router._live_gates_passed() is True
+
+
+class TestOrderCancellation:
+    @pytest.mark.asyncio
+    async def test_cancel_paper_order(self, paper_settings, mock_kalshi, tmp_db):
+        """Paper orders can be cancelled by updating DB status."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        order = _make_order(paper=True)
+
+        # Route the paper order first to get it into DB
+        result = await router.route_order(order)
+        assert result.success is True
+
+        # Now update its status to open so we can cancel it
+        conn = tmp_db._get_conn()
+        conn.execute(
+            "UPDATE orders SET status='open' WHERE id=?", (order.id,)
+        )
+        conn.commit()
+
+        # Cancel it
+        cancelled = await router.cancel_order(order.id)
+        assert cancelled is True
+
+    @pytest.mark.asyncio
+    async def test_cancel_nonexistent_order(self, paper_settings, mock_kalshi, tmp_db):
+        """Cancelling a nonexistent order should return False."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        cancelled = await router.cancel_order("PE-doesntexist")
+        assert cancelled is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_already_filled(self, paper_settings, mock_kalshi, tmp_db):
+        """Cannot cancel an already filled order."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        order = _make_order(paper=True)
+
+        # Route to fill it
+        await router.route_order(order)
+
+        # Try to cancel — should fail because status is 'filled'
+        cancelled = await router.cancel_order(order.id)
+        assert cancelled is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_stale_orders(self, paper_settings, mock_kalshi, tmp_db):
+        """cancel_stale_orders should cancel old open orders."""
+        from datetime import datetime, timedelta, timezone
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+
+        # Insert a stale open order directly into DB
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        conn = tmp_db._get_conn()
+        conn.execute("""
+            INSERT INTO orders (id, market_id, token_id, side, price, size, cost,
+                order_type, fee_rate_bps, status, strategy, paper, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "PE-stale1", "MKT-A", "MKT-A_yes", "buy", 0.50, 10, 5.0,
+            "GTC", 175, "open", "ai_probability", 1, old_time,
+        ))
+        conn.commit()
+
+        # Cancel orders older than 30 min
+        cancelled = await router.cancel_stale_orders(max_age_seconds=1800)
+        assert cancelled == 1

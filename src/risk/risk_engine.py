@@ -12,6 +12,7 @@ from src.config import Settings
 from src.core.models import Market, RiskCheckResult, Signal, StrategyName
 from src.execution.position_manager import PositionManager
 from src.risk.circuit_breaker import CircuitBreaker
+from src.risk.portfolio_risk import PortfolioRisk
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -26,11 +27,13 @@ class RiskEngine:
         position_manager: PositionManager,
         circuit_breaker: CircuitBreaker,
         db: Database | None = None,
+        portfolio_risk: PortfolioRisk | None = None,
     ):
         self.settings = settings
         self.positions = position_manager
         self.circuit_breaker = circuit_breaker
         self.db = db
+        self.portfolio_risk = portfolio_risk
         self.cooldown_seconds = 3600  # 1 hour cooldown after exit
         # Load persisted cooldowns if DB available, otherwise start empty
         if db is not None:
@@ -85,14 +88,22 @@ class RiskEngine:
                 f"${max_total:.2f} ({self.settings.trading.max_total_exposure_pct:.0%} limit)"
             )
 
-        # 4. Correlated exposure (max 20% — same strategy)
-        strategy_exposure = self.positions.get_strategy_exposure(signal.strategy)
+        # 4. Correlated exposure (max 20% — event-based if available, else strategy-based)
         max_correlated = bankroll * self.settings.trading.max_correlated_exposure_pct
-        if strategy_exposure + proposed_cost > max_correlated:
-            failed.append(
-                f"Correlated exposure exceeded for {signal.strategy.value}: "
-                f"${strategy_exposure + proposed_cost:.2f} > ${max_correlated:.2f}"
-            )
+        if self.portfolio_risk is not None:
+            correlated_exposure = self.portfolio_risk.get_correlated_exposure(signal.market_id)
+            if correlated_exposure + proposed_cost > max_correlated:
+                failed.append(
+                    f"Correlated exposure exceeded for event group of {signal.market_id}: "
+                    f"${correlated_exposure + proposed_cost:.2f} > ${max_correlated:.2f}"
+                )
+        else:
+            strategy_exposure = self.positions.get_strategy_exposure(signal.strategy)
+            if strategy_exposure + proposed_cost > max_correlated:
+                failed.append(
+                    f"Correlated exposure exceeded for {signal.strategy.value}: "
+                    f"${strategy_exposure + proposed_cost:.2f} > ${max_correlated:.2f}"
+                )
 
         # 5. Circuit breaker
         if self.circuit_breaker.is_halted():

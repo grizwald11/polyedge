@@ -270,22 +270,35 @@ class CrossArbStrategy:
         return None
 
     def _get_cached_relationship(self, ticker_a: str, ticker_b: str) -> Optional[dict]:
-        """Check for a cached arb relationship in the database."""
+        """Check for a cached arb relationship in the database.
+
+        Returns None if no cache exists or if the cache is older than 1 hour
+        (stale relationships can be misleading when prices move).
+        """
         conn = self.db._get_conn()
         try:
             row = conn.execute(
-                "SELECT relationship_data FROM arb_relationships "
+                "SELECT relationship_data, validated_at FROM arb_relationships "
                 "WHERE (market_a=? AND market_b=?) OR (market_a=? AND market_b=?)",
                 (ticker_a, ticker_b, ticker_b, ticker_a),
             ).fetchone()
             if row:
+                # TTL: invalidate cache older than 1 hour
+                validated_at = row["validated_at"]
+                if validated_at:
+                    from datetime import datetime, timedelta, timezone
+                    try:
+                        cached_time = datetime.fromisoformat(validated_at)
+                        if datetime.now(timezone.utc) - cached_time > timedelta(hours=1):
+                            logger.debug(f"Arb cache expired for {ticker_a}/{ticker_b}")
+                            return None
+                    except (ValueError, TypeError):
+                        pass  # Invalid timestamp — treat as expired
                 import json
                 return json.loads(row["relationship_data"])
             return None
         except Exception:
             return None
-        finally:
-            conn.close()
 
     def _cache_relationship(self, ticker_a: str, ticker_b: str, data: dict):
         """Cache an arb relationship in the database."""
@@ -301,5 +314,3 @@ class CrossArbStrategy:
             conn.commit()
         except Exception as e:
             logger.warning(f"Failed to cache arb relationship: {e}")
-        finally:
-            conn.close()

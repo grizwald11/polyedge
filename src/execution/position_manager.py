@@ -250,13 +250,19 @@ class PositionManager:
             remaining = (1.0 - market.no_price) / market.no_price if market.no_price > 0 else 0
             return max(0.0, remaining)
 
-    async def sync_with_kalshi(self, kalshi) -> int:
+    async def sync_with_kalshi(self, kalshi, auto_correct: bool = True) -> int:
         """Reconcile local positions against Kalshi API positions.
 
-        Logs warnings for any discrepancies. Returns count of mismatches found.
+        When auto_correct is True, adjusts local state to match Kalshi:
+        - Adds positions found on Kalshi but missing locally
+        - Removes local live positions not found on Kalshi
 
         Args:
             kalshi: KalshiClient instance
+            auto_correct: If True, auto-correct mismatches. If False, only log.
+
+        Returns:
+            Count of mismatches found (and corrected if auto_correct=True)
         """
         try:
             api_positions = await kalshi.get_positions()
@@ -276,28 +282,80 @@ class PositionManager:
                 continue
             api_tickers.add(ticker)
 
-            # Kalshi returns yes_count / no_count
-            api_yes = api_pos.get("market_exposure", 0)
+            # Kalshi returns market_exposure (dollar value) or position counts
+            api_exposure = api_pos.get("market_exposure", 0)
             local_pos = self.get_position(ticker)
 
-            if local_pos is None and api_yes != 0:
-                logger.warning(
-                    f"Position mismatch: Kalshi has position in {ticker}, "
-                    f"local tracker does not"
-                )
+            if local_pos is None and api_exposure != 0:
                 mismatches += 1
+                if auto_correct:
+                    # Reconstruct a position from API data
+                    yes_count = api_pos.get("yes_count", 0) or 0
+                    no_count = api_pos.get("no_count", 0) or 0
+                    if yes_count > 0:
+                        direction = Direction.BUY_YES
+                        size = yes_count
+                        token_id = f"{ticker}_yes"
+                    elif no_count > 0:
+                        direction = Direction.BUY_NO
+                        size = no_count
+                        token_id = f"{ticker}_no"
+                    else:
+                        logger.warning(
+                            f"Position mismatch: Kalshi has exposure in {ticker} "
+                            f"but no yes/no count — skipping auto-correct"
+                        )
+                        continue
+
+                    avg_price = api_pos.get("average_price", 50) / 100.0  # cents to dollars
+                    position = Position(
+                        market_id=ticker,
+                        market_question=api_pos.get("title", ticker),
+                        token_id=token_id,
+                        direction=direction,
+                        size=float(size),
+                        avg_entry_price=avg_price,
+                        current_price=avg_price,
+                        unrealized_pnl=0.0,
+                        strategy=StrategyName.AI_PROBABILITY,  # Unknown — default
+                        paper=False,
+                        opened_at=datetime.now(timezone.utc),
+                        last_updated=datetime.now(timezone.utc),
+                    )
+                    self._positions[ticker] = position
+                    logger.warning(
+                        f"Position AUTO-CORRECTED: added {direction.value} {size}x "
+                        f"{ticker} @ ${avg_price:.2f} from Kalshi API"
+                    )
+                else:
+                    logger.warning(
+                        f"Position mismatch: Kalshi has position in {ticker}, "
+                        f"local tracker does not"
+                    )
 
         # Check for local positions not on Kalshi
+        stale_keys = []
         for market_id, local_pos in self._positions.items():
             if not local_pos.paper and market_id not in api_tickers:
-                logger.warning(
-                    f"Position mismatch: local tracker has live position "
-                    f"in {market_id}, Kalshi does not"
-                )
                 mismatches += 1
+                if auto_correct:
+                    stale_keys.append(market_id)
+                    logger.warning(
+                        f"Position AUTO-CORRECTED: removed stale live position "
+                        f"in {market_id} (not found on Kalshi)"
+                    )
+                else:
+                    logger.warning(
+                        f"Position mismatch: local tracker has live position "
+                        f"in {market_id}, Kalshi does not"
+                    )
+
+        for key in stale_keys:
+            self._positions.pop(key, None)
 
         if mismatches:
-            logger.warning(f"Position sync found {mismatches} mismatches")
+            action = "corrected" if auto_correct else "found"
+            logger.warning(f"Position sync: {mismatches} mismatches {action}")
         else:
             logger.debug(f"Position sync OK: {len(api_tickers)} Kalshi positions checked")
 
@@ -306,14 +364,11 @@ class PositionManager:
     def _load_positions_from_db(self):
         """Reconstruct open positions from trade history on startup."""
         conn = self.db._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT order_id, market_id, token_id, side, price, size, "
-                "fee, realized_pnl, strategy, paper, timestamp "
-                "FROM trades ORDER BY timestamp ASC"
-            ).fetchall()
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT order_id, market_id, token_id, side, price, size, "
+            "fee, realized_pnl, strategy, paper, timestamp "
+            "FROM trades ORDER BY timestamp ASC"
+        ).fetchall()
 
         if not rows:
             return

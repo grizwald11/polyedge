@@ -42,6 +42,7 @@ class TradingConfig(BaseModel):
     prefer_maker: bool = True
     daily_loss_limit_pct: float = 0.10
     max_obvious_no_pct: float = 0.10
+    max_trades_per_cycle: int = 5  # Max trades per scan cycle to prevent overtrading
 
     @field_validator("bankroll")
     @classmethod

@@ -30,18 +30,10 @@ def tmp_db(tmp_path) -> Database:
     """Create a temporary database for testing (FK constraints disabled for isolation)."""
     db_path = str(tmp_path / "test.db")
     db = Database(db_path=db_path, wal_mode=True)
-    # Disable FK constraints for test isolation
+    # Disable FK constraints for test isolation on the persistent connection
     conn = db._get_conn()
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.commit()
-    conn.close()
-    # Monkey-patch _get_conn to disable FKs in all test connections
-    _original_get_conn = db._get_conn
-    def _test_get_conn():
-        conn = _original_get_conn()
-        conn.execute("PRAGMA foreign_keys=OFF")
-        return conn
-    db._get_conn = _test_get_conn
     return db
 
 

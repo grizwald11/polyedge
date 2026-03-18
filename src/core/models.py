@@ -105,6 +105,11 @@ class LiquidityTier(str, Enum):
     LOW = "low"         # <$10K depth
 
 
+class TokenOutcome(str, Enum):
+    YES = "Yes"
+    NO = "No"
+
+
 # ──────────────────────────────────────────────
 # Market Models
 # ──────────────────────────────────────────────
@@ -112,7 +117,7 @@ class LiquidityTier(str, Enum):
 class MarketToken(BaseModel):
     """A single outcome token (YES or NO) within a market."""
     token_id: str
-    outcome: str  # "Yes" or "No"
+    outcome: TokenOutcome
     price: float = 0.0  # In dollars (0.01-0.99)
     winner: Optional[bool] = None
 
@@ -143,14 +148,14 @@ class Market(BaseModel):
     @property
     def yes_token(self) -> Optional[MarketToken]:
         for t in self.tokens:
-            if t.outcome.lower() == "yes":
+            if t.outcome == TokenOutcome.YES:
                 return t
         return None
 
     @property
     def no_token(self) -> Optional[MarketToken]:
         for t in self.tokens:
-            if t.outcome.lower() == "no":
+            if t.outcome == TokenOutcome.NO:
                 return t
         return None
 
@@ -329,6 +334,7 @@ class ForecastResult(BaseModel):
     tokens_used: int = 0
     latency_ms: int = 0
     raw_response: str = ""
+    parse_failed: bool = False
 
 
 class EnsembleForecast(BaseModel):

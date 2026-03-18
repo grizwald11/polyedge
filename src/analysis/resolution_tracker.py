@@ -98,30 +98,27 @@ class ResolutionTracker:
         outcome_int = 1 if actual_outcome else 0
 
         conn = self.db._get_conn()
-        try:
-            # Get unresolved predictions for this market
-            rows = conn.execute(
-                """SELECT id, predicted_probability, market_price_at_prediction
-                   FROM calibration_records
-                   WHERE market_id = ? AND actual_outcome IS NULL""",
-                (market_id,),
-            ).fetchall()
+        # Get unresolved predictions for this market
+        rows = conn.execute(
+            """SELECT id, predicted_probability, market_price_at_prediction
+               FROM calibration_records
+               WHERE market_id = ? AND actual_outcome IS NULL""",
+            (market_id,),
+        ).fetchall()
 
-            if not rows:
-                return 0
+        if not rows:
+            return 0
 
-            for row in rows:
-                pred_prob = row["predicted_probability"]
-                brier = (pred_prob - float(outcome_int)) ** 2
+        for row in rows:
+            pred_prob = row["predicted_probability"]
+            brier = (pred_prob - float(outcome_int)) ** 2
 
-                conn.execute(
-                    """UPDATE calibration_records
-                       SET actual_outcome = ?, resolved_at = ?, brier_score = ?
-                       WHERE id = ?""",
-                    (outcome_int, now, brier, row["id"]),
-                )
+            conn.execute(
+                """UPDATE calibration_records
+                   SET actual_outcome = ?, resolved_at = ?, brier_score = ?
+                   WHERE id = ?""",
+                (outcome_int, now, brier, row["id"]),
+            )
 
-            conn.commit()
-            return len(rows)
-        finally:
-            conn.close()
+        conn.commit()
+        return len(rows)

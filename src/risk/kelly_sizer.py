@@ -63,12 +63,13 @@ class KellySizer:
         # Kelly fraction: f = (p * b - q) / b
         # where p = probability of winning, q = 1-p, b = odds (payout ratio)
         # For binary markets: b = (1 - market_price) / market_price
-        # Simplified: f = p - q / b = p - (1-p) * price / (1-price)
-        # Even simpler: f = edge / (1 - market_price) where market_price = probability - edge...
-        # Actually: Kelly f = edge / odds_against
         # market_price = probability - edge (approx)
         market_price = probability - edge
-        if market_price <= 0 or market_price >= 1:
+        if market_price <= 0.01 or market_price >= 0.99:
+            logger.debug(
+                f"Kelly: invalid market_price={market_price:.3f} "
+                f"(prob={probability:.3f}, edge={edge:.3f}) — skipping"
+            )
             return 0
 
         # Payout if win: (1 - market_price) per contract
@@ -120,9 +121,15 @@ class KellySizer:
             if cost_price + fee_dollars <= kelly_dollars:
                 contracts = 1
 
-        # Apply calibration-based multiplier
-        if self._calibration_multiplier < 1.0 and contracts > 1:
-            contracts = max(1, int(contracts * self._calibration_multiplier))
+        # Apply calibration-based multiplier — reduce sizing when forecasting is poor.
+        # For multi-contract positions, scale down. For single-contract positions
+        # with very poor calibration (≤25%), skip entirely to protect capital.
+        if self._calibration_multiplier < 1.0 and contracts > 0:
+            scaled = int(contracts * self._calibration_multiplier)
+            if scaled == 0 and self._calibration_multiplier <= 0.25:
+                # Very poor calibration — don't trade at all
+                return 0
+            contracts = max(1, scaled) if contracts > 1 else contracts
 
         logger.debug(
             f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "

@@ -38,7 +38,6 @@ def _insert_trade(db, market_id, strategy, pnl, side="BUY", price=0.50, size=10,
         ts,
     ))
     conn.commit()
-    conn.close()
 
 
 def _insert_calibration(db, market_id, strategy, predicted, actual_outcome, days_ago=5):
@@ -52,7 +51,6 @@ def _insert_calibration(db, market_id, strategy, predicted, actual_outcome, days
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (market_id, "Test?", strategy, predicted, 0.50, int(actual_outcome), ts))
     conn.commit()
-    conn.close()
 
 
 class TestRunBacktest:

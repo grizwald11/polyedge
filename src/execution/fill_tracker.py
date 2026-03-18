@@ -35,6 +35,7 @@ class FillTracker:
         self.db = db
         self._pending_orders: dict[str, Order] = {}  # order_id -> Order
         self._ws_fills: list[Trade] = []  # Fills received via WebSocket
+        self._processed_fills: set[str] = set()  # Dedup: order_ids already filled
 
     def track(self, order: Order):
         """Register an order for fill tracking."""
@@ -115,7 +116,11 @@ class FillTracker:
         return fills
 
     def _record_fill(self, order: Order, kalshi_data: dict) -> Optional[Trade]:
-        """Record a detected fill."""
+        """Record a detected fill. Returns None if already processed (dedup)."""
+        if order.id in self._processed_fills:
+            logger.debug(f"Fill already processed for {order.id} — skipping duplicate")
+            return None
+        self._processed_fills.add(order.id)
         now = datetime.now(timezone.utc)
 
         order.status = OrderStatus.FILLED
@@ -162,36 +167,33 @@ class FillTracker:
     def _log_order(self, order: Order):
         """Persist order status to database."""
         conn = self.db._get_conn()
-        try:
-            conn.execute("""
-                INSERT OR REPLACE INTO orders (
-                    id, market_id, token_id, side, price, size, cost,
-                    order_type, fee_rate_bps, status, strategy, signal_id,
-                    paper, created_at, filled_at, fill_price, cancelled_at, rejection_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                order.id,
-                order.market_id,
-                order.token_id,
-                order.side.value,
-                order.price,
-                order.size,
-                order.cost,
-                order.order_type.value,
-                order.fee_rate_bps,
-                order.status.value,
-                order.strategy.value,
-                order.signal_id,
-                int(order.paper),
-                order.created_at.isoformat(),
-                order.filled_at.isoformat() if order.filled_at else None,
-                order.fill_price,
-                order.cancelled_at.isoformat() if order.cancelled_at else None,
-                order.rejection_reason,
-            ))
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute("""
+            INSERT OR REPLACE INTO orders (
+                id, market_id, token_id, side, price, size, cost,
+                order_type, fee_rate_bps, status, strategy, signal_id,
+                paper, created_at, filled_at, fill_price, cancelled_at, rejection_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            order.id,
+            order.market_id,
+            order.token_id,
+            order.side.value,
+            order.price,
+            order.size,
+            order.cost,
+            order.order_type.value,
+            order.fee_rate_bps,
+            order.status.value,
+            order.strategy.value,
+            order.signal_id,
+            int(order.paper),
+            order.created_at.isoformat(),
+            order.filled_at.isoformat() if order.filled_at else None,
+            order.fill_price,
+            order.cancelled_at.isoformat() if order.cancelled_at else None,
+            order.rejection_reason,
+        ))
+        conn.commit()
 
     @property
     def pending_count(self) -> int:

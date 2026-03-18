@@ -101,11 +101,15 @@ def multi_model_ensemble(
         EnsembleForecast with Brier-weighted combined probability
     """
     if not forecasts:
+        logger.warning(
+            "multi_model_ensemble called with no forecasts — "
+            "returning market price as fallback (no edge, minimal confidence)"
+        )
         return EnsembleForecast(
             final_probability=max(0.01, min(0.99, market_price)),
             market_price=market_price,
             edge=0.0,
-            confidence=0.1,
+            confidence=0.01,
         )
 
     # Build model weights

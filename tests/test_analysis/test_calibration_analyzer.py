@@ -52,7 +52,6 @@ def _seed_resolved(tmp_db, predictions: list[tuple[str, str, float, int]]):
             ),
         )
     conn.commit()
-    conn.close()
 
 
 class TestGenerateReport:
@@ -88,7 +87,6 @@ class TestGenerateReport:
             ("MKT-OPEN", "Open?", "ai_probability", 0.50, 0.45, now),
         )
         conn.commit()
-        conn.close()
 
         report = analyzer.generate_report()
         assert report.total_resolved == 1
@@ -255,7 +253,6 @@ class TestDatabaseMethods:
         # The columns should exist after initialization
         conn = db._get_conn()
         cols = {row[1] for row in conn.execute("PRAGMA table_info(calibration_records)").fetchall()}
-        conn.close()
 
         assert "brier_score" in cols
         assert "profit_loss" in cols

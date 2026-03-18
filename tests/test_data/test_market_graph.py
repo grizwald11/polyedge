@@ -34,6 +34,7 @@ class TestMarketGraphFallback:
         graph._collection = None
         graph._client = None
         graph._available = False
+        graph._indexed_markets = []
         return graph
 
     def test_init_without_chromadb(self):
@@ -48,12 +49,27 @@ class TestMarketGraphFallback:
         markets = [_make_market("TEST", "Test market")]
         graph.index_markets(markets)  # Should not raise
 
-    def test_find_related_fallback(self):
-        """find_related should return empty list when ChromaDB unavailable."""
+    def test_find_related_fallback_empty(self):
+        """find_related should return empty list when no markets indexed."""
         graph = self._make_unavailable_graph()
         market = _make_market("TEST", "Test market")
         related = graph.find_related(market)
         assert related == []
+
+    def test_find_related_keyword_fallback(self):
+        """find_related should use keyword matching when ChromaDB unavailable."""
+        graph = self._make_unavailable_graph()
+        markets = [
+            _make_market("FED-CUT", "Will the Federal Reserve cut interest rates in May?"),
+            _make_market("FED-HOLD", "Will the Federal Reserve hold interest rates in May?"),
+            _make_market("ALIENS", "Will aliens make first contact with Earth?"),
+        ]
+        graph.index_markets(markets)
+
+        related = graph.find_related(markets[0], n=5)
+        # FED-HOLD should rank higher than ALIENS due to keyword overlap
+        assert len(related) >= 1
+        assert related[0]["ticker"] == "FED-HOLD"
 
     def test_find_mutual_exclusives_fallback(self):
         """find_mutual_exclusives should return empty when unavailable."""

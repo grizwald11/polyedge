@@ -217,3 +217,79 @@ class TestPortfolioMetrics:
         pm.update_price("B", 0.45, 0.55)  # -0.5
 
         assert pm.get_total_unrealized_pnl() == pytest.approx(0.50)
+
+
+class TestPositionSync:
+    @pytest.mark.asyncio
+    async def test_sync_adds_missing_positions(self, tmp_db):
+        """Auto-correct should add positions found on Kalshi but missing locally."""
+        from unittest.mock import AsyncMock
+
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        assert pm.get_position_count() == 0
+
+        mock_kalshi = AsyncMock()
+        mock_kalshi.get_positions = AsyncMock(return_value=[
+            {
+                "ticker": "FED-RATE-CUT",
+                "market_exposure": 100,
+                "yes_count": 10,
+                "no_count": 0,
+                "average_price": 34,
+                "title": "Will the Fed cut rates?",
+            },
+        ])
+
+        mismatches = await pm.sync_with_kalshi(mock_kalshi, auto_correct=True)
+        assert mismatches == 1
+        assert pm.has_position("FED-RATE-CUT")
+        pos = pm.get_position("FED-RATE-CUT")
+        assert pos.size == 10.0
+        assert pos.direction == Direction.BUY_YES
+
+    @pytest.mark.asyncio
+    async def test_sync_removes_stale_live_positions(self, tmp_db):
+        """Auto-correct should remove local live positions not on Kalshi."""
+        from unittest.mock import AsyncMock
+
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        # Create a local live position
+        pm.update_from_trade(_make_trade(
+            market_id="STALE-MKT", token_id="STALE-MKT_yes",
+            side=Side.BUY, price=0.50, size=5,
+        ))
+        # Mark it as live (not paper)
+        pm._positions["STALE-MKT"].paper = False
+        assert pm.has_position("STALE-MKT")
+
+        mock_kalshi = AsyncMock()
+        # Return at least one API position so api_positions is non-empty
+        mock_kalshi.get_positions = AsyncMock(return_value=[
+            {"ticker": "OTHER-MKT", "market_exposure": 50, "yes_count": 5, "no_count": 0},
+        ])
+
+        mismatches = await pm.sync_with_kalshi(mock_kalshi, auto_correct=True)
+        assert mismatches >= 1
+        assert not pm.has_position("STALE-MKT")
+
+    @pytest.mark.asyncio
+    async def test_sync_log_only_mode(self, tmp_db):
+        """With auto_correct=False, mismatches are logged but not corrected."""
+        from unittest.mock import AsyncMock
+
+        pm = PositionManager(tmp_db, bankroll=500.0)
+
+        mock_kalshi = AsyncMock()
+        mock_kalshi.get_positions = AsyncMock(return_value=[
+            {
+                "ticker": "FED-RATE-CUT",
+                "market_exposure": 100,
+                "yes_count": 10,
+                "no_count": 0,
+            },
+        ])
+
+        mismatches = await pm.sync_with_kalshi(mock_kalshi, auto_correct=False)
+        assert mismatches == 1
+        # Position should NOT have been added
+        assert not pm.has_position("FED-RATE-CUT")

@@ -133,13 +133,6 @@ def integration_db(tmp_path) -> Database:
     conn = db._get_conn()
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.commit()
-    conn.close()
-    _original = db._get_conn
-    def _patched():
-        c = _original()
-        c.execute("PRAGMA foreign_keys=OFF")
-        return c
-    db._get_conn = _patched
     return db
 
 
@@ -561,7 +554,7 @@ class TestFullPaperTradeCycle:
         crashed_markets = _make_markets()
         for m in crashed_markets:
             for token in m.tokens:
-                if token.outcome.lower() == "yes":
+                if token.outcome == "Yes":
                     token.price = 0.05  # Crashed YES price
                 else:
                     token.price = 0.95
@@ -578,3 +571,62 @@ class TestFullPaperTradeCycle:
             f"Expected exits: had {positions_before_exit} positions, "
             f"now have {positions_after_exit}"
         )
+
+    @pytest.mark.asyncio
+    async def test_max_trades_per_cycle_limits_execution(self, integration_db):
+        """max_trades_per_cycle should cap how many trades execute per cycle."""
+        db = integration_db
+        # Set max_trades_per_cycle to 1 — only best signal should trade
+        settings = Settings(
+            trading={
+                "mode": "paper", "bankroll": 500.0,
+                "min_edge_ai": 0.05, "max_trades_per_cycle": 1,
+            },
+        )
+        markets = _make_markets()
+
+        mock_discovery = AsyncMock()
+        scanner = MarketScanner(mock_discovery, db, settings)
+        scanner.run_scan_cycle = AsyncMock(return_value=markets)
+
+        forecaster = ClaudeForecaster(settings)
+        # Return 42% — gives 8% edge over 34% market price (passes min_edge)
+        forecaster.assess_market = AsyncMock(return_value=_mock_forecast(0.42))
+
+        calibration = CalibrationTracker(db)
+        calibration_analyzer = CalibrationAnalyzer(db)
+        resolution_tracker = MagicMock()
+        resolution_tracker.check_resolutions = AsyncMock(return_value=0)
+
+        from src.strategies.ai_probability import AIProbabilityStrategy
+        from src.strategies.obvious_no import ObviousNoStrategy
+
+        ai_strategy = AIProbabilityStrategy(forecaster, settings, db, calibration_analyzer)
+        no_strategy = ObviousNoStrategy(settings)
+
+        order_builder = OrderBuilder(settings)
+        mock_kalshi = AsyncMock()
+        order_router = OrderRouter(settings, mock_kalshi, db)
+        position_manager = PositionManager(db, settings.trading.bankroll)
+        fill_tracker = FillTracker(mock_kalshi, db)
+        alert_manager = AlertManager()
+
+        circuit_breaker = CircuitBreaker(settings, db)
+        kelly_sizer = KellySizer(settings)
+        risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
+
+        await scan_and_trade(
+            scanner=scanner, ai_strategy=ai_strategy, no_strategy=no_strategy,
+            news_strategy=None, cross_arb_strategy=None, whale_strategy=None,
+            market_graph=None, risk_engine=risk_engine, kelly_sizer=kelly_sizer,
+            circuit_breaker=circuit_breaker, order_builder=order_builder,
+            order_router=order_router, position_manager=position_manager,
+            calibration=calibration, resolution_tracker=resolution_tracker,
+            calibration_analyzer=calibration_analyzer, fill_tracker=fill_tracker,
+            alert_manager=alert_manager, metrics=None, settings=settings,
+            cycle_count=1,
+        )
+
+        # Only 1 trade should have executed despite multiple signals
+        assert position_manager.get_position_count() <= 1
+        assert db.get_stats()["total_trades"] <= 1

@@ -37,6 +37,7 @@ trading:
   prefer_maker: true            # Always use limit orders when possible
   daily_loss_limit_pct: 0.10    # 10% daily loss circuit breaker
   max_obvious_no_pct: 0.10      # Max 10% bankroll in obvious NO positions
+  max_trades_per_cycle: 5       # Max trades per scan cycle to prevent overtrading
 
 claude:
   model_primary: "claude-opus-4-6"

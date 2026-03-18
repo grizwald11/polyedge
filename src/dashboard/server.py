@@ -85,15 +85,12 @@ def create_app(db: Database, metrics: Metrics | None = None) -> Optional[object]
     async def api_positions():
         """Get all open positions from trade history."""
         conn = db._get_conn()
-        try:
-            # Get latest trades per market to reconstruct positions
-            rows = conn.execute(
-                "SELECT market_id, side, price, size, strategy, timestamp "
-                "FROM trades ORDER BY timestamp DESC LIMIT 100"
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        # Get latest trades per market to reconstruct positions
+        rows = conn.execute(
+            "SELECT market_id, side, price, size, strategy, timestamp "
+            "FROM trades ORDER BY timestamp DESC LIMIT 100"
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     @app.get("/api/trades")
     async def api_trades():

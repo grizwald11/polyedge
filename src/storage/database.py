@@ -202,6 +202,7 @@ class Database:
     def __init__(self, db_path: str = "data/markets.db", wal_mode: bool = True):
         self.db_path = db_path
         self.wal_mode = wal_mode
+        self._conn: Optional[sqlite3.Connection] = None
         self._ensure_directory()
         self._init_db()
 
@@ -209,28 +210,37 @@ class Database:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        if self._conn is not None:
+            return self._conn
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         if self.wal_mode:
             conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        self._conn = conn
         return conn
+
+    def close(self):
+        """Close the persistent database connection."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     def _init_db(self):
         """Create tables if they don't exist."""
         conn = self._get_conn()
-        try:
-            conn.executescript(SCHEMA_SQL)
-            # Set schema version
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
-                (SCHEMA_VERSION,)
-            )
-            conn.commit()
-            self._run_migrations(conn)
-            logger.info(f"Database initialized at {self.db_path}")
-        finally:
-            conn.close()
+        conn.executescript(SCHEMA_SQL)
+        # Set schema version
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
+            (SCHEMA_VERSION,)
+        )
+        conn.commit()
+        self._run_migrations(conn)
+        logger.info(f"Database initialized at {self.db_path}")
 
     def _run_migrations(self, conn: sqlite3.Connection):
         """Run schema migrations for existing databases."""
@@ -313,7 +323,58 @@ class Database:
         """Insert or update a market."""
         now = datetime.now(timezone.utc).isoformat()
         conn = self._get_conn()
-        try:
+        conn.execute("""
+            INSERT INTO markets (
+                ticker, question, description, category, tags, tokens,
+                end_date, volume_24h, volume_total, liquidity, spread,
+                active, closed, resolution_source, slug, subtitle, event_ticker,
+                first_seen, last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker) DO UPDATE SET
+                question=excluded.question,
+                description=excluded.description,
+                category=excluded.category,
+                tags=excluded.tags,
+                tokens=excluded.tokens,
+                end_date=excluded.end_date,
+                volume_24h=excluded.volume_24h,
+                volume_total=excluded.volume_total,
+                liquidity=excluded.liquidity,
+                spread=excluded.spread,
+                active=excluded.active,
+                closed=excluded.closed,
+                resolution_source=excluded.resolution_source,
+                last_updated=excluded.last_updated
+        """, (
+            market.ticker,
+            market.question,
+            market.description,
+            market.category.value,
+            json.dumps(market.tags),
+            json.dumps([t.model_dump() for t in market.tokens]),
+            market.end_date.isoformat() if market.end_date else None,
+            market.volume_24h,
+            market.volume_total,
+            market.liquidity,
+            market.spread,
+            int(market.active),
+            int(market.closed),
+            market.resolution_source,
+            market.slug,
+            market.subtitle,
+            market.event_ticker,
+            now,
+            now,
+        ))
+        conn.commit()
+
+    def upsert_markets(self, markets: list[Market]):
+        """Bulk upsert markets in a single transaction (much faster than N separate calls)."""
+        if not markets:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self._get_conn()
+        for market in markets:
             conn.execute("""
                 INSERT INTO markets (
                     ticker, question, description, category, tags, tokens,
@@ -357,45 +418,29 @@ class Database:
                 now,
                 now,
             ))
-            conn.commit()
-        finally:
-            conn.close()
-
-    def upsert_markets(self, markets: list[Market]):
-        """Bulk upsert markets."""
-        for market in markets:
-            self.upsert_market(market)
+        conn.commit()
 
     def get_active_markets(self) -> list[dict]:
         """Get all active markets from database."""
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM markets WHERE active=1 AND closed=0 ORDER BY volume_24h DESC"
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT * FROM markets WHERE active=1 AND closed=0 ORDER BY volume_24h DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_market(self, ticker: str) -> Optional[dict]:
         """Get a single market by ticker."""
         conn = self._get_conn()
-        try:
-            row = conn.execute(
-                "SELECT * FROM markets WHERE ticker=?", (ticker,)
-            ).fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
+        row = conn.execute(
+            "SELECT * FROM markets WHERE ticker=?", (ticker,)
+        ).fetchone()
+        return dict(row) if row else None
 
     def get_market_count(self) -> int:
         """Get total active market count."""
         conn = self._get_conn()
-        try:
-            row = conn.execute("SELECT COUNT(*) as cnt FROM markets WHERE active=1").fetchone()
-            return row["cnt"] if row else 0
-        finally:
-            conn.close()
+        row = conn.execute("SELECT COUNT(*) as cnt FROM markets WHERE active=1").fetchone()
+        return row["cnt"] if row else 0
 
     # ──────────────────────────────────────
     # Snapshot Operations
@@ -404,22 +449,19 @@ class Database:
     def log_snapshot(self, snapshot: MarketSnapshot):
         """Log a market price snapshot."""
         conn = self._get_conn()
-        try:
-            conn.execute("""
-                INSERT INTO market_snapshots (market_id, timestamp, yes_price, no_price, spread, volume_1h, liquidity)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                snapshot.market_id,
-                snapshot.timestamp.isoformat(),
-                snapshot.yes_price,
-                snapshot.no_price,
-                snapshot.spread,
-                snapshot.volume_1h,
-                snapshot.liquidity,
-            ))
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute("""
+            INSERT INTO market_snapshots (market_id, timestamp, yes_price, no_price, spread, volume_1h, liquidity)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            snapshot.market_id,
+            snapshot.timestamp.isoformat(),
+            snapshot.yes_price,
+            snapshot.no_price,
+            snapshot.spread,
+            snapshot.volume_1h,
+            snapshot.liquidity,
+        ))
+        conn.commit()
 
     # ──────────────────────────────────────
     # Signal Operations
@@ -428,54 +470,45 @@ class Database:
     def log_signal(self, signal: Signal) -> int:
         """Log a trading signal, return the row ID."""
         conn = self._get_conn()
-        try:
-            cursor = conn.execute("""
-                INSERT INTO signals (
-                    strategy, market_id, market_question, direction,
-                    edge, probability_estimate, market_price, confidence,
-                    reasoning, timestamp, acted_on, order_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                signal.strategy.value,
-                signal.market_id,
-                signal.market_question,
-                signal.direction.value,
-                signal.edge,
-                signal.probability_estimate,
-                signal.market_price,
-                signal.confidence,
-                signal.reasoning,
-                signal.timestamp.isoformat(),
-                int(signal.acted_on),
-                signal.order_id,
-            ))
-            conn.commit()
-            return cursor.lastrowid
-        finally:
-            conn.close()
+        cursor = conn.execute("""
+            INSERT INTO signals (
+                strategy, market_id, market_question, direction,
+                edge, probability_estimate, market_price, confidence,
+                reasoning, timestamp, acted_on, order_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            signal.strategy.value,
+            signal.market_id,
+            signal.market_question,
+            signal.direction.value,
+            signal.edge,
+            signal.probability_estimate,
+            signal.market_price,
+            signal.confidence,
+            signal.reasoning,
+            signal.timestamp.isoformat(),
+            int(signal.acted_on),
+            signal.order_id,
+        ))
+        conn.commit()
+        return cursor.lastrowid
 
     def update_signal_acted_on(self, signal_id: int, order_id: str):
         """Mark a signal as acted on after successful trade execution."""
         conn = self._get_conn()
-        try:
-            conn.execute(
-                "UPDATE signals SET acted_on=1, order_id=? WHERE id=?",
-                (order_id, signal_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute(
+            "UPDATE signals SET acted_on=1, order_id=? WHERE id=?",
+            (order_id, signal_id),
+        )
+        conn.commit()
 
     def get_recent_signals(self, limit: int = 50) -> list[dict]:
         """Get recent signals."""
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM signals ORDER BY timestamp DESC LIMIT ?", (limit,)
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT * FROM signals ORDER BY timestamp DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ──────────────────────────────────────
     # Trade Operations
@@ -484,40 +517,34 @@ class Database:
     def log_trade(self, trade: Trade) -> int:
         """Log a completed trade."""
         conn = self._get_conn()
-        try:
-            cursor = conn.execute("""
-                INSERT INTO trades (order_id, market_id, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                trade.order_id,
-                trade.market_id,
-                trade.token_id,
-                trade.side.value,
-                trade.price,
-                trade.size,
-                trade.fee,
-                trade.realized_pnl,
-                trade.strategy.value,
-                int(trade.paper),
-                trade.timestamp.isoformat(),
-            ))
-            conn.commit()
-            return cursor.lastrowid
-        finally:
-            conn.close()
+        cursor = conn.execute("""
+            INSERT INTO trades (order_id, market_id, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade.order_id,
+            trade.market_id,
+            trade.token_id,
+            trade.side.value,
+            trade.price,
+            trade.size,
+            trade.fee,
+            trade.realized_pnl,
+            trade.strategy.value,
+            int(trade.paper),
+            trade.timestamp.isoformat(),
+        ))
+        conn.commit()
+        return cursor.lastrowid
 
     def get_trades_today(self) -> list[dict]:
         """Get all trades from today."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM trades WHERE timestamp >= ? ORDER BY timestamp DESC",
-                (today,)
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE timestamp >= ? ORDER BY timestamp DESC",
+            (today,)
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_trades_for_date(self, date_str: str | None = None) -> list[dict]:
         """Get all trades for a specific date.
@@ -530,14 +557,11 @@ class Database:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM trades WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp DESC",
-                (date_str, next_date_str),
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp DESC",
+            (date_str, next_date_str),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_strategy_pnl(self, date_str: str | None = None) -> dict[str, dict]:
         """Get P&L breakdown by strategy for a date.
@@ -549,36 +573,30 @@ class Database:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT strategy, COUNT(*) as cnt, COALESCE(SUM(realized_pnl), 0) as total "
-                "FROM trades WHERE timestamp >= ? AND timestamp < ? GROUP BY strategy",
-                (date_str, next_date_str),
-            ).fetchall()
-            return {
-                row["strategy"]: {"count": row["cnt"], "pnl": row["total"]}
-                for row in rows
-            }
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT strategy, COUNT(*) as cnt, COALESCE(SUM(realized_pnl), 0) as total "
+            "FROM trades WHERE timestamp >= ? AND timestamp < ? GROUP BY strategy",
+            (date_str, next_date_str),
+        ).fetchall()
+        return {
+            row["strategy"]: {"count": row["cnt"], "pnl": row["total"]}
+            for row in rows
+        }
 
     def get_portfolio_summary(self) -> dict:
         """Get portfolio-level summary stats."""
         conn = self._get_conn()
-        try:
-            trades = conn.execute(
-                "SELECT COUNT(*) as cnt, COALESCE(SUM(realized_pnl), 0) as total FROM trades"
-            ).fetchone()
-            wins = conn.execute(
-                "SELECT COUNT(*) as cnt FROM trades WHERE realized_pnl > 0"
-            ).fetchone()
-            return {
-                "total_trades": trades["cnt"] if trades else 0,
-                "total_pnl": trades["total"] if trades else 0.0,
-                "winning_trades": wins["cnt"] if wins else 0,
-            }
-        finally:
-            conn.close()
+        trades = conn.execute(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(realized_pnl), 0) as total FROM trades"
+        ).fetchone()
+        wins = conn.execute(
+            "SELECT COUNT(*) as cnt FROM trades WHERE realized_pnl > 0"
+        ).fetchone()
+        return {
+            "total_trades": trades["cnt"] if trades else 0,
+            "total_pnl": trades["total"] if trades else 0.0,
+            "winning_trades": wins["cnt"] if wins else 0,
+        }
 
     def get_daily_pnl(self, date_str: str | None = None) -> float:
         """Get total realized P&L for a given day.
@@ -591,15 +609,12 @@ class Database:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
         conn = self._get_conn()
-        try:
-            row = conn.execute(
-                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM trades "
-                "WHERE timestamp >= ? AND timestamp < ?",
-                (date_str, next_date_str),
-            ).fetchone()
-            return row["total"] if row else 0.0
-        finally:
-            conn.close()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM trades "
+            "WHERE timestamp >= ? AND timestamp < ?",
+            (date_str, next_date_str),
+        ).fetchone()
+        return row["total"] if row else 0.0
 
     # ──────────────────────────────────────
     # Calibration Operations
@@ -608,49 +623,40 @@ class Database:
     def log_calibration(self, record: CalibrationRecord) -> int:
         """Log a calibration prediction."""
         conn = self._get_conn()
-        try:
-            cursor = conn.execute("""
-                INSERT INTO calibration_records (
-                    market_id, market_question, strategy,
-                    predicted_probability, market_price_at_prediction,
-                    actual_outcome, predicted_at, resolved_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                record.market_id,
-                record.market_question,
-                record.strategy.value,
-                record.predicted_probability,
-                record.market_price_at_prediction,
-                record.actual_outcome,
-                record.predicted_at.isoformat(),
-                record.resolved_at.isoformat() if record.resolved_at else None,
-            ))
-            conn.commit()
-            return cursor.lastrowid
-        finally:
-            conn.close()
+        cursor = conn.execute("""
+            INSERT INTO calibration_records (
+                market_id, market_question, strategy,
+                predicted_probability, market_price_at_prediction,
+                actual_outcome, predicted_at, resolved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            record.market_id,
+            record.market_question,
+            record.strategy.value,
+            record.predicted_probability,
+            record.market_price_at_prediction,
+            record.actual_outcome,
+            record.predicted_at.isoformat(),
+            record.resolved_at.isoformat() if record.resolved_at else None,
+        ))
+        conn.commit()
+        return cursor.lastrowid
 
     def get_unresolved_predictions(self) -> list[dict]:
         """Get predictions that haven't been resolved yet."""
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM calibration_records WHERE actual_outcome IS NULL"
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT * FROM calibration_records WHERE actual_outcome IS NULL"
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_all_calibration_records(self) -> list[dict]:
         """Get all calibration records for analysis."""
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM calibration_records ORDER BY predicted_at DESC"
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT * FROM calibration_records ORDER BY predicted_at DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def store_prediction(
         self,
@@ -680,25 +686,22 @@ class Database:
         """
         now = datetime.now(timezone.utc).isoformat()
         conn = self._get_conn()
-        try:
-            cursor = conn.execute("""
-                INSERT INTO calibration_records (
-                    market_id, market_question, strategy,
-                    predicted_probability, market_price_at_prediction,
-                    predicted_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                market_ticker,
-                market_question,
-                strategy,
-                predicted_probability,
-                market_price,
-                now,
-            ))
-            conn.commit()
-            return cursor.lastrowid
-        finally:
-            conn.close()
+        cursor = conn.execute("""
+            INSERT INTO calibration_records (
+                market_id, market_question, strategy,
+                predicted_probability, market_price_at_prediction,
+                predicted_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            market_ticker,
+            market_question,
+            strategy,
+            predicted_probability,
+            market_price,
+            now,
+        ))
+        conn.commit()
+        return cursor.lastrowid
 
     def get_resolved_predictions(
         self,
@@ -715,23 +718,20 @@ class Database:
             List of resolved calibration records.
         """
         conn = self._get_conn()
-        try:
-            query = "SELECT * FROM calibration_records WHERE actual_outcome IS NOT NULL"
-            params: list = []
+        query = "SELECT * FROM calibration_records WHERE actual_outcome IS NOT NULL"
+        params: list = []
 
-            if strategy:
-                query += " AND strategy = ?"
-                params.append(strategy)
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy)
 
-            if days:
-                query += " AND predicted_at >= datetime('now', ?)"
-                params.append(f"-{days} days")
+        if days:
+            query += " AND predicted_at >= datetime('now', ?)"
+            params.append(f"-{days} days")
 
-            query += " ORDER BY resolved_at DESC"
-            rows = conn.execute(query, params).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
+        query += " ORDER BY resolved_at DESC"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
 
     def update_resolution(
         self,
@@ -753,18 +753,15 @@ class Database:
         """
         now = datetime.now(timezone.utc).isoformat()
         conn = self._get_conn()
-        try:
-            cursor = conn.execute(
-                """UPDATE calibration_records
-                   SET actual_outcome = ?, resolved_at = ?,
-                       brier_score = ?, profit_loss = ?
-                   WHERE market_id = ? AND actual_outcome IS NULL""",
-                (actual_outcome, now, brier_score, profit_loss, market_id),
-            )
-            conn.commit()
-            return cursor.rowcount
-        finally:
-            conn.close()
+        cursor = conn.execute(
+            """UPDATE calibration_records
+               SET actual_outcome = ?, resolved_at = ?,
+                   brier_score = ?, profit_loss = ?
+               WHERE market_id = ? AND actual_outcome IS NULL""",
+            (actual_outcome, now, brier_score, profit_loss, market_id),
+        )
+        conn.commit()
+        return cursor.rowcount
 
     # ──────────────────────────────────────
     # Circuit Breaker State
@@ -781,41 +778,35 @@ class Database:
         """Persist circuit breaker state (singleton row, id=1)."""
         now = datetime.now(timezone.utc).isoformat()
         conn = self._get_conn()
-        try:
-            conn.execute("""
-                INSERT INTO circuit_breaker_state
-                    (id, consecutive_losing_days, reduced_sizing, halted,
-                     halt_reason, halt_time, last_updated)
-                VALUES (1, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    consecutive_losing_days=excluded.consecutive_losing_days,
-                    reduced_sizing=excluded.reduced_sizing,
-                    halted=excluded.halted,
-                    halt_reason=excluded.halt_reason,
-                    halt_time=excluded.halt_time,
-                    last_updated=excluded.last_updated
-            """, (
-                consecutive_losing_days,
-                int(reduced_sizing),
-                int(halted),
-                halt_reason,
-                halt_time,
-                now,
-            ))
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute("""
+            INSERT INTO circuit_breaker_state
+                (id, consecutive_losing_days, reduced_sizing, halted,
+                 halt_reason, halt_time, last_updated)
+            VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                consecutive_losing_days=excluded.consecutive_losing_days,
+                reduced_sizing=excluded.reduced_sizing,
+                halted=excluded.halted,
+                halt_reason=excluded.halt_reason,
+                halt_time=excluded.halt_time,
+                last_updated=excluded.last_updated
+        """, (
+            consecutive_losing_days,
+            int(reduced_sizing),
+            int(halted),
+            halt_reason,
+            halt_time,
+            now,
+        ))
+        conn.commit()
 
     def load_circuit_breaker_state(self) -> Optional[dict]:
         """Load persisted circuit breaker state. Returns None if no state saved."""
         conn = self._get_conn()
-        try:
-            row = conn.execute(
-                "SELECT * FROM circuit_breaker_state WHERE id=1"
-            ).fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
+        row = conn.execute(
+            "SELECT * FROM circuit_breaker_state WHERE id=1"
+        ).fetchone()
+        return dict(row) if row else None
 
     # ──────────────────────────────────────
     # Cooldowns
@@ -824,14 +815,11 @@ class Database:
     def save_cooldown(self, market_id: str, exit_time: datetime):
         """Persist a cooldown entry."""
         conn = self._get_conn()
-        try:
-            conn.execute(
-                "INSERT OR REPLACE INTO cooldowns (market_id, exit_time) VALUES (?, ?)",
-                (market_id, exit_time.isoformat()),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute(
+            "INSERT OR REPLACE INTO cooldowns (market_id, exit_time) VALUES (?, ?)",
+            (market_id, exit_time.isoformat()),
+        )
+        conn.commit()
 
     def load_cooldowns(self, max_age_seconds: int = 3600) -> dict[str, datetime]:
         """Load valid cooldowns, deleting expired ones.
@@ -843,39 +831,33 @@ class Database:
             Dict of market_id -> exit_time for still-active cooldowns.
         """
         conn = self._get_conn()
-        try:
-            rows = conn.execute("SELECT market_id, exit_time FROM cooldowns").fetchall()
-            now = datetime.now(timezone.utc)
-            active: dict[str, datetime] = {}
-            expired: list[str] = []
+        rows = conn.execute("SELECT market_id, exit_time FROM cooldowns").fetchall()
+        now = datetime.now(timezone.utc)
+        active: dict[str, datetime] = {}
+        expired: list[str] = []
 
-            for row in rows:
-                exit_time = datetime.fromisoformat(row["exit_time"])
-                if (now - exit_time).total_seconds() < max_age_seconds:
-                    active[row["market_id"]] = exit_time
-                else:
-                    expired.append(row["market_id"])
+        for row in rows:
+            exit_time = datetime.fromisoformat(row["exit_time"])
+            if (now - exit_time).total_seconds() < max_age_seconds:
+                active[row["market_id"]] = exit_time
+            else:
+                expired.append(row["market_id"])
 
-            # Clean up expired
-            if expired:
-                conn.executemany(
-                    "DELETE FROM cooldowns WHERE market_id=?",
-                    [(m,) for m in expired],
-                )
-                conn.commit()
+        # Clean up expired
+        if expired:
+            conn.executemany(
+                "DELETE FROM cooldowns WHERE market_id=?",
+                [(m,) for m in expired],
+            )
+            conn.commit()
 
-            return active
-        finally:
-            conn.close()
+        return active
 
     def delete_cooldown(self, market_id: str):
         """Remove a cooldown entry."""
         conn = self._get_conn()
-        try:
-            conn.execute("DELETE FROM cooldowns WHERE market_id=?", (market_id,))
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute("DELETE FROM cooldowns WHERE market_id=?", (market_id,))
+        conn.commit()
 
     # ──────────────────────────────────────
     # Stats
@@ -884,17 +866,14 @@ class Database:
     def get_stats(self) -> dict:
         """Get database stats summary."""
         conn = self._get_conn()
-        try:
-            markets = conn.execute("SELECT COUNT(*) as cnt FROM markets WHERE active=1").fetchone()
-            signals = conn.execute("SELECT COUNT(*) as cnt FROM signals").fetchone()
-            trades = conn.execute("SELECT COUNT(*) as cnt FROM trades").fetchone()
-            pnl = conn.execute("SELECT COALESCE(SUM(realized_pnl), 0) as total FROM trades").fetchone()
+        markets = conn.execute("SELECT COUNT(*) as cnt FROM markets WHERE active=1").fetchone()
+        signals = conn.execute("SELECT COUNT(*) as cnt FROM signals").fetchone()
+        trades = conn.execute("SELECT COUNT(*) as cnt FROM trades").fetchone()
+        pnl = conn.execute("SELECT COALESCE(SUM(realized_pnl), 0) as total FROM trades").fetchone()
 
-            return {
-                "active_markets": markets["cnt"] if markets else 0,
-                "total_signals": signals["cnt"] if signals else 0,
-                "total_trades": trades["cnt"] if trades else 0,
-                "total_pnl": pnl["total"] if pnl else 0.0,
-            }
-        finally:
-            conn.close()
+        return {
+            "active_markets": markets["cnt"] if markets else 0,
+            "total_signals": signals["cnt"] if signals else 0,
+            "total_trades": trades["cnt"] if trades else 0,
+            "total_pnl": pnl["total"] if pnl else 0.0,
+        }

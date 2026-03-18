@@ -22,18 +22,20 @@ class MarketGraph:
         self._collection = None
         self._client = None
         self._available = False
+        self._indexed_markets: list[Market] = []  # Fallback store for keyword matching
         self._init_store()
 
     def _init_store(self):
         """Initialize ChromaDB collection. Degrades gracefully if unavailable."""
         try:
             import chromadb
-            from chromadb.config import Settings as ChromaSettings
 
-            self._client = chromadb.Client(ChromaSettings(
-                persist_directory=self.persist_dir,
-                anonymized_telemetry=False,
-            ))
+            # Use PersistentClient for disk-backed storage (avoids singleton
+            # conflict that chromadb.Client() has when called multiple times
+            # with different persist_directory settings).
+            self._client = chromadb.PersistentClient(
+                path=self.persist_dir,
+            )
             self._collection = self._client.get_or_create_collection(
                 name="markets",
                 metadata={"hnsw:space": "cosine"},
@@ -47,6 +49,9 @@ class MarketGraph:
 
     def index_markets(self, markets: list[Market]):
         """Index all markets into the vector store."""
+        # Always store for keyword fallback
+        self._indexed_markets = markets
+
         if not self._available or not self._collection:
             return
 
@@ -147,5 +152,51 @@ class MarketGraph:
         return pairs
 
     def _keyword_fallback(self, market: Market, n: int) -> list[dict]:
-        """Simple keyword-based fallback when ChromaDB is unavailable."""
-        return []
+        """Keyword-based fallback when ChromaDB is unavailable.
+
+        Uses Jaccard similarity on word sets from market questions.
+        """
+        if not self._indexed_markets:
+            return []
+
+        query_words = self._tokenize(f"{market.question} {market.description}")
+        if not query_words:
+            return []
+
+        scored: list[tuple[str, float, Market]] = []
+        for other in self._indexed_markets:
+            if other.ticker == market.ticker:
+                continue
+            other_words = self._tokenize(f"{other.question} {other.description}")
+            if not other_words:
+                continue
+            # Jaccard similarity
+            intersection = len(query_words & other_words)
+            union = len(query_words | other_words)
+            score = intersection / union if union > 0 else 0.0
+            if score > 0.1:  # Minimum 10% overlap
+                scored.append((other.ticker, score, other))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [
+            {
+                "ticker": ticker,
+                "score": score,
+                "event_ticker": m.event_ticker,
+                "category": m.category.value,
+            }
+            for ticker, score, m in scored[:n]
+        ]
+
+    @staticmethod
+    def _tokenize(text: str) -> set[str]:
+        """Tokenize text into a set of lowercase words (3+ chars)."""
+        import re
+        words = set(re.findall(r'\b[a-z]{3,}\b', text.lower()))
+        # Remove common stop words
+        stop_words = {
+            "the", "and", "for", "that", "this", "will", "with", "from",
+            "not", "are", "was", "has", "have", "had", "but", "can",
+            "its", "all", "any", "each", "than", "what", "when", "how",
+        }
+        return words - stop_words

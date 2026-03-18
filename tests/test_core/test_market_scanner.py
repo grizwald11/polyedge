@@ -46,15 +46,15 @@ class TestMarketScannerFilter:
             ticker="MULTI-001",
             question="Who wins?",
             tokens=[
-                MarketToken(token_id="a", outcome="Alice", price=0.4),
-                MarketToken(token_id="b", outcome="Bob", price=0.3),
-                MarketToken(token_id="c", outcome="Carol", price=0.3),
+                MarketToken(token_id="a", outcome="Yes", price=0.4),
+                MarketToken(token_id="b", outcome="No", price=0.3),
+                MarketToken(token_id="c", outcome="Yes", price=0.3),
             ],
             volume_24h=100000,
             active=True,
         )
         result = scanner.filter_markets([multi])
-        assert len(result) == 0  # Not binary
+        assert len(result) == 0  # Not binary (3 tokens)
 
     def test_passes_qualifying_market(self, scanner, sample_market):
         result = scanner.filter_markets([sample_market])

@@ -82,9 +82,9 @@ class TestMarketModel:
             ticker="x",
             question="Who wins?",
             tokens=[
-                MarketToken(token_id="a", outcome="Alice", price=0.4),
-                MarketToken(token_id="b", outcome="Bob", price=0.3),
-                MarketToken(token_id="c", outcome="Carol", price=0.3),
+                MarketToken(token_id="a", outcome="Yes", price=0.4),
+                MarketToken(token_id="b", outcome="No", price=0.3),
+                MarketToken(token_id="c", outcome="Yes", price=0.3),
             ],
         )
         assert m.is_binary is False

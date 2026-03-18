@@ -37,7 +37,8 @@ def _seed_unresolved(tmp_db, n: int = 3):
             ),
         )
     conn.commit()
-    conn.close()
+
+
 
 
 class TestCheckResolutions:
@@ -167,7 +168,8 @@ class TestCheckResolutions:
                  0.5 + i * 0.1, 0.45, datetime.now(timezone.utc).isoformat()),
             )
         conn.commit()
-        conn.close()
+    
+
 
         tracker.kalshi.get_market = AsyncMock(return_value={
             "status": "settled",

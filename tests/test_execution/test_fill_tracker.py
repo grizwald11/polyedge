@@ -151,3 +151,26 @@ class TestFillTracker:
 
         assert len(fills) == 1
         assert tracker.pending_count == 1
+
+    @pytest.mark.asyncio
+    async def test_duplicate_fill_deduplicated(self, mock_kalshi, tmp_db):
+        """If the same order fill is detected twice (e.g. REST + WebSocket),
+        it should only be recorded once."""
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "executed",
+        })
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        tracker.track(order)
+
+        # First fill via REST polling
+        fills1 = await tracker.check_fills()
+        assert len(fills1) == 1
+
+        # Re-track the same order (simulate re-add after reconnect)
+        tracker._pending_orders[order.id] = order
+
+        # Second poll — should be deduplicated
+        fills2 = await tracker.check_fills()
+        assert len(fills2) == 0

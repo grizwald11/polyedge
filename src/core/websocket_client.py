@@ -111,7 +111,8 @@ class KalshiWebSocket:
             return
         self._subscriptions.update(new)
         if self._ws is not None:
-            asyncio.ensure_future(self._send_subscribe(list(new)))
+            task = asyncio.create_task(self._send_subscribe(list(new)))
+            task.add_done_callback(self._log_task_exception)
 
     def unsubscribe(self, tickers: list[str]):
         """Remove tickers from subscription set."""
@@ -120,7 +121,8 @@ class KalshiWebSocket:
             return
         self._subscriptions -= removing
         if self._ws is not None:
-            asyncio.ensure_future(self._send_unsubscribe(list(removing)))
+            task = asyncio.create_task(self._send_unsubscribe(list(removing)))
+            task.add_done_callback(self._log_task_exception)
 
     def set_channels(self, channels: list[str]):
         """Set which channels to subscribe to (ticker, fill, orderbook_delta, etc.)."""
@@ -203,6 +205,15 @@ class KalshiWebSocket:
     @property
     def subscription_count(self) -> int:
         return len(self._subscriptions)
+
+    @staticmethod
+    def _log_task_exception(task: asyncio.Task):
+        """Callback to log exceptions from fire-and-forget tasks."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(f"WebSocket background task failed: {exc}")
 
     # ── Internal ───────────────────────────────────
 

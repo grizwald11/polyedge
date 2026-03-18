@@ -269,6 +269,103 @@ class OrderRouter:
         except (EOFError, KeyboardInterrupt):
             return False
 
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a resting (open) live order.
+
+        Args:
+            order_id: The internal order ID (PE-xxx)
+
+        Returns:
+            True if successfully cancelled, False otherwise
+        """
+        # Look up the order in DB to get Kalshi order ID and current status
+        conn = self.db._get_conn()
+        row = conn.execute(
+            "SELECT status, paper FROM orders WHERE id=?", (order_id,)
+        ).fetchone()
+
+        if row is None:
+            logger.warning(f"Cancel failed: order {order_id} not found")
+            return False
+
+        if row["status"] != "open":
+            logger.warning(
+                f"Cancel failed: order {order_id} is {row['status']}, not open"
+            )
+            return False
+
+        if row["paper"]:
+            # Paper orders can be "cancelled" by just updating status
+            conn = self.db._get_conn()
+            conn.execute(
+                "UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), order_id),
+            )
+            conn.commit()
+            logger.info(f"[PAPER] Cancelled order {order_id}")
+            return True
+
+        try:
+            result = await self.kalshi.cancel_order(order_id)
+            if result is not None:
+                conn = self.db._get_conn()
+                conn.execute(
+                    "UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?",
+                    (datetime.now(timezone.utc).isoformat(), order_id),
+                )
+                conn.commit()
+                logger.info(f"[LIVE] Cancelled order {order_id}")
+                return True
+            else:
+                logger.warning(f"Cancel returned None for {order_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Cancel failed for {order_id}: {e}")
+            return False
+
+    async def cancel_stale_orders(self, max_age_seconds: int = 1800) -> int:
+        """Cancel open orders older than max_age_seconds.
+
+        Args:
+            max_age_seconds: Max time an order can rest before auto-cancel (default 30 min)
+
+        Returns:
+            Number of orders cancelled
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)).isoformat()
+        conn = self.db._get_conn()
+        rows = conn.execute(
+            "SELECT id FROM orders WHERE status='open' AND created_at < ?",
+            (cutoff,),
+        ).fetchall()
+
+        cancelled = 0
+        for row in rows:
+            if await self.cancel_order(row["id"]):
+                cancelled += 1
+        return cancelled
+
+    async def cancel_all_open(self) -> int:
+        """Cancel all open (resting) orders.
+
+        Returns:
+            Number of orders successfully cancelled
+        """
+        conn = self.db._get_conn()
+        rows = conn.execute(
+            "SELECT id FROM orders WHERE status='open'"
+        ).fetchall()
+
+        cancelled = 0
+        for row in rows:
+            if await self.cancel_order(row["id"]):
+                cancelled += 1
+        if cancelled:
+            logger.info(f"Cancelled {cancelled} open orders")
+        return cancelled
+
     def _live_gates_passed(self) -> bool:
         """Three-gate safety system for live trading."""
         # Gate 1: Config mode must be "live"
@@ -285,33 +382,30 @@ class OrderRouter:
     def _log_order(self, order: Order):
         """Persist order to database."""
         conn = self.db._get_conn()
-        try:
-            conn.execute("""
-                INSERT OR REPLACE INTO orders (
-                    id, market_id, token_id, side, price, size, cost,
-                    order_type, fee_rate_bps, status, strategy, signal_id,
-                    paper, created_at, filled_at, fill_price, cancelled_at, rejection_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                order.id,
-                order.market_id,
-                order.token_id,
-                order.side.value,
-                order.price,
-                order.size,
-                order.cost,
-                order.order_type.value,
-                order.fee_rate_bps,
-                order.status.value,
-                order.strategy.value,
-                order.signal_id,
-                int(order.paper),
-                order.created_at.isoformat(),
-                order.filled_at.isoformat() if order.filled_at else None,
-                order.fill_price,
-                order.cancelled_at.isoformat() if order.cancelled_at else None,
-                order.rejection_reason,
-            ))
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute("""
+            INSERT OR REPLACE INTO orders (
+                id, market_id, token_id, side, price, size, cost,
+                order_type, fee_rate_bps, status, strategy, signal_id,
+                paper, created_at, filled_at, fill_price, cancelled_at, rejection_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            order.id,
+            order.market_id,
+            order.token_id,
+            order.side.value,
+            order.price,
+            order.size,
+            order.cost,
+            order.order_type.value,
+            order.fee_rate_bps,
+            order.status.value,
+            order.strategy.value,
+            order.signal_id,
+            int(order.paper),
+            order.created_at.isoformat(),
+            order.filled_at.isoformat() if order.filled_at else None,
+            order.fill_price,
+            order.cancelled_at.isoformat() if order.cancelled_at else None,
+            order.rejection_reason,
+        ))
+        conn.commit()

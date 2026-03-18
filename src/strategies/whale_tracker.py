@@ -35,7 +35,9 @@ class WhaleTrackerStrategy:
         self.whale_monitor = whale_monitor
         self.settings = settings
         self.db = db
-        self.min_edge = settings.trading.min_edge_ai
+        # Whale consensus uses arb-level edge threshold since the signal
+        # comes from proven trader agreement, not probability estimation
+        self.min_edge = settings.trading.min_edge_arb
 
     def scan_for_opportunities(
         self, markets: list[Market]
@@ -81,16 +83,27 @@ class WhaleTrackerStrategy:
     def _build_signal(
         self, consensus, market: Market
     ) -> Optional[Signal]:
-        """Build a Signal from a whale consensus."""
-        # Use consensus direction to determine price
+        """Build a Signal from a whale consensus.
+
+        Edge is derived from whale avg entry price vs current market price.
+        If whales bought YES at $0.55 and market is now $0.50, edge = $0.05
+        (we can buy cheaper than proven profitable traders did).
+        """
         if consensus.direction == Direction.BUY_YES:
             current_price = market.yes_price
-            # Edge = how much cheaper we can still buy vs whale avg entry
-            # (If whales entered at higher prices, the market moved in their favor)
-            edge = max(0.01, consensus.consensus_pct * 0.10)  # Heuristic edge
+            avg_entry = consensus.avg_entry_price
         else:
             current_price = market.no_price
-            edge = max(0.01, consensus.consensus_pct * 0.10)
+            avg_entry = consensus.avg_entry_price
+
+        # Edge combines two components:
+        # 1. Price edge: can we buy cheaper than whales did?
+        # 2. Consensus edge: strong agreement from proven traders is itself signal
+        price_edge = max(0.0, avg_entry - current_price) if avg_entry > 0 else 0.0
+        consensus_edge = consensus.consensus_pct * 0.03  # Small informational edge
+
+        edge = max(0.01, price_edge + consensus_edge)
+        probability_estimate = min(0.99, current_price + edge)
 
         if edge < self.min_edge:
             return None
@@ -104,12 +117,13 @@ class WhaleTrackerStrategy:
             market_question=market.question,
             direction=consensus.direction,
             edge=edge,
-            probability_estimate=current_price + edge if consensus.direction == Direction.BUY_YES else current_price + edge,
+            probability_estimate=probability_estimate,
             market_price=current_price,
             confidence=min(1.0, confidence),
             reasoning=(
                 f"Whale consensus: {consensus.whale_count}/{consensus.basket_size} "
                 f"({consensus.consensus_pct:.0%}) agree on {consensus.direction.value}"
+                f"{f', avg entry ${avg_entry:.2f} vs market ${current_price:.2f}' if avg_entry > 0 else ''}"
             ),
         )
 
