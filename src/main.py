@@ -19,6 +19,8 @@ from src.data.market_scanner import MarketScanner
 from src.storage.database import Database
 from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.calibration import CalibrationTracker
+from src.analysis.resolution_tracker import ResolutionTracker
+from src.analysis.calibration_analyzer import CalibrationAnalyzer
 from src.strategies.ai_probability import AIProbabilityStrategy
 from src.strategies.obvious_no import ObviousNoStrategy
 from src.execution.order_builder import OrderBuilder
@@ -63,7 +65,10 @@ async def scan_and_trade(
     order_router: OrderRouter,
     position_manager: PositionManager,
     calibration: CalibrationTracker,
+    resolution_tracker: ResolutionTracker,
+    calibration_analyzer: CalibrationAnalyzer,
     settings,
+    cycle_count: int = 0,
 ):
     """Execute one scan-assess-trade cycle."""
     logger = logging.getLogger("polyedge.main")
@@ -164,21 +169,59 @@ async def scan_and_trade(
         f"exposure: ${position_manager.get_total_exposure():.2f}"
     )
 
+    # Check for resolved markets
+    try:
+        resolved = await resolution_tracker.check_resolutions()
+        if resolved > 0:
+            logger.info(f"Resolved {resolved} markets this cycle")
+    except Exception as e:
+        logger.error(f"Resolution check failed: {e}")
+
+    # Every 10 cycles (~50 min), generate and log calibration report
+    if cycle_count > 0 and cycle_count % 10 == 0:
+        try:
+            report = calibration_analyzer.generate_report()
+            if report.total_resolved > 0:
+                logger.info(
+                    f"Calibration report: "
+                    f"Brier={report.overall_brier:.3f}, "
+                    f"Win rate={report.overall_win_rate:.1%}, "
+                    f"Resolved={report.total_resolved}, "
+                    f"Unresolved={report.total_unresolved}"
+                )
+                if report.best_category:
+                    logger.info(f"  Best category: {report.best_category}")
+                if report.worst_category and report.worst_category != report.best_category:
+                    logger.info(f"  Worst category: {report.worst_category}")
+
+                adjustments = calibration_analyzer.get_category_adjustments()
+                if adjustments:
+                    for cat, adj in adjustments.items():
+                        direction = "underestimates" if adj > 0 else "overestimates"
+                        logger.info(f"  Claude {direction} {cat} by {abs(adj):.1%}")
+            else:
+                logger.info("Calibration: no resolved predictions yet")
+        except Exception as e:
+            logger.error(f"Calibration report failed: {e}")
+
 
 async def run_trading_loop(
     scanner, ai_strategy, no_strategy, risk_engine, kelly_sizer,
     circuit_breaker, order_builder, order_router, position_manager,
-    calibration, settings, interval,
+    calibration, resolution_tracker, calibration_analyzer, settings, interval,
 ):
     """Run the scan-assess-trade loop on an interval."""
     logger = logging.getLogger("polyedge.main")
+    cycle_count = 0
 
     while True:
         try:
+            cycle_count += 1
             await scan_and_trade(
                 scanner, ai_strategy, no_strategy, risk_engine, kelly_sizer,
                 circuit_breaker, order_builder, order_router, position_manager,
-                calibration, settings,
+                calibration, resolution_tracker, calibration_analyzer, settings,
+                cycle_count,
             )
             stats = scanner.db.get_stats()
             logger.info(
@@ -242,9 +285,11 @@ async def main():
     # Analysis
     forecaster = ClaudeForecaster(settings)
     calibration = CalibrationTracker(db)
+    resolution_tracker = ResolutionTracker(kalshi, db)
+    calibration_analyzer = CalibrationAnalyzer(db)
 
     # Strategies
-    ai_strategy = AIProbabilityStrategy(forecaster, settings)
+    ai_strategy = AIProbabilityStrategy(forecaster, settings, db)
     no_strategy = ObviousNoStrategy(settings)
 
     # Execution
@@ -276,7 +321,8 @@ async def main():
         await run_trading_loop(
             scanner, ai_strategy, no_strategy, risk_engine, kelly_sizer,
             circuit_breaker, order_builder, order_router, position_manager,
-            calibration, settings, settings.scanning.interval_seconds,
+            calibration, resolution_tracker, calibration_analyzer,
+            settings, settings.scanning.interval_seconds,
         )
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")

@@ -9,10 +9,13 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from typing import Optional as _Optional
+
 from src.config import Settings
 from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.ensemble import ensemble_forecast
 from src.core.models import Market, Signal, Direction, StrategyName
+from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +23,10 @@ logger = logging.getLogger(__name__)
 class AIProbabilityStrategy:
     """Strategy 1: Claude assesses true probability, trade when market is mispriced."""
 
-    def __init__(self, forecaster: ClaudeForecaster, settings: Settings):
+    def __init__(self, forecaster: ClaudeForecaster, settings: Settings, db: _Optional[Database] = None):
         self.forecaster = forecaster
         self.settings = settings
+        self.db = db
 
     async def scan_for_opportunities(
         self,
@@ -118,5 +122,21 @@ class AIProbabilityStrategy:
             f"(edge={edge:.1%}, claude={forecast.probability:.0%}, "
             f"market={market.yes_price:.0%})"
         )
+
+        # Store prediction for calibration tracking
+        if self.db is not None:
+            try:
+                self.db.store_prediction(
+                    market_ticker=market.ticker,
+                    predicted_probability=forecast.probability,
+                    predicted_side=direction.value,
+                    market_price=market.yes_price,
+                    strategy=StrategyName.AI_PROBABILITY.value,
+                    confidence_low=forecast.confidence_low,
+                    confidence_high=forecast.confidence_high,
+                    market_question=market.question,
+                )
+            except Exception as e:
+                logger.error(f"Failed to store prediction for {market.ticker}: {e}")
 
         return signal

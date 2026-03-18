@@ -17,7 +17,7 @@ from src.core.models import Market, MarketSnapshot, Signal, Order, Trade, Calibr
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 -- Markets (Kalshi uses ticker as primary key)
@@ -130,6 +130,8 @@ CREATE TABLE IF NOT EXISTS calibration_records (
     actual_outcome INTEGER,  -- NULL = unresolved, 1 = YES, 0 = NO
     predicted_at TEXT NOT NULL,
     resolved_at TEXT,
+    brier_score REAL,        -- (predicted - actual)^2
+    profit_loss REAL,        -- realized P&L for this prediction
     FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_market ON calibration_records(market_id);
@@ -186,9 +188,25 @@ class Database:
                 (SCHEMA_VERSION,)
             )
             conn.commit()
+            self._run_migrations(conn)
             logger.info(f"Database initialized at {self.db_path}")
         finally:
             conn.close()
+
+    def _run_migrations(self, conn: sqlite3.Connection):
+        """Run schema migrations for existing databases."""
+        # Migration v2 -> v3: add brier_score and profit_loss to calibration_records
+        existing_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(calibration_records)").fetchall()
+        }
+        if "brier_score" not in existing_cols:
+            conn.execute("ALTER TABLE calibration_records ADD COLUMN brier_score REAL")
+            logger.info("Migration: added brier_score column to calibration_records")
+        if "profit_loss" not in existing_cols:
+            conn.execute("ALTER TABLE calibration_records ADD COLUMN profit_loss REAL")
+            logger.info("Migration: added profit_loss column to calibration_records")
+        conn.commit()
 
     # ──────────────────────────────────────
     # Market Operations
@@ -453,6 +471,120 @@ class Database:
                 "SELECT * FROM calibration_records ORDER BY predicted_at DESC"
             ).fetchall()
             return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def store_prediction(
+        self,
+        market_ticker: str,
+        predicted_probability: float,
+        predicted_side: str,
+        market_price: float,
+        strategy: str = "ai_probability",
+        confidence_low: float = 0.0,
+        confidence_high: float = 1.0,
+        market_question: str = "",
+    ) -> int:
+        """Store a prediction when Claude makes an assessment.
+
+        Args:
+            market_ticker: Market ticker.
+            predicted_probability: Our estimated probability (0-1).
+            predicted_side: "YES" or "NO" — the side we'd bet.
+            market_price: Market price at time of prediction.
+            strategy: Strategy name.
+            confidence_low: Lower bound of confidence interval.
+            confidence_high: Upper bound of confidence interval.
+            market_question: Human-readable question.
+
+        Returns:
+            Database row ID.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute("""
+                INSERT INTO calibration_records (
+                    market_id, market_question, strategy,
+                    predicted_probability, market_price_at_prediction,
+                    predicted_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                market_ticker,
+                market_question,
+                strategy,
+                predicted_probability,
+                market_price,
+                now,
+            ))
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def get_resolved_predictions(
+        self,
+        strategy: Optional[str] = None,
+        days: Optional[int] = None,
+    ) -> list[dict]:
+        """Get all resolved predictions for analysis.
+
+        Args:
+            strategy: Filter by strategy name (None = all).
+            days: Only include predictions from last N days.
+
+        Returns:
+            List of resolved calibration records.
+        """
+        conn = self._get_conn()
+        try:
+            query = "SELECT * FROM calibration_records WHERE actual_outcome IS NOT NULL"
+            params: list = []
+
+            if strategy:
+                query += " AND strategy = ?"
+                params.append(strategy)
+
+            if days:
+                query += " AND predicted_at >= datetime('now', ?)"
+                params.append(f"-{days} days")
+
+            query += " ORDER BY resolved_at DESC"
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def update_resolution(
+        self,
+        market_id: str,
+        actual_outcome: int,
+        brier_score: Optional[float] = None,
+        profit_loss: Optional[float] = None,
+    ) -> int:
+        """Update calibration records with resolution data.
+
+        Args:
+            market_id: Market ticker.
+            actual_outcome: 1 for YES, 0 for NO.
+            brier_score: (predicted - actual)^2.
+            profit_loss: Realized P&L for this prediction.
+
+        Returns:
+            Number of records updated.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                """UPDATE calibration_records
+                   SET actual_outcome = ?, resolved_at = ?,
+                       brier_score = ?, profit_loss = ?
+                   WHERE market_id = ? AND actual_outcome IS NULL""",
+                (actual_outcome, now, brier_score, profit_loss, market_id),
+            )
+            conn.commit()
+            return cursor.rowcount
         finally:
             conn.close()
 
