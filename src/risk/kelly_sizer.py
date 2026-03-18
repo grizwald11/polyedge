@@ -7,6 +7,7 @@ then applies half-Kelly fraction and hard caps.
 from __future__ import annotations
 
 import logging
+import math
 
 from src.config import Settings
 
@@ -91,6 +92,13 @@ class KellySizer:
         # contracts * price never exceeds the dollar cap.
         cost_price = order_price if order_price and order_price > 0 else market_price
         contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
+
+        # Account for estimated fee so total cost stays within cap.
+        # Fee formula: ceil(0.07 * contracts * price * (1 - price))
+        if contracts > 0 and 0 < cost_price < 1:
+            fee = math.ceil(0.07 * contracts * cost_price * (1.0 - cost_price))
+            if contracts * cost_price + fee > kelly_dollars:
+                contracts -= 1
 
         # Minimum 1 contract if we have any edge and room
         if contracts == 0 and kelly_fraction > 0 and remaining >= cost_price:

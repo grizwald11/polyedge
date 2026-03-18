@@ -122,3 +122,25 @@ class TestCalculatePositionSize:
         a = sizer.calculate_position_size(0.08, 0.42, 500.0)
         b = sizer.calculate_position_size(0.08, 0.42, 500.0, order_price=None)
         assert a == b
+
+    def test_fee_included_in_position_cap(self, sizer):
+        """Contracts * price + estimated fee must not exceed position cap.
+
+        Regression: Cuba trade deal NO at $0.66 produced 38 contracts
+        ($25.08) which exceeded the $25 cap before fees were considered.
+        Fee formula: ceil(0.07 * contracts * price * (1 - price)).
+        """
+        import math
+
+        max_position = 500.0 * 0.05  # $25
+        price = 0.66
+        contracts = sizer.calculate_position_size(
+            edge=0.10, probability=0.76, bankroll=500.0,
+            order_price=price,
+        )
+        fee = math.ceil(0.07 * contracts * price * (1.0 - price))
+        total = contracts * price + fee
+        assert total <= max_position, (
+            f"{contracts} contracts @ ${price}: cost ${contracts * price:.2f} "
+            f"+ fee ${fee} = ${total:.2f} exceeds cap ${max_position:.2f}"
+        )
