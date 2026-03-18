@@ -10,9 +10,14 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.core.models import (
-    Direction, Order, OrderStatus, Position, Side, StrategyName, Trade,
+    Direction, Market, Order, OrderStatus, Position, Side, StrategyName, Trade,
 )
 from src.storage.database import Database
+
+# Exit thresholds
+DEFAULT_STOP_LOSS_PCT = 0.50       # Exit if unrealized loss > 50% of cost basis
+DEFAULT_MAX_HOLD_DAYS = 30         # Exit if held > 30 days
+DEFAULT_EDGE_GONE_THRESHOLD = 0.01 # Exit if remaining edge < 1%
 
 if __name__ != "__main__":
     from typing import TYPE_CHECKING
@@ -150,6 +155,100 @@ class PositionManager:
     def get_position_count(self) -> int:
         """Number of open positions."""
         return len(self._positions)
+
+    def should_exit(
+        self,
+        position: Position,
+        market: Market | None = None,
+        stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
+        max_hold_days: float = DEFAULT_MAX_HOLD_DAYS,
+        edge_gone_threshold: float = DEFAULT_EDGE_GONE_THRESHOLD,
+    ) -> tuple[bool, str]:
+        """Determine if a position should be exited.
+
+        Checks three conditions:
+        1. Stop-loss: unrealized loss exceeds threshold of cost basis
+        2. Time-based: position held longer than max_hold_days
+        3. Edge-gone: market price moved past our entry (edge evaporated)
+
+        Args:
+            position: The position to evaluate
+            market: Current market data (needed for edge-gone check)
+            stop_loss_pct: Max loss as fraction of cost basis before exit
+            max_hold_days: Max days to hold before time-based exit
+            edge_gone_threshold: Min remaining edge to justify holding
+
+        Returns:
+            (should_exit, reason) tuple
+        """
+        cost_basis = position.cost_basis
+        if cost_basis <= 0:
+            return False, ""
+
+        # 1. Stop-loss check
+        if position.unrealized_pnl < 0:
+            loss_pct = abs(position.unrealized_pnl) / cost_basis
+            if loss_pct >= stop_loss_pct:
+                return True, f"stop_loss: {loss_pct:.0%} loss exceeds {stop_loss_pct:.0%} threshold"
+
+        # 2. Time-based exit
+        now = datetime.now(timezone.utc)
+        hold_time = now - position.opened_at
+        if hold_time.total_seconds() / 86400 > max_hold_days:
+            return True, f"time_exit: held {hold_time.days} days (max {max_hold_days:.0f})"
+
+        # Also exit if market is closing soon and we're underwater
+        if market and market.end_date:
+            days_left = market.days_to_resolution
+            if days_left is not None and days_left < 1 and position.unrealized_pnl < 0:
+                return True, f"expiry_exit: market closes in {days_left:.1f} days, position underwater"
+
+        # 3. Edge-gone check
+        if market is not None:
+            remaining_edge = self._calculate_remaining_edge(position, market)
+            if remaining_edge < edge_gone_threshold:
+                return True, f"edge_gone: remaining edge {remaining_edge:.1%} < {edge_gone_threshold:.1%}"
+
+        return False, ""
+
+    def get_exit_candidates(
+        self,
+        markets: dict[str, Market] | None = None,
+    ) -> list[tuple[Position, str]]:
+        """Scan all positions and return those that should be exited.
+
+        Args:
+            markets: Market lookup {ticker: Market} for edge-gone checks
+
+        Returns:
+            List of (position, reason) tuples
+        """
+        candidates: list[tuple[Position, str]] = []
+        for market_id, position in self._positions.items():
+            market = markets.get(market_id) if markets else None
+            should, reason = self.should_exit(position, market)
+            if should:
+                candidates.append((position, reason))
+                logger.info(f"Exit candidate: {market_id} — {reason}")
+        return candidates
+
+    def _calculate_remaining_edge(self, position: Position, market: Market) -> float:
+        """Calculate remaining edge for a position given current market prices.
+
+        Returns the edge as a positive fraction if still favorable, negative if adverse.
+        """
+        if position.direction in (Direction.BUY_YES, Direction.SELL_NO):
+            # We're long YES — edge is how much current price exceeds our entry
+            # (we profit if price goes up toward 1.0)
+            # Remaining edge = potential upside / cost
+            remaining = (1.0 - market.yes_price) / market.yes_price if market.yes_price > 0 else 0
+            entry_edge = (1.0 - position.avg_entry_price) / position.avg_entry_price if position.avg_entry_price > 0 else 0
+            # If current price moved above entry, edge is shrinking
+            return max(0.0, remaining)
+        else:
+            # We're long NO — edge is potential upside on NO side
+            remaining = (1.0 - market.no_price) / market.no_price if market.no_price > 0 else 0
+            return max(0.0, remaining)
 
     async def sync_with_kalshi(self, kalshi) -> int:
         """Reconcile local positions against Kalshi API positions.
