@@ -7,6 +7,7 @@ sonnet for routine, opus for high-stakes.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -45,11 +46,32 @@ class ClaudeForecaster:
             return self.settings.claude.model_highstakes
         return self.settings.claude.model_primary
 
+    def _select_temperature(self, category: MarketCategory) -> float:
+        """Select temperature based on market category, falling back to default."""
+        return self.settings.claude.category_temperatures.get(
+            category.value, self.settings.claude.temperature
+        )
+
+    def _validate_resolution_criteria(self, description: str) -> str:
+        """Validate and enhance resolution criteria if missing or too short."""
+        if not description or len(description.strip()) < 20:
+            logger.warning("Resolution criteria missing or too short — adding caution")
+            caution = (
+                "WARNING: No detailed resolution criteria available for this market. "
+                "Resolution rules may be ambiguous. Widen your confidence interval "
+                "to account for possible resolution surprises."
+            )
+            if description and description.strip():
+                return f"{description.strip()}\n\n{caution}"
+            return caution
+        return description
+
     async def assess_market(
         self,
         market: Market,
         news_context: str = "",
         position_value: float = 0.0,
+        base_rate_context: str = "",
     ) -> ForecastResult:
         """Assess a market's true probability using Claude.
 
@@ -57,12 +79,14 @@ class ClaudeForecaster:
             market: The market to assess
             news_context: Additional news/context to include
             position_value: Expected position size (determines model selection)
+            base_rate_context: Historical base rate string for the category
 
         Returns:
             ForecastResult with probability estimate and reasoning
         """
         model = self._select_model(position_value)
         category = classify_market(market)
+        temperature = self._select_temperature(category)
 
         # Enrich with news research if no context was provided
         if not news_context:
@@ -79,13 +103,16 @@ class ClaudeForecaster:
         if market.end_date:
             close_date = market.end_date.strftime("%Y-%m-%d %H:%M UTC")
 
+        resolution_criteria = self._validate_resolution_criteria(market.description)
+
         prompt = build_prompt(
             question=market.question,
-            resolution_criteria=market.description,
+            resolution_criteria=resolution_criteria,
             market_price=market.yes_price,
             close_date=close_date,
             category=category,
             news_context=news_context or "No additional context available.",
+            base_rate_context=base_rate_context,
         )
 
         start_time = time.monotonic()
@@ -94,7 +121,7 @@ class ClaudeForecaster:
             response = await client.messages.create(
                 model=model,
                 max_tokens=self.settings.claude.max_tokens,
-                temperature=self.settings.claude.temperature,
+                temperature=temperature,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -112,7 +139,7 @@ class ClaudeForecaster:
 
             logger.info(
                 f"Claude [{model}] assessed '{market.question[:50]}...' → "
-                f"{forecast.probability:.0%} (latency: {latency_ms}ms, tokens: {tokens_used})"
+                f"{forecast.probability:.0%} (temp={temperature}, latency: {latency_ms}ms, tokens: {tokens_used})"
             )
             return forecast
 
@@ -136,6 +163,112 @@ class ClaudeForecaster:
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
             )
+
+    async def cross_check_assess(
+        self,
+        market: Market,
+        news_context: str = "",
+        position_value: float = 0.0,
+        base_rate_context: str = "",
+    ) -> Optional[ForecastResult]:
+        """Run dual-temperature cross-check on a market.
+
+        Runs two concurrent Claude calls at different temperatures. If they
+        agree (within threshold), returns the averaged result. If they disagree
+        beyond the threshold, returns None (caller should skip the market).
+
+        Falls back to single assessment on error.
+        """
+        model = self._select_model(position_value)
+        category = classify_market(market)
+        temp_low = self.settings.claude.cross_check_temp_low
+        temp_high = self.settings.claude.cross_check_temp_high
+        threshold = self.settings.claude.cross_check_disagreement_threshold
+
+        # Enrich with news research
+        if not news_context:
+            news_context = await self.news_researcher.get_context(market.question)
+
+        close_date = ""
+        if market.end_date:
+            close_date = market.end_date.strftime("%Y-%m-%d %H:%M UTC")
+
+        resolution_criteria = self._validate_resolution_criteria(market.description)
+
+        prompt = build_prompt(
+            question=market.question,
+            resolution_criteria=resolution_criteria,
+            market_price=market.yes_price,
+            close_date=close_date,
+            category=category,
+            news_context=news_context or "No additional context available.",
+            base_rate_context=base_rate_context,
+        )
+
+        async def _call_at_temp(temp: float) -> ForecastResult:
+            client = self._get_client()
+            start = time.monotonic()
+            response = await client.messages.create(
+                model=model,
+                max_tokens=self.settings.claude.max_tokens,
+                temperature=temp,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            latency_ms = int((time.monotonic() - start) * 1000)
+            raw_text = response.content[0].text
+            tokens_used = response.usage.input_tokens + response.usage.output_tokens
+            forecast = self._parse_response(raw_text)
+            forecast.model_used = model
+            forecast.tokens_used = tokens_used
+            forecast.latency_ms = latency_ms
+            forecast.raw_response = raw_text
+            return forecast
+
+        try:
+            low_result, high_result = await asyncio.gather(
+                _call_at_temp(temp_low),
+                _call_at_temp(temp_high),
+            )
+        except Exception as e:
+            logger.warning(f"Cross-check failed, falling back to single assess: {e}")
+            return await self.assess_market(
+                market, news_context, position_value, base_rate_context
+            )
+
+        disagreement = abs(low_result.probability - high_result.probability)
+        avg_prob = (low_result.probability + high_result.probability) / 2.0
+
+        if disagreement > threshold:
+            logger.info(
+                f"Cross-check DISAGREE on '{market.question[:50]}...' "
+                f"(low={low_result.probability:.0%}, high={high_result.probability:.0%}, "
+                f"gap={disagreement:.0%})"
+            )
+            return None
+
+        logger.info(
+            f"Cross-check AGREE on '{market.question[:50]}...' "
+            f"(low={low_result.probability:.0%}, high={high_result.probability:.0%}, "
+            f"avg={avg_prob:.0%})"
+        )
+
+        # Average the two results, widen CI slightly
+        ci_low = min(low_result.confidence_low, high_result.confidence_low)
+        ci_high = max(low_result.confidence_high, high_result.confidence_high)
+
+        return ForecastResult(
+            probability=max(0.01, min(0.99, avg_prob)),
+            confidence_low=ci_low,
+            confidence_high=ci_high,
+            key_factors_for=low_result.key_factors_for,
+            key_factors_against=low_result.key_factors_against,
+            uncertainties=low_result.uncertainties + high_result.uncertainties,
+            reasoning=f"Cross-check avg ({low_result.probability:.0%}/{high_result.probability:.0%}). {low_result.reasoning}",
+            model_used=model,
+            tokens_used=low_result.tokens_used + high_result.tokens_used,
+            latency_ms=max(low_result.latency_ms, high_result.latency_ms),
+        )
 
     def _parse_response(self, raw_text: str) -> ForecastResult:
         """Parse Claude's JSON response into a ForecastResult.

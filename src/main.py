@@ -289,7 +289,7 @@ async def main():
     calibration_analyzer = CalibrationAnalyzer(db)
 
     # Strategies
-    ai_strategy = AIProbabilityStrategy(forecaster, settings, db)
+    ai_strategy = AIProbabilityStrategy(forecaster, settings, db, calibration_analyzer)
     no_strategy = ObviousNoStrategy(settings)
 
     # Execution

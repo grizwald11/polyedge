@@ -20,6 +20,8 @@ SERPER_SEARCH_URL = "https://google.serper.dev/search"
 MAX_RESULTS_PER_QUERY = 5
 MAX_QUERIES = 3
 MAX_CONTEXT_CHARS = 3200  # ~800 tokens
+MAX_RELEVANT_RESULTS = 5
+DEDUP_SIMILARITY_THRESHOLD = 0.7
 
 
 @dataclass
@@ -98,6 +100,60 @@ class NewsResearcher:
             ))
         return results
 
+    def _score_relevance(self, result: NewsResult, market_question: str) -> float:
+        """Score a result's relevance to the market question.
+
+        Uses keyword overlap plus recency bonus.
+        """
+        q_words = set(re.findall(r"\w{3,}", market_question.lower()))
+        title_words = set(re.findall(r"\w{3,}", result.title.lower()))
+        snippet_words = set(re.findall(r"\w{3,}", result.snippet.lower()))
+        result_words = title_words | snippet_words
+
+        if not q_words:
+            return 0.0
+
+        overlap = len(q_words & result_words) / len(q_words)
+
+        # Recency bonus: results with recent dates score higher
+        recency_bonus = 0.0
+        if result.date:
+            date_lower = result.date.lower()
+            for recent_kw in ("hour", "minute", "today", "yesterday", "1 day"):
+                if recent_kw in date_lower:
+                    recency_bonus = 0.15
+                    break
+            else:
+                for kw in ("2 day", "3 day", "week"):
+                    if kw in date_lower:
+                        recency_bonus = 0.05
+                        break
+
+        return overlap + recency_bonus
+
+    def _deduplicate(self, results: list[NewsResult]) -> list[NewsResult]:
+        """Remove near-duplicate results based on title word overlap."""
+        if not results:
+            return results
+
+        unique: list[NewsResult] = [results[0]]
+        for r in results[1:]:
+            r_words = set(re.findall(r"\w{3,}", r.title.lower()))
+            is_dup = False
+            for u in unique:
+                u_words = set(re.findall(r"\w{3,}", u.title.lower()))
+                if not r_words or not u_words:
+                    continue
+                union = r_words | u_words
+                intersection = r_words & u_words
+                similarity = len(intersection) / len(union) if union else 0.0
+                if similarity > DEDUP_SIMILARITY_THRESHOLD:
+                    is_dup = True
+                    break
+            if not is_dup:
+                unique.append(r)
+        return unique
+
     async def get_context(self, market_question: str) -> str:
         """Get formatted news context for a market question.
 
@@ -122,6 +178,13 @@ class NewsResearcher:
         if not all_results:
             logger.info(f"No news results for: {market_question[:60]}")
             return ""
+
+        # Deduplicate, score by relevance, keep top results
+        all_results = self._deduplicate(all_results)
+        all_results.sort(
+            key=lambda r: self._score_relevance(r, market_question), reverse=True
+        )
+        all_results = all_results[:MAX_RELEVANT_RESULTS]
 
         context = self._format_context(all_results)
         logger.info(

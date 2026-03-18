@@ -38,6 +38,7 @@ MARKET CLOSES: {close_date}
 
 CONTEXT:
 {news_context}
+{base_rate_context}
 
 Consider:
 1. Historical base rates for similar political events
@@ -58,6 +59,7 @@ MARKET CLOSES: {close_date}
 
 CONTEXT:
 {news_context}
+{base_rate_context}
 
 Consider:
 1. Historical base rates for similar Fed actions / economic indicators
@@ -78,6 +80,7 @@ MARKET CLOSES: {close_date}
 
 CONTEXT:
 {news_context}
+{base_rate_context}
 
 Consider:
 1. Historical base rates for similar geopolitical events
@@ -98,6 +101,7 @@ MARKET CLOSES: {close_date}
 
 CONTEXT:
 {news_context}
+{base_rate_context}
 
 Consider:
 1. Historical base rates for similar tech events (product launches, benchmarks, etc.)
@@ -118,6 +122,7 @@ MARKET CLOSES: {close_date}
 
 CONTEXT:
 {news_context}
+{base_rate_context}
 
 Consider:
 1. Historical base rates and precedents
@@ -137,6 +142,7 @@ MARKET CLOSES: {close_date}
 
 CONTEXT:
 {news_context}
+{base_rate_context}
 
 Consider:
 1. Historical base rates for similar events
@@ -174,6 +180,7 @@ def build_prompt(
     close_date: str,
     category: MarketCategory,
     news_context: str = "No additional context available.",
+    base_rate_context: str = "",
 ) -> str:
     """Build a complete prompt for Claude from market data."""
     template = get_template(category)
@@ -183,4 +190,5 @@ def build_prompt(
         market_price=market_price,
         close_date=close_date or "Not specified",
         news_context=news_context or "No additional context available.",
+        base_rate_context=base_rate_context,
     )

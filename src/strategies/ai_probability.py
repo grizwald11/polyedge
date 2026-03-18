@@ -14,6 +14,8 @@ from typing import Optional as _Optional
 from src.config import Settings
 from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.ensemble import ensemble_forecast
+from src.analysis.market_classifier import classify_market
+from src.analysis.calibration_analyzer import CalibrationAnalyzer
 from src.core.models import Market, Signal, Direction, StrategyName
 from src.storage.database import Database
 
@@ -23,10 +25,46 @@ logger = logging.getLogger(__name__)
 class AIProbabilityStrategy:
     """Strategy 1: Claude assesses true probability, trade when market is mispriced."""
 
-    def __init__(self, forecaster: ClaudeForecaster, settings: Settings, db: _Optional[Database] = None):
+    def __init__(
+        self,
+        forecaster: ClaudeForecaster,
+        settings: Settings,
+        db: _Optional[Database] = None,
+        calibration_analyzer: _Optional[CalibrationAnalyzer] = None,
+    ):
         self.forecaster = forecaster
         self.settings = settings
         self.db = db
+        self.calibration_analyzer = calibration_analyzer
+        self._category_adjustments: dict[str, float] = {}
+        self._category_base_rates: dict[str, dict] = {}
+
+    def refresh_calibration_adjustments(self) -> None:
+        """Reload per-category bias corrections from calibration data."""
+        if self.calibration_analyzer is None:
+            return
+        try:
+            self._category_adjustments = self.calibration_analyzer.get_category_adjustments()
+            self._category_base_rates = self.calibration_analyzer.get_category_base_rates()
+            if self._category_adjustments:
+                logger.info(f"Loaded calibration adjustments: {self._category_adjustments}")
+            if self._category_base_rates:
+                logger.info(f"Loaded base rates for {len(self._category_base_rates)} categories")
+        except Exception as e:
+            logger.error(f"Failed to load calibration adjustments: {e}")
+
+    def _build_base_rate_context(self, category_value: str) -> str:
+        """Build base rate context string from calibration history."""
+        stats = self._category_base_rates.get(category_value)
+        if not stats:
+            return ""
+        total = stats["total"]
+        yes_rate = stats["yes_rate"]
+        no_rate = 1.0 - yes_rate
+        return (
+            f"HISTORICAL BASE RATE: In {total} resolved {category_value} markets, "
+            f"{yes_rate:.0%} resolved YES and {no_rate:.0%} resolved NO."
+        )
 
     async def scan_for_opportunities(
         self,
@@ -42,13 +80,27 @@ class AIProbabilityStrategy:
         Returns:
             List of signals where edge >= min_edge_ai
         """
+        # Refresh calibration adjustments once per scan cycle
+        self.refresh_calibration_adjustments()
+
         signals = []
         max_assessments = self.settings.claude.max_assessments_per_cycle
         min_edge = self.settings.trading.min_edge_ai
 
+        # Determine which markets get cross-checked (top N by volume)
+        cross_check_enabled = self.settings.claude.cross_check_enabled
+        cross_check_top_n = self.settings.claude.cross_check_top_n
+        cross_check_tickers: set[str] = set()
+        if cross_check_enabled:
+            sorted_by_vol = sorted(markets[:max_assessments], key=lambda m: m.volume_24h, reverse=True)
+            cross_check_tickers = {m.ticker for m in sorted_by_vol[:cross_check_top_n]}
+
         for market in markets[:max_assessments]:
             try:
-                signal = await self._assess_single_market(market, news_context, min_edge)
+                use_cross_check = market.ticker in cross_check_tickers
+                signal = await self._assess_single_market(
+                    market, news_context, min_edge, use_cross_check=use_cross_check
+                )
                 if signal:
                     signals.append(signal)
             except Exception as e:
@@ -65,13 +117,38 @@ class AIProbabilityStrategy:
         market: Market,
         news_context: str,
         min_edge: float,
+        use_cross_check: bool = False,
     ) -> Optional[Signal]:
         """Assess a single market and return a signal if edge is sufficient."""
-        # Get Claude's forecast
-        forecast = await self.forecaster.assess_market(
-            market=market,
-            news_context=news_context,
-        )
+        category = classify_market(market)
+        base_rate_context = self._build_base_rate_context(category.value)
+
+        # Get Claude's forecast (cross-check or regular)
+        if use_cross_check:
+            forecast = await self.forecaster.cross_check_assess(
+                market=market,
+                news_context=news_context,
+                base_rate_context=base_rate_context,
+            )
+            if forecast is None:
+                logger.info(f"Skipping {market.ticker}: cross-check disagreement too high")
+                return None
+        else:
+            forecast = await self.forecaster.assess_market(
+                market=market,
+                news_context=news_context,
+                base_rate_context=base_rate_context,
+            )
+
+        # Apply calibration adjustment before ensemble
+        adjustment = self._category_adjustments.get(category.value, 0.0)
+        if adjustment != 0.0:
+            original = forecast.probability
+            forecast.probability = max(0.01, min(0.99, forecast.probability + adjustment))
+            logger.debug(
+                f"Calibration adjustment for {category.value}: "
+                f"{original:.3f} → {forecast.probability:.3f} (adj={adjustment:+.3f})"
+            )
 
         # Confidence gate: skip if confidence interval is too wide
         ci_width = forecast.confidence_high - forecast.confidence_low
@@ -86,6 +163,7 @@ class AIProbabilityStrategy:
         ensemble = ensemble_forecast(
             claude_forecast=forecast,
             market_price=market.yes_price,
+            claude_weight=self.settings.claude.ensemble_weight,
         )
 
         # Calculate edge

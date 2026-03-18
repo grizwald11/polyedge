@@ -128,6 +128,33 @@ class CalibrationAnalyzer:
 
         return adjustments
 
+    def get_category_base_rates(self) -> dict[str, dict]:
+        """Get historical YES resolution rates by category.
+
+        Returns dict like {"Politics": {"total": 25, "yes_rate": 0.44}}.
+        Only includes categories with at least 5 resolved predictions.
+        """
+        resolved = self._get_resolved_with_category()
+        if not resolved:
+            return {}
+
+        by_category: dict[str, list[dict]] = {}
+        for r in resolved:
+            cat = r.get("category", "Other")
+            by_category.setdefault(cat, []).append(r)
+
+        base_rates = {}
+        for cat, records in by_category.items():
+            if len(records) < 5:
+                continue
+            yes_count = sum(1 for r in records if bool(r["actual_outcome"]))
+            base_rates[cat] = {
+                "total": len(records),
+                "yes_rate": yes_count / len(records),
+            }
+
+        return base_rates
+
     def _get_resolved_with_category(self) -> list[dict]:
         """Get all resolved predictions joined with market category."""
         conn = self.db._get_conn()

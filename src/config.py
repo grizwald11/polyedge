@@ -51,6 +51,13 @@ class ClaudeConfig(BaseModel):
     max_tokens: int = 2000
     temperature: float = 0.3
     max_assessments_per_cycle: int = 10
+    ensemble_weight: float = 0.85
+    category_temperatures: dict[str, float] = Field(default_factory=dict)
+    cross_check_enabled: bool = False
+    cross_check_top_n: int = 3
+    cross_check_temp_low: float = 0.2
+    cross_check_temp_high: float = 0.5
+    cross_check_disagreement_threshold: float = 0.15
 
 
 class AlertsConfig(BaseModel):

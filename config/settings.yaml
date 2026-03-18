@@ -45,6 +45,19 @@ claude:
   max_tokens: 2000
   temperature: 0.3              # Lower = more deterministic
   max_assessments_per_cycle: 10 # Don't burn API budget in one scan
+  ensemble_weight: 0.85         # Claude weight in ensemble (market gets 1 - this)
+  category_temperatures:        # Per-category temperature overrides
+    Politics: 0.3
+    "Fed/Macro": 0.3
+    Geopolitics: 0.4
+    "Tech/AI": 0.35
+    Culture: 0.4
+    Other: 0.35
+  cross_check_enabled: false    # Dual-temperature cross-validation
+  cross_check_top_n: 3          # Only cross-check top N markets by volume
+  cross_check_temp_low: 0.2
+  cross_check_temp_high: 0.5
+  cross_check_disagreement_threshold: 0.15  # Skip if temps disagree by more than this
 
 alerts:
   enabled: true

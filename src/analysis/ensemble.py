@@ -12,7 +12,7 @@ from src.core.models import ForecastResult, EnsembleForecast
 def ensemble_forecast(
     claude_forecast: ForecastResult,
     market_price: float,
-    claude_weight: float = 0.7,
+    claude_weight: float = 0.85,
 ) -> EnsembleForecast:
     """Combine Claude's estimate with market price using extremal adjustment.
 
