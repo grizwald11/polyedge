@@ -1,4 +1,4 @@
-.PHONY: test run scan lint clean
+.PHONY: test run scan lint clean start stop logs
 
 # Run all tests
 test:
@@ -29,6 +29,18 @@ clean:
 # Install dependencies
 install:
 	pip install -r requirements.txt --break-system-packages
+
+# Start as pm2 background process
+start:
+	./scripts/start.sh
+
+# Stop pm2 background process
+stop:
+	./scripts/stop.sh
+
+# Tail pm2 logs
+logs:
+	pm2 logs polyedge
 
 # Check database stats
 stats:
