@@ -15,7 +15,7 @@ import pytest
 from src.config import Settings
 from src.core.models import (
     Direction, ForecastResult, Market, MarketCategory, MarketToken,
-    Signal, StrategyName, Trade,
+    Side, Signal, StrategyName, Trade,
 )
 from src.storage.database import Database
 from src.analysis.calibration import CalibrationTracker
@@ -206,6 +206,7 @@ class TestFullPaperTradeCycle:
             calibration_analyzer=calibration_analyzer,
             fill_tracker=fill_tracker,
             alert_manager=alert_manager,
+            metrics=None,
             settings=settings,
             cycle_count=1,
         )
@@ -283,6 +284,7 @@ class TestFullPaperTradeCycle:
             calibration_analyzer=calibration_analyzer,
             fill_tracker=fill_tracker,
             alert_manager=alert_manager,
+            metrics=None,
             settings=settings,
             cycle_count=1,
         )
@@ -350,6 +352,7 @@ class TestFullPaperTradeCycle:
             calibration_analyzer=calibration_analyzer,
             fill_tracker=fill_tracker,
             alert_manager=alert_manager,
+            metrics=None,
             settings=settings,
             cycle_count=1,
         )
@@ -430,6 +433,7 @@ class TestFullPaperTradeCycle:
             calibration_analyzer=calibration_analyzer,
             fill_tracker=fill_tracker,
             alert_manager=alert_manager,
+            metrics=None,
             settings=settings,
             cycle_count=1,
         )
@@ -481,7 +485,7 @@ class TestFullPaperTradeCycle:
             order_router=order_router, position_manager=position_manager,
             calibration=calibration, resolution_tracker=resolution_tracker,
             calibration_analyzer=calibration_analyzer, fill_tracker=fill_tracker,
-            alert_manager=alert_manager, settings=settings,
+            alert_manager=alert_manager, metrics=None, settings=settings,
         )
 
         # Run 3 cycles
@@ -494,3 +498,83 @@ class TestFullPaperTradeCycle:
         market_ids = [p.market_id for p in positions]
         # No duplicates
         assert len(market_ids) == len(set(market_ids))
+
+    @pytest.mark.asyncio
+    async def test_exit_logic_in_trading_loop(self, integration_db, integration_settings):
+        """Positions that hit stop-loss are automatically closed in the next cycle."""
+        db = integration_db
+        settings = integration_settings
+        markets = _make_markets()
+
+        mock_discovery = AsyncMock()
+        scanner = MarketScanner(mock_discovery, db, settings)
+        scanner.run_scan_cycle = AsyncMock(return_value=markets)
+
+        # First cycle: Claude sees edge, opens a position
+        forecaster = ClaudeForecaster(settings)
+        forecaster.assess_market = AsyncMock(return_value=_mock_forecast(0.42))
+
+        calibration = CalibrationTracker(db)
+        calibration_analyzer = CalibrationAnalyzer(db)
+        resolution_tracker = MagicMock()
+        resolution_tracker.check_resolutions = AsyncMock(return_value=0)
+
+        from src.strategies.ai_probability import AIProbabilityStrategy
+        from src.strategies.obvious_no import ObviousNoStrategy
+
+        ai_strategy = AIProbabilityStrategy(forecaster, settings, db, calibration_analyzer)
+        no_strategy = ObviousNoStrategy(settings)
+
+        order_builder = OrderBuilder(settings)
+        mock_kalshi = AsyncMock()
+        order_router = OrderRouter(settings, mock_kalshi, db)
+        position_manager = PositionManager(db, settings.trading.bankroll)
+        fill_tracker = FillTracker(mock_kalshi, db)
+        alert_manager = AlertManager()
+        alert_manager.register(LogBackend())
+
+        circuit_breaker = CircuitBreaker(settings, db)
+        kelly_sizer = KellySizer(settings)
+        risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
+
+        kwargs = dict(
+            scanner=scanner, ai_strategy=ai_strategy, no_strategy=no_strategy,
+            news_strategy=None, cross_arb_strategy=None, whale_strategy=None,
+            market_graph=None, risk_engine=risk_engine, kelly_sizer=kelly_sizer,
+            circuit_breaker=circuit_breaker, order_builder=order_builder,
+            order_router=order_router, position_manager=position_manager,
+            calibration=calibration, resolution_tracker=resolution_tracker,
+            calibration_analyzer=calibration_analyzer, fill_tracker=fill_tracker,
+            alert_manager=alert_manager, metrics=None, settings=settings,
+        )
+
+        # Cycle 1: open positions
+        await scan_and_trade(**kwargs, cycle_count=1)
+        positions_after_open = position_manager.get_all_positions()
+        assert len(positions_after_open) >= 1, "Expected at least 1 position opened"
+
+        positions_before_exit = len(position_manager.get_all_positions())
+
+        # Cycle 2: provide markets with crashed prices to trigger stop-loss.
+        # The trading loop calls update_price() with market prices, so we need
+        # the market data itself to reflect the crash.
+        crashed_markets = _make_markets()
+        for m in crashed_markets:
+            for token in m.tokens:
+                if token.outcome.lower() == "yes":
+                    token.price = 0.05  # Crashed YES price
+                else:
+                    token.price = 0.95
+        scanner.run_scan_cycle = AsyncMock(return_value=crashed_markets)
+
+        # Also make Claude return no edge so no NEW positions open
+        forecaster.assess_market = AsyncMock(return_value=_mock_forecast(0.05))
+
+        await scan_and_trade(**kwargs, cycle_count=2)
+
+        # Verify at least one position was closed
+        positions_after_exit = len(position_manager.get_all_positions())
+        assert positions_after_exit < positions_before_exit, (
+            f"Expected exits: had {positions_before_exit} positions, "
+            f"now have {positions_after_exit}"
+        )

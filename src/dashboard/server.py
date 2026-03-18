@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.storage.database import Database
+from src.metrics import Metrics
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ except ImportError:
     JINJA2_AVAILABLE = False
 
 
-def create_app(db: Database) -> Optional[object]:
+def create_app(db: Database, metrics: Metrics | None = None) -> Optional[object]:
     """Create the FastAPI dashboard application.
 
     Returns None if FastAPI is not installed.
@@ -141,12 +142,27 @@ def create_app(db: Database) -> Optional[object]:
             "circuit_breaker": cb_state,
         }
 
+    @app.get("/api/health")
+    async def api_health():
+        """Return health metrics for monitoring."""
+        if metrics is not None:
+            return metrics.get_health_status()
+        return {
+            "status": "unknown",
+            "message": "Metrics not initialized",
+        }
+
     return app
 
 
-async def start_dashboard(db: Database, host: str = "0.0.0.0", port: int = 8080):
+async def start_dashboard(
+    db: Database,
+    metrics: Metrics | None = None,
+    host: str = "0.0.0.0",
+    port: int = 8080,
+):
     """Start the dashboard server as a background task."""
-    app = create_app(db)
+    app = create_app(db, metrics=metrics)
     if app is None:
         logger.info("Dashboard not available (install fastapi + uvicorn)")
         return

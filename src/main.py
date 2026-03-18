@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 from pathlib import Path
 
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ from datetime import datetime, timezone
 from src.config import load_settings
 from src.core.kalshi_client import KalshiClient
 from src.core.market_discovery import MarketDiscovery
-from src.core.models import Direction
+from src.core.models import Direction, Order, OrderStatus, OrderType, Side
 from src.data.market_scanner import MarketScanner
 from src.storage.database import Database
 from src.analysis.claude_forecaster import ClaudeForecaster
@@ -45,6 +46,7 @@ from src.data.news_ingestion import NewsIngestion
 from src.data.market_graph import MarketGraph
 from src.data.whale_monitor import WhaleMonitor
 from src.core.websocket_client import KalshiWebSocket, TickerUpdate, FillUpdate
+from src.metrics import Metrics
 
 
 def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log"):
@@ -89,11 +91,13 @@ async def scan_and_trade(
     calibration_analyzer: CalibrationAnalyzer,
     fill_tracker: FillTracker,
     alert_manager: AlertManager,
+    metrics: Metrics | None,
     settings,
     cycle_count: int = 0,
 ):
     """Execute one scan-assess-trade cycle."""
     logger = logging.getLogger("polyedge.main")
+    _cycle_start = time.time()
     bankroll = settings.trading.bankroll
 
     # Check for fills on pending live orders
@@ -117,7 +121,14 @@ async def scan_and_trade(
         return
 
     # Scan and filter markets
-    markets = await scanner.run_scan_cycle()
+    try:
+        markets = await scanner.run_scan_cycle()
+    except Exception as e:
+        logger.error(f"Market scan failed: {e}")
+        if metrics is not None:
+            metrics.record_error("scanner", str(e))
+        return  # Skip this cycle, try again next time
+
     if not markets:
         logger.info("No qualifying markets found")
         return
@@ -125,6 +136,55 @@ async def scan_and_trade(
     # Update unrealized P&L with latest market prices
     for market in markets:
         position_manager.update_price(market.ticker, market.yes_price, market.no_price)
+
+    # Build market lookup (used by both exit logic and signal processing)
+    market_lookup = {m.ticker: m for m in markets}
+
+    # Process exit candidates — close positions that hit stop-loss, time limit, or lost edge
+    exit_candidates = position_manager.get_exit_candidates(markets=market_lookup)
+    for position, exit_reason in exit_candidates:
+        market = market_lookup.get(position.market_id)
+        if market is None:
+            continue
+
+        # Determine exit price from current market
+        if position.direction in (Direction.BUY_YES, Direction.SELL_NO):
+            exit_price = market.yes_price
+        else:
+            exit_price = market.no_price
+
+        exit_order = Order(
+            id=order_builder._generate_order_id(),
+            market_id=position.market_id,
+            token_id=position.token_id,
+            side=Side.SELL,
+            price=exit_price,
+            size=position.size,
+            cost=exit_price * position.size,
+            order_type=OrderType.GTC if settings.trading.prefer_maker else OrderType.FOK,
+            status=OrderStatus.PENDING,
+            strategy=position.strategy,
+            paper=position.paper,
+            created_at=datetime.now(timezone.utc),
+        )
+
+        result = await order_router.route_order(exit_order)
+        if result.success and result.trade:
+            position_manager.update_from_trade(result.trade)
+            logger.info(f"[EXIT] {position.market_id} — {exit_reason}")
+            if settings.alerts.alert_on_trade:
+                try:
+                    await alert_manager.send_trade_alert(
+                        market_id=position.market_id,
+                        direction="EXIT",
+                        size=int(position.size),
+                        price=exit_price,
+                        cost=exit_order.cost,
+                        strategy=position.strategy.value,
+                        edge=0.0,
+                    )
+                except Exception:
+                    pass
 
     # Index markets in graph (if available)
     if market_graph is not None:
@@ -161,15 +221,18 @@ async def scan_and_trade(
 
     if not all_signals:
         logger.info("No signals generated this cycle")
+        if metrics is not None:
+            metrics.record_cycle(
+                duration_ms=(time.time() - _cycle_start) * 1000,
+                trades=0, signals=0,
+                positions=position_manager.get_position_count(),
+            )
         return
 
     # Sort by edge descending — best opportunities first
     all_signals.sort(key=lambda s: abs(s.edge), reverse=True)
 
     logger.info(f"Processing {len(all_signals)} signals ({len(ai_signals)} AI, {len(no_signals)} NO)")
-
-    # Build market lookup
-    market_lookup = {m.ticker: m for m in markets}
 
     trades_executed = 0
     for signal in all_signals:
@@ -262,6 +325,16 @@ async def scan_and_trade(
         f"exposure: ${position_manager.get_total_exposure():.2f}"
     )
 
+    # Record metrics
+    if metrics is not None:
+        _cycle_duration_ms = (time.time() - _cycle_start) * 1000
+        metrics.record_cycle(
+            duration_ms=_cycle_duration_ms,
+            trades=trades_executed,
+            signals=len(all_signals),
+            positions=position_manager.get_position_count(),
+        )
+
     # Check for resolved markets
     try:
         resolved = await resolution_tracker.check_resolutions()
@@ -306,7 +379,7 @@ async def run_trading_loop(
     whale_strategy, market_graph, risk_engine, kelly_sizer,
     circuit_breaker, order_builder, order_router, position_manager,
     calibration, resolution_tracker, calibration_analyzer, fill_tracker,
-    alert_manager, daily_report, settings, interval,
+    alert_manager, daily_report, metrics, settings, interval,
 ):
     """Run the scan-assess-trade loop on an interval."""
     logger = logging.getLogger("polyedge.main")
@@ -347,7 +420,7 @@ async def run_trading_loop(
                 risk_engine, kelly_sizer,
                 circuit_breaker, order_builder, order_router, position_manager,
                 calibration, resolution_tracker, calibration_analyzer,
-                fill_tracker, alert_manager, settings, cycle_count,
+                fill_tracker, alert_manager, metrics, settings, cycle_count,
             )
             stats = scanner.db.get_stats()
             logger.info(
@@ -482,6 +555,9 @@ async def main():
     kelly_sizer = KellySizer(settings)
     risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
 
+    # Metrics
+    metrics = Metrics()
+
     # Run initial scan
     logger.info("Running initial scan cycle...")
     markets = await scanner.run_scan_cycle()
@@ -532,7 +608,7 @@ async def main():
     dashboard_task = None
     try:
         from src.dashboard.server import start_dashboard
-        dashboard_task = asyncio.create_task(start_dashboard(db))
+        dashboard_task = asyncio.create_task(start_dashboard(db, metrics=metrics))
         logger.info("Dashboard starting at http://0.0.0.0:8080")
     except ImportError:
         logger.info("Dashboard disabled (install fastapi + uvicorn)")
@@ -548,7 +624,7 @@ async def main():
             risk_engine, kelly_sizer,
             circuit_breaker, order_builder, order_router, position_manager,
             calibration, resolution_tracker, calibration_analyzer,
-            fill_tracker, alert_manager, daily_report,
+            fill_tracker, alert_manager, daily_report, metrics,
             settings, settings.scanning.interval_seconds,
         )
     except KeyboardInterrupt:
