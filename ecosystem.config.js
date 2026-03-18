@@ -1,3 +1,13 @@
+const fs = require('fs');
+const path = require('path');
+
+const envPath = path.join(__dirname, 'config', '.env');
+const envVars = {};
+fs.readFileSync(envPath, 'utf8').split('\n').forEach(line => {
+  const [key, ...val] = line.split('=');
+  if (key && !key.startsWith('#')) envVars[key.trim()] = val.join('=').trim();
+});
+
 module.exports = {
   apps: [
     {
@@ -6,7 +16,7 @@ module.exports = {
       args: "-m src.main",
       cwd: "/Users/adamgrodin/polyedge",
       interpreter: "none",
-      env_file: "config/.env",
+      env: envVars,
       out_file: "~/.pm2/logs/polyedge-out.log",
       error_file: "~/.pm2/logs/polyedge-error.log",
       autorestart: true,
