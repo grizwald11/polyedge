@@ -169,23 +169,23 @@ def sample_forecast() -> ForecastResult:
 
 @pytest.fixture
 def kalshi_market_response() -> dict:
-    """Raw Kalshi API market response for mocking."""
+    """Raw Kalshi API market response for mocking (new *_dollars/*_fp format)."""
     return {
         "ticker": "FED-RATE-CUT-MAY26",
         "title": "Will the Federal Reserve cut rates at the May 2026 meeting?",
         "subtitle": "FOMC rate decision",
         "category": "Economics",
         "rules_primary": "Resolves YES if the FOMC announces a rate cut.",
-        "yes_bid": 33,
-        "yes_ask": 35,
-        "no_bid": 65,
-        "no_ask": 67,
-        "last_price": 34,
-        "volume_24h": 125000,
-        "volume": 3500000,
-        "open_interest": 45000,
+        "yes_bid_dollars": "0.33",
+        "yes_ask_dollars": "0.35",
+        "no_bid_dollars": "0.65",
+        "no_ask_dollars": "0.67",
+        "last_price_dollars": "0.34",
+        "volume_24h_fp": "125000.00",
+        "volume_fp": "3500000.00",
+        "open_interest_fp": "45000.00",
         "close_time": (datetime.now(timezone.utc) + timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "status": "open",
+        "status": "active",
         "result": "",
         "event_ticker": "FED-MAY-2026",
         "settlement_source_url": "https://federalreserve.gov",
@@ -194,18 +194,18 @@ def kalshi_market_response() -> dict:
 
 @pytest.fixture
 def kalshi_markets_response(kalshi_market_response) -> list[dict]:
-    """Multiple Kalshi API market responses."""
+    """Multiple Kalshi API market responses (new *_dollars/*_fp format)."""
     politics = {
         "ticker": "TRUMP-GOP-2028",
         "title": "Will Trump be the Republican nominee in 2028?",
         "subtitle": "GOP primary",
         "category": "Politics",
-        "yes_bid": 54,
-        "yes_ask": 56,
-        "last_price": 55,
-        "volume_24h": 500000,
-        "volume": 15000000,
-        "status": "open",
+        "yes_bid_dollars": "0.54",
+        "yes_ask_dollars": "0.56",
+        "last_price_dollars": "0.55",
+        "volume_24h_fp": "500000.00",
+        "volume_fp": "15000000.00",
+        "status": "active",
         "result": "",
     }
     low_vol = {
@@ -213,11 +213,12 @@ def kalshi_markets_response(kalshi_market_response) -> list[dict]:
         "title": "Will aliens make contact in 2026?",
         "subtitle": "",
         "category": "Science",
-        "yes_bid": 2,
-        "yes_ask": 4,
-        "last_price": 3,
-        "volume_24h": 500,
-        "status": "open",
+        "yes_bid_dollars": "0.02",
+        "yes_ask_dollars": "0.04",
+        "last_price_dollars": "0.03",
+        "volume_24h_fp": "500.00",
+        "volume_fp": "500.00",
+        "status": "active",
         "result": "",
     }
     crypto = {
@@ -225,11 +226,12 @@ def kalshi_markets_response(kalshi_market_response) -> list[dict]:
         "title": "Bitcoin up or down in 15 minutes?",
         "subtitle": "",
         "category": "Crypto",
-        "yes_bid": 49,
-        "yes_ask": 51,
-        "last_price": 50,
-        "volume_24h": 1000000,
-        "status": "open",
+        "yes_bid_dollars": "0.49",
+        "yes_ask_dollars": "0.51",
+        "last_price_dollars": "0.50",
+        "volume_24h_fp": "1000000.00",
+        "volume_fp": "1000000.00",
+        "status": "active",
         "result": "",
     }
     return [kalshi_market_response, politics, low_vol, crypto]

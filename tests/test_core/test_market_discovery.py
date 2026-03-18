@@ -47,7 +47,7 @@ class TestParseMarket:
         assert market.ticker == "FED-RATE-CUT-MAY26"
         assert market.question == "Will the Federal Reserve cut rates at the May 2026 meeting?"
         assert len(market.tokens) == 2
-        assert market.yes_price == 0.34
+        assert market.yes_price == 0.34  # midpoint of 0.33 and 0.35
         assert market.no_price == 0.66
         assert market.volume_24h == 125000.0
         assert market.active is True
@@ -56,9 +56,9 @@ class TestParseMarket:
         raw = {
             "ticker": "TEST-001",
             "title": "Test market?",
-            "last_price": 40,
-            "volume_24h": 50000,
-            "status": "open",
+            "last_price_dollars": "0.40",
+            "volume_24h_fp": "50000.00",
+            "status": "active",
         }
         market = parse_market(raw)
         assert market is not None
@@ -79,14 +79,14 @@ class TestParseMarket:
         raw = {
             "ticker": "TEST-002",
             "title": "Test?",
-            "yes_bid": 30,
-            "yes_ask": 40,
-            "last_price": 0,
-            "status": "open",
+            "yes_bid_dollars": "0.30",
+            "yes_ask_dollars": "0.40",
+            "last_price_dollars": "0.00",
+            "status": "active",
         }
         market = parse_market(raw)
         assert market is not None
-        # Midpoint of 30-40 = 35
+        # Midpoint of 0.30-0.40 = 0.35
         assert market.yes_price == 0.35
         assert market.no_price == 0.65
 
@@ -97,19 +97,20 @@ class TestParseMarket:
         assert market.days_to_resolution > 40
 
     def test_parse_category_assignment(self, kalshi_market_response):
-        market = parse_market(kalshi_market_response)
+        # Event category "Economics" maps to FED_MACRO via KALSHI_CATEGORY_MAP
+        market = parse_market(kalshi_market_response, event_category="Economics")
         assert market.category == MarketCategory.FED_MACRO
 
     def test_parse_spread(self, kalshi_market_response):
         market = parse_market(kalshi_market_response)
-        # yes_ask (35) - yes_bid (33) = 2 cents = $0.02
+        # yes_ask_dollars (0.35) - yes_bid_dollars (0.33) = 0.02
         assert market.spread == 0.02
 
     def test_parse_closed_market(self):
         raw = {
             "ticker": "CLOSED-001",
             "title": "Closed market",
-            "last_price": 99,
+            "last_price_dollars": "0.99",
             "status": "settled",
             "result": "yes",
         }
@@ -130,44 +131,85 @@ class TestMarketDiscovery:
 
     @pytest.mark.asyncio
     async def test_get_all_active_markets(self, discovery):
+        """Events-based discovery returns nested markets from target categories."""
         mock_response = {
-            "markets": [{"ticker": "TEST-001"}, {"ticker": "TEST-002"}],
+            "events": [
+                {
+                    "category": "Politics",
+                    "markets": [{"ticker": "TEST-001"}, {"ticker": "TEST-002"}],
+                },
+            ],
             "cursor": None,
         }
-        with patch.object(discovery.kalshi, 'get_markets', new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = mock_response
+        with patch.object(discovery.kalshi, '_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_response
             result = await discovery.get_all_active_markets()
             assert len(result) == 2
+            assert result[0]["_event_category"] == "Politics"
 
     @pytest.mark.asyncio
     async def test_get_all_active_markets_pagination(self, discovery):
+        """Events-based discovery paginates correctly."""
         page1 = {
-            "markets": [{"ticker": f"M-{i}"} for i in range(200)],
+            "events": [
+                {
+                    "category": "Politics",
+                    "markets": [{"ticker": f"M-{i}"} for i in range(200)],
+                },
+            ],
             "cursor": "next_page",
         }
         page2 = {
-            "markets": [{"ticker": f"M-{i}"} for i in range(200, 250)],
+            "events": [
+                {
+                    "category": "Economics",
+                    "markets": [{"ticker": f"M-{i}"} for i in range(200, 250)],
+                },
+            ],
             "cursor": None,
         }
         call_count = 0
 
-        async def mock_get_markets(**kwargs):
+        async def mock_request(method, path, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 return page1
             return page2
 
-        with patch.object(discovery.kalshi, 'get_markets', side_effect=mock_get_markets):
+        with patch.object(discovery.kalshi, '_request', side_effect=mock_request):
             result = await discovery.get_all_active_markets()
             assert len(result) == 250
 
     @pytest.mark.asyncio
     async def test_get_all_active_markets_empty(self, discovery):
-        with patch.object(discovery.kalshi, 'get_markets', new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = {"markets": [], "cursor": None}
+        with patch.object(discovery.kalshi, '_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = {"events": [], "cursor": None}
             result = await discovery.get_all_active_markets()
             assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_all_active_markets_filters_non_target_categories(self, discovery):
+        """Non-target categories like 'Health' are filtered out."""
+        mock_response = {
+            "events": [
+                {
+                    "category": "Health",
+                    "markets": [{"ticker": "HEALTH-001"}],
+                },
+                {
+                    "category": "Politics",
+                    "markets": [{"ticker": "POL-001"}],
+                },
+            ],
+            "cursor": None,
+        }
+        with patch.object(discovery.kalshi, '_request', new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_response
+            result = await discovery.get_all_active_markets()
+            # Only Politics is in TARGET_EVENT_CATEGORIES
+            assert len(result) == 1
+            assert result[0]["ticker"] == "POL-001"
 
     @pytest.mark.asyncio
     async def test_close(self, discovery):

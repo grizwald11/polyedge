@@ -197,13 +197,14 @@ class KalshiClient:
         self,
         limit: int = 100,
         cursor: Optional[str] = None,
-        status: str = "open",
+        status: Optional[str] = None,
     ) -> dict:
         """Fetch events. Returns {events: [...], cursor: ...}."""
         params: dict[str, Any] = {
             "limit": min(limit, 200),
-            "status": status,
         }
+        if status:
+            params["status"] = status
         if cursor:
             params["cursor"] = cursor
         data = await self._request("GET", "/events", params=params)

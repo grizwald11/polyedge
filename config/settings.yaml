@@ -1,12 +1,12 @@
 kalshi:
   host: "https://api.elections.kalshi.com/trade-api/v2"
   demo_host: "https://demo-api.kalshi.co/trade-api/v2"
-  use_demo: true
+  use_demo: false
 
 scanning:
   interval_seconds: 300  # 5 minutes
-  min_volume_24h: 10000  # $10K minimum daily volume
-  min_liquidity: 5000    # $5K minimum order book depth
+  min_volume_24h: 100    # 100 contracts (Kalshi volumes are in contracts, not dollars)
+  min_liquidity: 100     # 100 contracts minimum open interest
   max_markets: 200       # Max markets to track simultaneously
   target_categories:
     - "Politics"

@@ -1,8 +1,8 @@
 """Market scanner — discovers, filters, ranks, and stores qualifying markets.
 
 Runs on a configurable interval (default 5 minutes). Fetches all active markets
-from Kalshi, applies volume/liquidity/category filters, ranks by
-opportunity score, and persists to the database.
+from Kalshi via event-based discovery, applies volume/liquidity/category filters,
+ranks by opportunity score, and persists to the database.
 """
 
 from __future__ import annotations
@@ -33,7 +33,8 @@ class MarketScanner:
         raw_markets = await self.discovery.get_all_active_markets()
         markets = []
         for raw in raw_markets:
-            market = parse_market(raw)
+            event_category = raw.get("_event_category", "")
+            market = parse_market(raw, event_category=event_category)
             if market is not None:
                 markets.append(market)
 
@@ -44,14 +45,19 @@ class MarketScanner:
         """Apply all configured filters to raw market list."""
         cfg = self.settings.scanning
         filtered = []
+        reasons = {"inactive": 0, "volume": 0, "excluded_cat": 0, "not_binary": 0, "no_price": 0}
 
         for m in markets:
             # Skip inactive or closed
             if not m.active or m.closed:
+                reasons["inactive"] += 1
                 continue
 
-            # Volume filter
-            if m.volume_24h < cfg.min_volume_24h:
+            # Volume filter — use volume_total as fallback since Kalshi
+            # doesn't reliably populate volume_24h
+            effective_volume = m.volume_24h if m.volume_24h > 0 else m.volume_total
+            if effective_volume < cfg.min_volume_24h:
+                reasons["volume"] += 1
                 continue
 
             # Category filter — exclude blacklisted categories
@@ -68,25 +74,29 @@ class MarketScanner:
                 if excluded:
                     break
             if excluded:
+                reasons["excluded_cat"] += 1
                 continue
 
             # Must be binary (YES/NO) for our strategies
             if not m.is_binary:
+                reasons["not_binary"] += 1
                 continue
 
             # Must have tokens with prices
             if not m.yes_token or not m.no_token:
+                reasons["no_price"] += 1
                 continue
 
             # Must have some price data
             if m.yes_price <= 0 and m.no_price <= 0:
+                reasons["no_price"] += 1
                 continue
 
             filtered.append(m)
 
         logger.info(
             f"Filtered {len(markets)} → {len(filtered)} markets "
-            f"(vol>=${cfg.min_volume_24h:,.0f}, binary, active, not excluded)"
+            f"(rejected: {reasons})"
         )
         return filtered
 
@@ -107,8 +117,10 @@ class MarketScanner:
             score = 0.0
 
             # Volume score (log-scaled, normalized to 0-40 range)
-            if m.volume_24h > 0:
-                score += min(40, math.log10(m.volume_24h) * 10)
+            # Use effective volume (24h or total)
+            vol = m.volume_24h if m.volume_24h > 0 else m.volume_total
+            if vol > 0:
+                score += min(40, math.log10(vol) * 10)
 
             # Spread score (wider spread = more potential mispricing, 0-20 range)
             price_sum = m.yes_price + m.no_price
@@ -146,9 +158,6 @@ class MarketScanner:
                 score += 5  # Some edge potential
 
             # Fee penalty: higher fees at mid-prices reduce attractiveness
-            # Kalshi taker fee = ceil(0.07 * contracts * p * (1-p))
-            # At p=0.50: fee ~= 1.75 cents per contract
-            # At p=0.90: fee ~= 0.63 cents per contract
             if mid_price > 0:
                 fee_per_contract = 0.07 * mid_price * (1 - mid_price)
                 score -= fee_per_contract * 20  # Small penalty
@@ -160,9 +169,10 @@ class MarketScanner:
 
         ranked = [m for _, m in scored]
         if ranked:
+            vol = ranked[0].volume_24h if ranked[0].volume_24h > 0 else ranked[0].volume_total
             logger.info(
                 f"Top market: [{ranked[0].category.value}] \"{ranked[0].question[:60]}\" "
-                f"(vol=${ranked[0].volume_24h:,.0f}, yes={ranked[0].yes_price:.2f})"
+                f"(vol={vol:,.0f}, yes={ranked[0].yes_price:.2f})"
             )
 
         return ranked[:self.settings.scanning.max_markets]

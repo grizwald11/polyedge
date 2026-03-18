@@ -1,8 +1,13 @@
 """Market discovery — fetches and parses markets from Kalshi API.
 
-Replaces the old Gamma API client. Uses Kalshi's GET /markets endpoint
-for market discovery. No separate discovery API needed — Kalshi uses
-a unified API.
+Uses the /events endpoint with with_nested_markets=true to get both
+events and their markets in a single bulk fetch. This avoids the
+/markets endpoint which only returns KXMVE parlay markets.
+
+Kalshi API field format (as of March 2026):
+- Prices: *_dollars fields as string ("0.4300")
+- Volume: volume_fp, volume_24h_fp as string ("55642.00")
+- Status: "active", "closed", "settled"
 """
 
 from __future__ import annotations
@@ -12,11 +17,29 @@ from datetime import datetime
 from typing import Any, Optional
 
 from src.core.kalshi_client import KalshiClient
-from src.core.models import Market, MarketCategory, MarketToken, cents_to_dollars
+from src.core.models import Market, MarketCategory, MarketToken
 
 logger = logging.getLogger(__name__)
 
-# Category keyword mapping for classification
+# Kalshi event categories → our MarketCategory
+KALSHI_CATEGORY_MAP: dict[str, MarketCategory] = {
+    "Politics": MarketCategory.POLITICS,
+    "Elections": MarketCategory.POLITICS,
+    "Economics": MarketCategory.FED_MACRO,
+    "Financials": MarketCategory.FED_MACRO,
+    "World": MarketCategory.GEOPOLITICS,
+    "Science and Technology": MarketCategory.TECH_AI,
+    "Companies": MarketCategory.TECH_AI,
+    "Entertainment": MarketCategory.CULTURE,
+    "Social": MarketCategory.CULTURE,
+    "Health": MarketCategory.OTHER,
+    "Climate and Weather": MarketCategory.OTHER,
+    "Crypto": MarketCategory.CRYPTO,
+    "Sports": MarketCategory.SPORTS,
+    "Transportation": MarketCategory.OTHER,
+}
+
+# Category keyword mapping for classification fallback
 CATEGORY_KEYWORDS: dict[MarketCategory, list[str]] = {
     MarketCategory.POLITICS: [
         "election", "president", "senate", "congress", "governor", "democrat",
@@ -75,21 +98,22 @@ def classify_market_category(question: str, tags: list[str]) -> MarketCategory:
     return max(scores, key=scores.get)
 
 
-def parse_market(raw: dict[str, Any]) -> Optional[Market]:
+def _parse_dollar_str(value: Any) -> float:
+    """Parse a Kalshi dollar string like '0.4300' to float."""
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def parse_market(raw: dict[str, Any], event_category: str = "") -> Optional[Market]:
     """Parse a raw Kalshi API market response into a Market model.
 
-    Kalshi market response fields:
-    - ticker: unique market identifier
-    - title/question: market question text
-    - subtitle: additional context
-    - yes_bid, yes_ask, no_bid, no_ask: prices in cents
-    - volume, volume_24h: trading volume
-    - open_interest: current open interest
-    - close_time: when the market closes
-    - status: "open", "closed", "settled"
-    - result: "yes", "no", "" (empty if unresolved)
-    - event_ticker: parent event
-    - category: Kalshi's category string
+    Kalshi API returns prices as dollar strings (*_dollars fields)
+    and volume as contract counts (*_fp fields).
+    Status is "active" (not "open").
     """
     try:
         ticker = raw.get("ticker", "")
@@ -100,37 +124,45 @@ def parse_market(raw: dict[str, Any]) -> Optional[Market]:
         subtitle = raw.get("subtitle", "")
         full_text = f"{question} {subtitle}".strip()
 
-        # Use Kalshi's category + our keyword matching
-        kalshi_category = raw.get("category", "")
-        tags = [kalshi_category] if kalshi_category else []
+        # Category: use event category mapping, fall back to keyword classification
+        tags = [event_category] if event_category else []
+        kalshi_category = event_category or raw.get("category", "")
+        mapped_category = KALSHI_CATEGORY_MAP.get(kalshi_category)
+        if mapped_category:
+            category = mapped_category
+        else:
+            category = classify_market_category(full_text, tags)
 
-        # Build tokens from Kalshi's price data
-        # Kalshi prices are in cents (1-99)
-        yes_bid = raw.get("yes_bid", 0) or 0
-        yes_ask = raw.get("yes_ask", 0) or 0
-        no_bid = raw.get("no_bid", 0) or 0
-        no_ask = raw.get("no_ask", 0) or 0
+        # Prices — Kalshi uses *_dollars fields (dollar strings)
+        yes_bid = _parse_dollar_str(raw.get("yes_bid_dollars") or raw.get("yes_bid"))
+        yes_ask = _parse_dollar_str(raw.get("yes_ask_dollars") or raw.get("yes_ask"))
+        no_bid = _parse_dollar_str(raw.get("no_bid_dollars") or raw.get("no_bid"))
+        no_ask = _parse_dollar_str(raw.get("no_ask_dollars") or raw.get("no_ask"))
+        last_price = _parse_dollar_str(raw.get("last_price_dollars") or raw.get("last_price"))
 
-        # Use midpoint of bid/ask, or last traded price
-        last_price = raw.get("last_price", 0) or 0
-        yes_price_cents = last_price if last_price > 0 else (
-            (yes_bid + yes_ask) / 2 if (yes_bid and yes_ask) else yes_bid or yes_ask
-        )
-        no_price_cents = 100 - yes_price_cents if yes_price_cents > 0 else (
-            (no_bid + no_ask) / 2 if (no_bid and no_ask) else no_bid or no_ask
-        )
+        # Determine YES price: prefer midpoint of bid/ask, fall back to last_price
+        if yes_bid > 0 and yes_ask > 0:
+            yes_price = (yes_bid + yes_ask) / 2
+        elif last_price > 0:
+            yes_price = last_price
+        else:
+            yes_price = yes_bid or yes_ask
+
+        # NO price: complement of YES, or from bid/ask
+        if yes_price > 0:
+            no_price = 1.0 - yes_price
+        elif no_bid > 0 and no_ask > 0:
+            no_price = (no_bid + no_ask) / 2
+        else:
+            no_price = no_bid or no_ask
+
+        # Clamp to valid range
+        yes_price = max(0.0, min(1.0, round(yes_price, 4)))
+        no_price = max(0.0, min(1.0, round(no_price, 4)))
 
         tokens = [
-            MarketToken(
-                token_id=f"{ticker}_yes",
-                outcome="Yes",
-                price=cents_to_dollars(yes_price_cents),
-            ),
-            MarketToken(
-                token_id=f"{ticker}_no",
-                outcome="No",
-                price=cents_to_dollars(no_price_cents),
-            ),
+            MarketToken(token_id=f"{ticker}_yes", outcome="Yes", price=yes_price),
+            MarketToken(token_id=f"{ticker}_no", outcome="No", price=no_price),
         ]
 
         # Parse close time
@@ -142,36 +174,24 @@ def parse_market(raw: dict[str, Any]) -> Optional[Market]:
             except (ValueError, TypeError):
                 pass
 
-        # Volume
-        volume_24h = 0.0
-        try:
-            volume_24h = float(raw.get("volume_24h") or raw.get("volume24hr") or 0)
-        except (ValueError, TypeError):
-            pass
+        # Volume — Kalshi uses *_fp fields (contract counts as strings)
+        volume_24h = _parse_dollar_str(raw.get("volume_24h_fp") or raw.get("volume_24h"))
+        volume_total = _parse_dollar_str(raw.get("volume_fp") or raw.get("volume"))
 
-        volume_total = 0.0
-        try:
-            volume_total = float(raw.get("volume") or 0)
-        except (ValueError, TypeError):
-            pass
-
-        liquidity = 0.0
-        try:
-            liquidity = float(raw.get("open_interest") or raw.get("liquidity") or 0)
-        except (ValueError, TypeError):
-            pass
+        # Liquidity / open interest
+        open_interest = _parse_dollar_str(raw.get("open_interest_fp") or raw.get("open_interest"))
+        liquidity_dollars = _parse_dollar_str(raw.get("liquidity_dollars") or raw.get("liquidity"))
+        liquidity = max(open_interest, liquidity_dollars)
 
         # Spread
         spread = 0.0
-        if yes_bid and yes_ask:
-            spread = cents_to_dollars(yes_ask - yes_bid)
+        if yes_bid > 0 and yes_ask > 0:
+            spread = round(yes_ask - yes_bid, 4)
 
-        # Status
-        status_str = raw.get("status", "open")
-        active = status_str == "open"
+        # Status — Kalshi uses "active", "closed", "settled"
+        status_str = raw.get("status", "active")
+        active = status_str in ("open", "active")
         closed = status_str in ("closed", "settled")
-
-        category = classify_market_category(full_text, tags)
 
         return Market(
             ticker=ticker,
@@ -199,28 +219,76 @@ def parse_market(raw: dict[str, Any]) -> Optional[Market]:
         return None
 
 
+# Kalshi event categories we want to trade
+TARGET_EVENT_CATEGORIES = {
+    "Politics", "Elections", "Economics", "Financials",
+    "World", "Science and Technology", "Companies",
+    "Entertainment", "Social",
+}
+
+
 class MarketDiscovery:
-    """Client for Kalshi market discovery using the unified API."""
+    """Client for Kalshi market discovery.
+
+    Uses /events?with_nested_markets=true to fetch events with their
+    markets embedded. This is the only reliable way to get non-parlay
+    markets (the /markets endpoint only returns KXMVE parlays).
+    """
 
     def __init__(self, kalshi: KalshiClient):
         self.kalshi = kalshi
 
-    async def get_all_active_markets(self, max_pages: int = 20) -> list[dict]:
-        """Fetch ALL active markets with cursor-based pagination."""
+    async def get_all_active_markets(self, max_pages: int = 10) -> list[dict]:
+        """Fetch all active markets via events with nested markets.
+
+        1. Paginate through /events?with_nested_markets=true
+        2. Filter events to target categories
+        3. Extract and return market dicts tagged with event category
+        """
         all_markets = []
+        events_seen = 0
+        events_targeted = 0
         cursor = None
 
         for page in range(max_pages):
-            data = await self.kalshi.get_markets(limit=200, cursor=cursor, status="open")
-            markets = data.get("markets", [])
-            if not markets:
+            params: dict[str, Any] = {
+                "limit": 200,
+                "with_nested_markets": "true",
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            data = await self.kalshi._request("GET", "/events", params=params)
+            if data is None:
                 break
-            all_markets.extend(markets)
+
+            events = data.get("events", [])
+            if not events:
+                break
+
+            for event in events:
+                events_seen += 1
+                event_category = event.get("category", "")
+
+                # Filter to target categories
+                if event_category not in TARGET_EVENT_CATEGORIES:
+                    continue
+
+                events_targeted += 1
+                nested_markets = event.get("markets", [])
+                for m in nested_markets:
+                    m["_event_category"] = event_category
+                    all_markets.append(m)
+
             cursor = data.get("cursor")
             if not cursor:
                 break
 
-        logger.info(f"Fetched {len(all_markets)} active markets across {page + 1} pages")
+        logger.info(
+            f"Fetched {len(all_markets)} markets from "
+            f"{events_targeted}/{events_seen} target events "
+            f"across {page + 1} pages"
+        )
         return all_markets
 
     async def get_market_by_ticker(self, ticker: str) -> Optional[dict]:
