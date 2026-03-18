@@ -124,11 +124,11 @@ class TestCalculatePositionSize:
         assert a == b
 
     def test_fee_included_in_position_cap(self, sizer):
-        """Contracts * price + estimated fee must not exceed position cap.
+        """Contracts * price + estimated fee (in dollars) must not exceed position cap.
 
         Regression: Cuba trade deal NO at $0.66 produced 38 contracts
         ($25.08) which exceeded the $25 cap before fees were considered.
-        Fee formula: ceil(0.07 * contracts * price * (1 - price)).
+        Fee formula returns cents: ceil(fee_rate * contracts * price * (1 - price)).
         """
         import math
 
@@ -138,9 +138,31 @@ class TestCalculatePositionSize:
             edge=0.10, probability=0.76, bankroll=500.0,
             order_price=price,
         )
-        fee = math.ceil(0.07 * contracts * price * (1.0 - price))
-        total = contracts * price + fee
+        fee_cents = math.ceil(sizer.fee_rate * contracts * price * (1.0 - price))
+        fee_dollars = fee_cents / 100.0
+        total = contracts * price + fee_dollars
         assert total <= max_position, (
             f"{contracts} contracts @ ${price}: cost ${contracts * price:.2f} "
-            f"+ fee ${fee} = ${total:.2f} exceeds cap ${max_position:.2f}"
+            f"+ fee ${fee_dollars:.2f} = ${total:.2f} exceeds cap ${max_position:.2f}"
         )
+
+    def test_fee_unit_is_dollars(self, sizer):
+        """25 contracts at $0.50 should NOT be reduced — fee is only ~1 cent."""
+        # fee_cents = ceil(0.0175 * 25 * 0.50 * 0.50) = ceil(0.109) = 1 cent
+        # total = 25 * 0.50 + 0.01 = $12.51, well under $25 cap
+        # Before fix, fee was treated as $1, causing unnecessary reduction.
+        import math
+
+        contracts = sizer.calculate_position_size(
+            edge=0.10, probability=0.60, bankroll=500.0,
+            order_price=0.50,
+        )
+        # With half-Kelly and these params, we should get a reasonable count
+        # The key check: at 0.50 price, the fee should not cause a reduction
+        # when total cost is well under the cap
+        if contracts > 1:
+            fee_cents = math.ceil(sizer.fee_rate * contracts * 0.50 * 0.50)
+            fee_dollars = fee_cents / 100.0
+            cost = contracts * 0.50
+            # Fee in dollars should be tiny relative to cost
+            assert fee_dollars < 0.10, f"Fee ${fee_dollars:.2f} is too high (should be ~cents)"

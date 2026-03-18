@@ -19,6 +19,7 @@ class KellySizer:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.fee_rate = 0.0175 if settings.trading.prefer_maker else 0.07
 
     def calculate_position_size(
         self,
@@ -94,10 +95,12 @@ class KellySizer:
         contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
 
         # Account for estimated fee so total cost stays within cap.
-        # Fee formula: ceil(0.07 * contracts * price * (1 - price))
+        # Fee formula returns cents: ceil(fee_rate * contracts * price * (1 - price))
+        # Convert to dollars before comparing.
         if contracts > 0 and 0 < cost_price < 1:
-            fee = math.ceil(0.07 * contracts * cost_price * (1.0 - cost_price))
-            if contracts * cost_price + fee > kelly_dollars:
+            fee_cents = math.ceil(self.fee_rate * contracts * cost_price * (1.0 - cost_price))
+            fee_dollars = fee_cents / 100.0
+            if contracts * cost_price + fee_dollars > kelly_dollars:
                 contracts -= 1
 
         # Minimum 1 contract if we have any edge and room

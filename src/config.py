@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class KalshiConfig(BaseModel):
@@ -42,6 +42,31 @@ class TradingConfig(BaseModel):
     prefer_maker: bool = True
     daily_loss_limit_pct: float = 0.10
     max_obvious_no_pct: float = 0.10
+
+    @field_validator("bankroll")
+    @classmethod
+    def bankroll_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("bankroll must be > 0")
+        return v
+
+    @field_validator("kelly_fraction")
+    @classmethod
+    def kelly_fraction_valid(cls, v: float) -> float:
+        if v <= 0 or v > 1:
+            raise ValueError("kelly_fraction must be in (0, 1]")
+        return v
+
+    @field_validator(
+        "max_position_pct", "max_total_exposure_pct",
+        "max_correlated_exposure_pct", "daily_loss_limit_pct",
+        "max_obvious_no_pct",
+    )
+    @classmethod
+    def pct_valid(cls, v: float) -> float:
+        if v <= 0 or v > 1:
+            raise ValueError("percentage fields must be in (0, 1]")
+        return v
 
 
 class ClaudeConfig(BaseModel):

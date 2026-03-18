@@ -28,6 +28,7 @@ class CircuitBreaker:
         self._consecutive_losing_days = 0
         self._last_day_checked: Optional[str] = None
         self._reduced_sizing = False
+        self._load_state()
 
     @property
     def halt_reason(self) -> Optional[str]:
@@ -71,6 +72,7 @@ class CircuitBreaker:
         if self._consecutive_losing_days >= 3:
             if not self._reduced_sizing:
                 self._reduced_sizing = True
+                self._persist_state()
                 logger.warning(
                     f"3 consecutive losing days — reducing to quarter-Kelly"
                 )
@@ -98,6 +100,7 @@ class CircuitBreaker:
         self._halt_time = None
         self._consecutive_losing_days = 0
         self._reduced_sizing = False
+        self._persist_state()
         logger.info("Circuit breaker reset")
 
     def reset_daily(self):
@@ -106,6 +109,7 @@ class CircuitBreaker:
             self._halted = False
             self._halt_reason = None
             self._halt_time = None
+            self._persist_state()
             logger.info("Circuit breaker: daily halt cleared for new day")
 
     def record_daily_result(self, pnl: float):
@@ -122,13 +126,44 @@ class CircuitBreaker:
         else:
             self._consecutive_losing_days = 0
             self._reduced_sizing = False
+        self._persist_state()
 
     def _halt(self, reason: str):
         """Halt all trading."""
         self._halted = True
         self._halt_reason = reason
         self._halt_time = datetime.now(timezone.utc)
+        self._persist_state()
         logger.warning(f"CIRCUIT BREAKER TRIGGERED: {reason}")
+
+    def _load_state(self):
+        """Load persisted state from database on startup."""
+        state = self.db.load_circuit_breaker_state()
+        if state is None:
+            return
+        self._consecutive_losing_days = state["consecutive_losing_days"]
+        self._reduced_sizing = bool(state["reduced_sizing"])
+        self._halted = bool(state["halted"])
+        self._halt_reason = state["halt_reason"]
+        if state["halt_time"]:
+            self._halt_time = datetime.fromisoformat(state["halt_time"])
+        if self._halted or self._consecutive_losing_days > 0 or self._reduced_sizing:
+            logger.info(
+                f"Loaded circuit breaker state: "
+                f"halted={self._halted}, "
+                f"consecutive_losing_days={self._consecutive_losing_days}, "
+                f"reduced_sizing={self._reduced_sizing}"
+            )
+
+    def _persist_state(self):
+        """Save current state to database."""
+        self.db.save_circuit_breaker_state(
+            consecutive_losing_days=self._consecutive_losing_days,
+            reduced_sizing=self._reduced_sizing,
+            halted=self._halted,
+            halt_reason=self._halt_reason,
+            halt_time=self._halt_time.isoformat() if self._halt_time else None,
+        )
 
     def _update_consecutive_losses(self):
         """Update consecutive losing days from database."""

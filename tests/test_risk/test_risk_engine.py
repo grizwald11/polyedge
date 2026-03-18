@@ -26,8 +26,8 @@ def circuit_breaker(settings, tmp_db) -> CircuitBreaker:
 
 
 @pytest.fixture
-def engine(settings, position_manager, circuit_breaker) -> RiskEngine:
-    return RiskEngine(settings, position_manager, circuit_breaker)
+def engine(settings, position_manager, circuit_breaker, tmp_db) -> RiskEngine:
+    return RiskEngine(settings, position_manager, circuit_breaker, tmp_db)
 
 
 @pytest.fixture
@@ -197,3 +197,40 @@ class TestCheckAll:
         )
         result = engine.check_all(signal, long_market, proposed_size=10, proposed_cost=3.40)
         assert any("Long-dated" in w for w in result.warnings)
+
+
+class TestCooldownPersistence:
+    def test_cooldown_survives_restart(self, settings, tmp_db):
+        """Cooldowns should persist across RiskEngine restarts."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        cb = CircuitBreaker(settings, tmp_db)
+
+        engine1 = RiskEngine(settings, pm, cb, tmp_db)
+        engine1.record_exit("FED-RATE-CUT-MAY26")
+
+        # Simulate restart: new instance on same DB
+        engine2 = RiskEngine(settings, pm, cb, tmp_db)
+        assert "FED-RATE-CUT-MAY26" in engine2._cooldowns
+
+        # Verify it actually blocks
+        sig = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="FED-RATE-CUT-MAY26",
+            direction=Direction.BUY_YES,
+            edge=0.08,
+            probability_estimate=0.42,
+            market_price=0.34,
+        )
+        mkt = Market(
+            ticker="FED-RATE-CUT-MAY26",
+            question="Test",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.34),
+                MarketToken(token_id="no", outcome="No", price=0.66),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=45),
+            liquidity=50000,
+        )
+        result = engine2.check_all(sig, mkt, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+        assert any("Cooldown" in c for c in result.failed_checks)

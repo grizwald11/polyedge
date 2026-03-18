@@ -12,9 +12,12 @@ import logging
 import sys
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 from src.config import load_settings
 from src.core.kalshi_client import KalshiClient
 from src.core.market_discovery import MarketDiscovery
+from src.core.models import Direction
 from src.data.market_scanner import MarketScanner
 from src.storage.database import Database
 from src.analysis.claude_forecaster import ClaudeForecaster
@@ -87,7 +90,7 @@ async def scan_and_trade(
 
     # Update unrealized P&L with latest market prices
     for market in markets:
-        position_manager.update_price(market.ticker, market.yes_price)
+        position_manager.update_price(market.ticker, market.yes_price, market.no_price)
 
     # Generate signals from both strategies
     ai_signals = await ai_strategy.scan_for_opportunities(markets[:30])
@@ -110,6 +113,10 @@ async def scan_and_trade(
     for signal in all_signals:
         market = market_lookup.get(signal.market_id)
         if market is None:
+            logger.warning(
+                f"Signal for unknown market {signal.market_id} "
+                f"(strategy={signal.strategy.value}) — skipped"
+            )
             continue
 
         # Kelly sizing with circuit breaker multiplier
@@ -150,10 +157,16 @@ async def scan_and_trade(
             position_manager.update_from_trade(result.trade, market.question)
 
             # Log calibration prediction
+            # Convert to YES probability for calibration (Brier expects YES=1, NO=0)
+            if signal.direction in (Direction.BUY_NO, Direction.SELL_NO):
+                cal_probability = 1.0 - signal.probability_estimate
+            else:
+                cal_probability = signal.probability_estimate
+
             calibration.log_prediction(
                 market_id=signal.market_id,
                 market_question=signal.market_question,
-                predicted_probability=signal.probability_estimate,
+                predicted_probability=cal_probability,
                 market_price=signal.market_price,
                 strategy=signal.strategy,
             )
@@ -215,9 +228,19 @@ async def run_trading_loop(
     """Run the scan-assess-trade loop on an interval."""
     logger = logging.getLogger("polyedge.main")
     cycle_count = 0
+    last_trading_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     while True:
         try:
+            # Day-boundary: record previous day's result and reset daily halt
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if today != last_trading_day:
+                yesterday_pnl = scanner.db.get_daily_pnl(last_trading_day)
+                circuit_breaker.record_daily_result(yesterday_pnl)
+                circuit_breaker.reset_daily()
+                logger.info(f"New trading day: previous day P&L=${yesterday_pnl:.2f}")
+                last_trading_day = today
+
             cycle_count += 1
             await scan_and_trade(
                 scanner, ai_strategy, no_strategy, risk_engine, kelly_sizer,
@@ -302,7 +325,7 @@ async def main():
     # Risk
     circuit_breaker = CircuitBreaker(settings, db)
     kelly_sizer = KellySizer(settings)
-    risk_engine = RiskEngine(settings, position_manager, circuit_breaker)
+    risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
 
     # Run initial scan
     logger.info("Running initial scan cycle...")

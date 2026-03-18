@@ -17,7 +17,7 @@ from src.core.models import Market, MarketSnapshot, Signal, Order, Trade, Calibr
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 -- Markets (Kalshi uses ticker as primary key)
@@ -150,6 +150,23 @@ CREATE TABLE IF NOT EXISTS whale_wallets (
     added_at TEXT NOT NULL
 );
 
+-- Circuit breaker persistent state (singleton row)
+CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    consecutive_losing_days INTEGER DEFAULT 0,
+    reduced_sizing INTEGER DEFAULT 0,
+    halted INTEGER DEFAULT 0,
+    halt_reason TEXT,
+    halt_time TEXT,
+    last_updated TEXT NOT NULL
+);
+
+-- Cooldown timers for risk engine
+CREATE TABLE IF NOT EXISTS cooldowns (
+    market_id TEXT PRIMARY KEY,
+    exit_time TEXT NOT NULL
+);
+
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -206,6 +223,35 @@ class Database:
         if "profit_loss" not in existing_cols:
             conn.execute("ALTER TABLE calibration_records ADD COLUMN profit_loss REAL")
             logger.info("Migration: added profit_loss column to calibration_records")
+
+        # Migration v3 -> v4: circuit_breaker_state and cooldowns tables
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "circuit_breaker_state" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    consecutive_losing_days INTEGER DEFAULT 0,
+                    reduced_sizing INTEGER DEFAULT 0,
+                    halted INTEGER DEFAULT 0,
+                    halt_reason TEXT,
+                    halt_time TEXT,
+                    last_updated TEXT NOT NULL
+                )
+            """)
+            logger.info("Migration: created circuit_breaker_state table")
+        if "cooldowns" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cooldowns (
+                    market_id TEXT PRIMARY KEY,
+                    exit_time TEXT NOT NULL
+                )
+            """)
+            logger.info("Migration: created cooldowns table")
         conn.commit()
 
     # ──────────────────────────────────────
@@ -410,14 +456,22 @@ class Database:
         finally:
             conn.close()
 
-    def get_daily_pnl(self) -> float:
-        """Get today's total realized P&L."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def get_daily_pnl(self, date_str: str | None = None) -> float:
+        """Get total realized P&L for a given day.
+
+        Args:
+            date_str: Date in YYYY-MM-DD format. Defaults to today (UTC).
+        """
+        from datetime import date as date_type, timedelta
+        if date_str is None:
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
         conn = self._get_conn()
         try:
             row = conn.execute(
-                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM trades WHERE timestamp >= ?",
-                (today,)
+                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM trades "
+                "WHERE timestamp >= ? AND timestamp < ?",
+                (date_str, next_date_str),
             ).fetchone()
             return row["total"] if row else 0.0
         finally:
@@ -585,6 +639,117 @@ class Database:
             )
             conn.commit()
             return cursor.rowcount
+        finally:
+            conn.close()
+
+    # ──────────────────────────────────────
+    # Circuit Breaker State
+    # ──────────────────────────────────────
+
+    def save_circuit_breaker_state(
+        self,
+        consecutive_losing_days: int,
+        reduced_sizing: bool,
+        halted: bool,
+        halt_reason: Optional[str] = None,
+        halt_time: Optional[str] = None,
+    ):
+        """Persist circuit breaker state (singleton row, id=1)."""
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self._get_conn()
+        try:
+            conn.execute("""
+                INSERT INTO circuit_breaker_state
+                    (id, consecutive_losing_days, reduced_sizing, halted,
+                     halt_reason, halt_time, last_updated)
+                VALUES (1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    consecutive_losing_days=excluded.consecutive_losing_days,
+                    reduced_sizing=excluded.reduced_sizing,
+                    halted=excluded.halted,
+                    halt_reason=excluded.halt_reason,
+                    halt_time=excluded.halt_time,
+                    last_updated=excluded.last_updated
+            """, (
+                consecutive_losing_days,
+                int(reduced_sizing),
+                int(halted),
+                halt_reason,
+                halt_time,
+                now,
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load_circuit_breaker_state(self) -> Optional[dict]:
+        """Load persisted circuit breaker state. Returns None if no state saved."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM circuit_breaker_state WHERE id=1"
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    # ──────────────────────────────────────
+    # Cooldowns
+    # ──────────────────────────────────────
+
+    def save_cooldown(self, market_id: str, exit_time: datetime):
+        """Persist a cooldown entry."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO cooldowns (market_id, exit_time) VALUES (?, ?)",
+                (market_id, exit_time.isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load_cooldowns(self, max_age_seconds: int = 3600) -> dict[str, datetime]:
+        """Load valid cooldowns, deleting expired ones.
+
+        Args:
+            max_age_seconds: Maximum cooldown age in seconds.
+
+        Returns:
+            Dict of market_id -> exit_time for still-active cooldowns.
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute("SELECT market_id, exit_time FROM cooldowns").fetchall()
+            now = datetime.now(timezone.utc)
+            active: dict[str, datetime] = {}
+            expired: list[str] = []
+
+            for row in rows:
+                exit_time = datetime.fromisoformat(row["exit_time"])
+                if (now - exit_time).total_seconds() < max_age_seconds:
+                    active[row["market_id"]] = exit_time
+                else:
+                    expired.append(row["market_id"])
+
+            # Clean up expired
+            if expired:
+                conn.executemany(
+                    "DELETE FROM cooldowns WHERE market_id=?",
+                    [(m,) for m in expired],
+                )
+                conn.commit()
+
+            return active
+        finally:
+            conn.close()
+
+    def delete_cooldown(self, market_id: str):
+        """Remove a cooldown entry."""
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM cooldowns WHERE market_id=?", (market_id,))
+            conn.commit()
         finally:
             conn.close()
 

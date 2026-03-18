@@ -165,7 +165,8 @@ class MarketScanner:
 
             # Fee penalty: higher fees at mid-prices reduce attractiveness
             if mid_price > 0:
-                fee_per_contract = 0.07 * mid_price * (1 - mid_price)
+                fee_rate = 0.0175 if self.settings.trading.prefer_maker else 0.07
+                fee_per_contract = fee_rate * mid_price * (1 - mid_price)
                 score -= fee_per_contract * 20  # Small penalty
 
             scored.append((score, m))

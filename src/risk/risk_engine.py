@@ -12,6 +12,7 @@ from src.config import Settings
 from src.core.models import Market, RiskCheckResult, Signal, StrategyName
 from src.execution.position_manager import PositionManager
 from src.risk.circuit_breaker import CircuitBreaker
+from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +25,20 @@ class RiskEngine:
         settings: Settings,
         position_manager: PositionManager,
         circuit_breaker: CircuitBreaker,
+        db: Database | None = None,
     ):
         self.settings = settings
         self.positions = position_manager
         self.circuit_breaker = circuit_breaker
-        self._cooldowns: dict[str, datetime] = {}  # market_id -> last exit time
+        self.db = db
         self.cooldown_seconds = 3600  # 1 hour cooldown after exit
+        # Load persisted cooldowns if DB available, otherwise start empty
+        if db is not None:
+            self._cooldowns: dict[str, datetime] = db.load_cooldowns(self.cooldown_seconds)
+            if self._cooldowns:
+                logger.info(f"Loaded {len(self._cooldowns)} active cooldowns from DB")
+        else:
+            self._cooldowns = {}
 
     def check_all(
         self,
@@ -130,6 +139,11 @@ class RiskEngine:
             if elapsed < self.cooldown_seconds:
                 remaining = self.cooldown_seconds - elapsed
                 failed.append(f"Cooldown active: {remaining:.0f}s remaining for {signal.market_id}")
+            else:
+                # Clean up expired cooldown
+                del self._cooldowns[signal.market_id]
+                if self.db is not None:
+                    self.db.delete_cooldown(signal.market_id)
 
         # Obvious NO specific: max 10% bankroll in obvious-no positions
         if signal.strategy == StrategyName.OBVIOUS_NO:
@@ -162,7 +176,10 @@ class RiskEngine:
 
     def record_exit(self, market_id: str):
         """Record a position exit for cooldown tracking."""
-        self._cooldowns[market_id] = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        self._cooldowns[market_id] = now
+        if self.db is not None:
+            self.db.save_cooldown(market_id, now)
 
     def _get_min_edge(self, strategy: StrategyName) -> float:
         """Get minimum edge threshold for a strategy."""

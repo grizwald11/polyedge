@@ -115,7 +115,12 @@ class OrderRouter:
         # Determine Kalshi side and order type
         kalshi_side = "yes" if "yes" in order.token_id.lower() else "no"
         kalshi_type = "limit" if order.order_type == OrderType.GTC else "market"
-        yes_price = dollars_to_cents(order.price)
+        # Kalshi API always expects yes_price regardless of which side we buy.
+        # For BUY_NO: order.price is the NO price, so yes_price = 1 - order.price.
+        if kalshi_side == "no":
+            yes_price = dollars_to_cents(1.0 - order.price)
+        else:
+            yes_price = dollars_to_cents(order.price)
 
         try:
             result = await self.kalshi.create_order(

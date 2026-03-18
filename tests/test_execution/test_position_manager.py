@@ -76,28 +76,42 @@ class TestUpdateFromTrade:
 
 
 class TestPriceUpdate:
-    def test_unrealized_pnl_buy(self, tmp_db):
+    def test_unrealized_pnl_buy_yes(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
         pm.update_from_trade(_make_trade(price=0.34, size=10))
 
-        pm.update_price("FED-RATE-CUT-MAY26", 0.40)
+        pm.update_price("FED-RATE-CUT-MAY26", 0.40, 0.60)
         pos = pm.get_position("FED-RATE-CUT-MAY26")
 
         assert pos.current_price == 0.40
         assert pos.unrealized_pnl == pytest.approx(0.60)  # (0.40 - 0.34) * 10
 
+    def test_unrealized_pnl_buy_no(self, tmp_db):
+        """BUY_NO positions should use no_price, not yes_price."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade(
+            token_id="FED-RATE-CUT-MAY26_no", price=0.97, size=10
+        ))
+
+        # YES=0.04, NO=0.96 — NO dropped from 0.97 to 0.96
+        pm.update_price("FED-RATE-CUT-MAY26", 0.04, 0.96)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+
+        assert pos.current_price == 0.96  # Should use no_price
+        assert pos.unrealized_pnl == pytest.approx(-0.10)  # (0.96 - 0.97) * 10
+
     def test_unrealized_pnl_loss(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
         pm.update_from_trade(_make_trade(price=0.34, size=10))
 
-        pm.update_price("FED-RATE-CUT-MAY26", 0.30)
+        pm.update_price("FED-RATE-CUT-MAY26", 0.30, 0.70)
         pos = pm.get_position("FED-RATE-CUT-MAY26")
 
         assert pos.unrealized_pnl == pytest.approx(-0.40)
 
     def test_update_nonexistent_market(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
-        pm.update_price("DOESNT-EXIST", 0.50)  # Should not raise
+        pm.update_price("DOESNT-EXIST", 0.50, 0.50)  # Should not raise
 
 
 class TestPortfolioMetrics:
@@ -149,7 +163,7 @@ class TestPortfolioMetrics:
         pm.update_from_trade(_make_trade(market_id="A", token_id="A_yes", price=0.30, size=10))
         pm.update_from_trade(_make_trade(market_id="B", token_id="B_yes", price=0.50, size=10))
 
-        pm.update_price("A", 0.40)  # +1.0
-        pm.update_price("B", 0.45)  # -0.5
+        pm.update_price("A", 0.40, 0.60)  # +1.0
+        pm.update_price("B", 0.45, 0.55)  # -0.5
 
         assert pm.get_total_unrealized_pnl() == pytest.approx(0.50)

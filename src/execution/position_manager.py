@@ -24,6 +24,7 @@ class PositionManager:
         self.db = db
         self.bankroll = bankroll
         self._positions: dict[str, Position] = {}  # market_id -> Position
+        self._load_positions_from_db()
 
     def update_from_trade(self, trade: Trade, market_question: str = "") -> Position:
         """Update positions based on a new trade fill.
@@ -84,18 +85,28 @@ class PositionManager:
             )
             return existing
 
-    def update_price(self, market_id: str, current_price: float):
-        """Update current price and recalculate unrealized P&L."""
+    def update_price(self, market_id: str, yes_price: float, no_price: float = 0.0):
+        """Update current price and recalculate unrealized P&L.
+
+        Args:
+            market_id: Market ticker
+            yes_price: Current YES price
+            no_price: Current NO price (used for BUY_NO/SELL_NO positions)
+        """
         position = self._positions.get(market_id)
         if position is None:
             return
 
-        position.current_price = current_price
+        # Use the price matching the position's side
+        if position.direction in (Direction.BUY_NO, Direction.SELL_NO):
+            position.current_price = no_price
+        else:
+            position.current_price = yes_price
         # P&L = (current - entry) * size for BUY, (entry - current) * size for SELL
         if position.direction in (Direction.BUY_YES, Direction.BUY_NO):
-            position.unrealized_pnl = (current_price - position.avg_entry_price) * position.size
+            position.unrealized_pnl = (position.current_price - position.avg_entry_price) * position.size
         else:
-            position.unrealized_pnl = (position.avg_entry_price - current_price) * position.size
+            position.unrealized_pnl = (position.avg_entry_price - position.current_price) * position.size
         position.last_updated = datetime.now(timezone.utc)
 
     def get_position(self, market_id: str) -> Optional[Position]:
@@ -134,6 +145,39 @@ class PositionManager:
     def get_position_count(self) -> int:
         """Number of open positions."""
         return len(self._positions)
+
+    def _load_positions_from_db(self):
+        """Reconstruct open positions from trade history on startup."""
+        conn = self.db._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT order_id, market_id, token_id, side, price, size, "
+                "fee, realized_pnl, strategy, paper, timestamp "
+                "FROM trades ORDER BY timestamp ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return
+
+        for row in rows:
+            trade = Trade(
+                order_id=row["order_id"],
+                market_id=row["market_id"],
+                token_id=row["token_id"],
+                side=Side(row["side"]),
+                price=row["price"],
+                size=row["size"],
+                fee=row["fee"],
+                realized_pnl=row["realized_pnl"],
+                strategy=StrategyName(row["strategy"]),
+                paper=bool(row["paper"]),
+            )
+            self.update_from_trade(trade)
+
+        if self._positions:
+            logger.info(f"Loaded {len(self._positions)} open positions from DB")
 
     def _direction_from_trade(self, trade: Trade) -> Direction:
         """Infer direction from trade side and token."""

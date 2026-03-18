@@ -117,3 +117,45 @@ class TestReset:
         cb.reset_daily()
 
         assert cb.is_halted() is True  # Not a daily halt, shouldn't clear
+
+
+class TestPersistence:
+    def test_consecutive_losses_survive_restart(self, settings, tmp_db):
+        """Consecutive loss counter should persist across restarts."""
+        cb1 = CircuitBreaker(settings, tmp_db)
+        cb1.record_daily_result(-10.0)
+        cb1.record_daily_result(-5.0)
+        cb1.record_daily_result(-20.0)
+        cb1.check(500.0)  # Triggers reduced sizing at 3 losses
+
+        # Simulate restart: new instance on same DB
+        cb2 = CircuitBreaker(settings, tmp_db)
+        assert cb2._consecutive_losing_days == 3
+        assert cb2.is_reduced_sizing is True
+
+    def test_halt_survives_restart(self, settings, tmp_db):
+        """Halt state should persist across restarts."""
+        cb1 = CircuitBreaker(settings, tmp_db)
+        for _ in range(5):
+            cb1.record_daily_result(-10.0)
+        cb1.check(500.0)  # Triggers halt
+        assert cb1.is_halted() is True
+
+        # Simulate restart
+        cb2 = CircuitBreaker(settings, tmp_db)
+        assert cb2.is_halted() is True
+        assert "5 consecutive" in cb2.halt_reason
+
+    def test_reset_clears_persisted_state(self, settings, tmp_db):
+        """Reset should clear persisted state so new instance starts clean."""
+        cb1 = CircuitBreaker(settings, tmp_db)
+        for _ in range(5):
+            cb1.record_daily_result(-10.0)
+        cb1.check(500.0)
+        cb1.reset()
+
+        # Simulate restart
+        cb2 = CircuitBreaker(settings, tmp_db)
+        assert cb2.is_halted() is False
+        assert cb2._consecutive_losing_days == 0
+        assert cb2.is_reduced_sizing is False

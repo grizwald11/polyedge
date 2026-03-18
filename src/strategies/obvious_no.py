@@ -64,11 +64,15 @@ class ObviousNoStrategy:
         if no_price <= 0 or no_price >= 1.0:
             return None
 
-        simple_return = (1.0 - no_price) / no_price
+        # Subtract Kalshi maker fee from return calculation
+        # Fee formula: 0.0175 * price * (1 - price) per contract
+        fee_per_contract = 0.0175 * no_price * (1.0 - no_price)
+        net_profit = 1.0 - no_price - fee_per_contract
+        simple_return = net_profit / no_price
         annualized_return = simple_return * (365.0 / days) if days > 0 else 0
 
-        # Edge = profit per contract when NO resolves to $1.00
-        edge = 1.0 - no_price
+        # Edge = net profit per contract when NO resolves to $1.00
+        edge = net_profit
 
         if edge < min_edge:
             return None
@@ -88,7 +92,8 @@ class ObviousNoStrategy:
             confidence=0.95,  # High confidence on obvious outcomes
             reasoning=(
                 f"YES at ${yes_price:.2f}, NO at ${no_price:.2f}. "
-                f"Simple return: {simple_return:.1%}, "
+                f"Fee: ${fee_per_contract:.4f}/contract. "
+                f"Net return: {simple_return:.1%}, "
                 f"Annualized: {annualized_return:.0%}. "
                 f"Resolves in {days:.0f} days."
             ),

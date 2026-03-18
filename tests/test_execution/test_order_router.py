@@ -139,6 +139,48 @@ class TestLiveFill:
         assert "API down" in result.error
 
 
+class TestLiveBuyNoPrice:
+    @pytest.mark.asyncio
+    async def test_live_buy_no_sends_correct_yes_price(self, live_settings, mock_kalshi, tmp_db):
+        """BUY NO at $0.97 should send yes_price=3 (i.e., YES=$0.03)."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        order = Order(
+            id="PE-no-test",
+            market_id="MKT-TEST",
+            token_id="MKT-TEST_no",
+            side=Side.BUY,
+            price=0.97,
+            size=10,
+            cost=9.70,
+            order_type=OrderType.GTC,
+            status=OrderStatus.PENDING,
+            strategy=StrategyName.OBVIOUS_NO,
+            paper=False,
+        )
+
+        await router.route_order(order)
+
+        mock_kalshi.create_order.assert_called_once()
+        call_kwargs = mock_kalshi.create_order.call_args
+        assert call_kwargs.kwargs.get("yes_price") == 3 or call_kwargs[1].get("yes_price") == 3, (
+            f"Expected yes_price=3 for NO@$0.97, got {call_kwargs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_buy_yes_sends_correct_yes_price(self, live_settings, mock_kalshi, tmp_db):
+        """BUY YES at $0.34 should send yes_price=34."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        order = _make_order(paper=False)  # YES at $0.34
+
+        await router.route_order(order)
+
+        mock_kalshi.create_order.assert_called_once()
+        call_kwargs = mock_kalshi.create_order.call_args
+        assert call_kwargs.kwargs.get("yes_price") == 34 or call_kwargs[1].get("yes_price") == 34, (
+            f"Expected yes_price=34 for YES@$0.34, got {call_kwargs}"
+        )
+
+
 class TestLiveGates:
     def test_paper_mode_fails_gate(self, paper_settings, mock_kalshi, tmp_db):
         router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
