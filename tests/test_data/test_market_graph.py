@@ -27,6 +27,15 @@ def _make_market(ticker, question, event_ticker=""):
 class TestMarketGraphFallback:
     """Tests for when ChromaDB is not available (keyword fallback)."""
 
+    def _make_unavailable_graph(self):
+        """Create a MarketGraph with ChromaDB disabled, bypassing __init__."""
+        graph = MarketGraph.__new__(MarketGraph)
+        graph.persist_dir = "/tmp/fake_chroma"
+        graph._collection = None
+        graph._client = None
+        graph._available = False
+        return graph
+
     def test_init_without_chromadb(self):
         """Should initialize without error even if ChromaDB not installed."""
         graph = MarketGraph(persist_dir="/tmp/test_chroma_nonexist")
@@ -35,23 +44,20 @@ class TestMarketGraphFallback:
 
     def test_index_without_chromadb(self):
         """Indexing should not raise when ChromaDB unavailable."""
-        graph = MarketGraph()
-        graph._available = False
+        graph = self._make_unavailable_graph()
         markets = [_make_market("TEST", "Test market")]
         graph.index_markets(markets)  # Should not raise
 
     def test_find_related_fallback(self):
         """find_related should return empty list when ChromaDB unavailable."""
-        graph = MarketGraph()
-        graph._available = False
+        graph = self._make_unavailable_graph()
         market = _make_market("TEST", "Test market")
         related = graph.find_related(market)
         assert related == []
 
     def test_find_mutual_exclusives_fallback(self):
         """find_mutual_exclusives should return empty when unavailable."""
-        graph = MarketGraph()
-        graph._available = False
+        graph = self._make_unavailable_graph()
         result = graph.find_mutual_exclusives("EVENT-1")
         assert result == []
 

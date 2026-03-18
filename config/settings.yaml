@@ -59,9 +59,24 @@ claude:
   cross_check_temp_high: 0.5
   cross_check_disagreement_threshold: 0.15  # Skip if temps disagree by more than this
 
+news:
+  rss_feeds:
+    - "https://feeds.reuters.com/reuters/topNews"
+    - "https://feeds.reuters.com/reuters/businessNews"
+  poll_interval_seconds: 120
+  min_relevance: 0.3
+  max_article_age_minutes: 30
+
+whales:
+  basket_path: "config/whale_basket.yaml"
+  consensus_threshold: 0.8
+  poll_interval_seconds: 600
+
 alerts:
   enabled: true
   imessage_enabled: false       # Enable after VAYU bridge is set up
+  alert_on_trade: true
+  alert_on_circuit_breaker: true
   daily_report_time: "21:00"    # 9 PM PT daily summary
 
 database:
