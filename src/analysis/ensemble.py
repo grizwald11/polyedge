@@ -41,9 +41,9 @@ def ensemble_forecast(
 
     edge = final_prob - market_price
 
-    # Confidence is reduced when Claude and market disagree significantly
-    disagreement = abs(claude_forecast.probability - market_price)
-    confidence = max(0.1, 1.0 - disagreement)
+    # Confidence based on Claude's CI width (narrow CI = high confidence)
+    ci_width = claude_forecast.confidence_high - claude_forecast.confidence_low
+    confidence = max(0.1, min(0.95, 1.0 - ci_width))
 
     return EnsembleForecast(
         final_probability=final_prob,

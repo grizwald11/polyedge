@@ -112,7 +112,7 @@ class CalibrationAnalyzer:
 
         adjustments = {}
         for cat, records in by_category.items():
-            if len(records) < 3:  # Need minimum sample size
+            if len(records) < 10:  # Need minimum sample size
                 continue
 
             # Bias = avg(actual) - avg(predicted)
@@ -122,8 +122,8 @@ class CalibrationAnalyzer:
             avg_actual = sum(float(r["actual_outcome"]) for r in records) / len(records)
             bias = avg_actual - avg_predicted
 
-            # Only suggest adjustment if bias is meaningful (>2%)
-            if abs(bias) > 0.02:
+            # Only suggest adjustment if bias is meaningful (>3%)
+            if abs(bias) > 0.03:
                 adjustments[cat] = round(bias, 3)
 
         return adjustments

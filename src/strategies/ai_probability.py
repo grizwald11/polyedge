@@ -201,20 +201,4 @@ class AIProbabilityStrategy:
             f"market={market.yes_price:.0%})"
         )
 
-        # Store prediction for calibration tracking
-        if self.db is not None:
-            try:
-                self.db.store_prediction(
-                    market_ticker=market.ticker,
-                    predicted_probability=forecast.probability,
-                    predicted_side=direction.value,
-                    market_price=market.yes_price,
-                    strategy=StrategyName.AI_PROBABILITY.value,
-                    confidence_low=forecast.confidence_low,
-                    confidence_high=forecast.confidence_high,
-                    market_question=market.question,
-                )
-            except Exception as e:
-                logger.error(f"Failed to store prediction for {market.ticker}: {e}")
-
         return signal

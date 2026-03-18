@@ -45,9 +45,9 @@ class OrderBuilder:
         """
         side, token_id = self._resolve_side_and_token(market, signal.direction)
         price = self._clamp_price(price)
-        cost = price * size
         fee_cents = kalshi_maker_fee(size, dollars_to_cents(price))
         fee_dollars = fee_cents / 100.0
+        cost = price * size + fee_dollars
 
         order = Order(
             id=self._generate_order_id(),
@@ -99,9 +99,9 @@ class OrderBuilder:
             price = market.no_price
 
         price = self._clamp_price(price)
-        cost = price * size
         fee_cents = kalshi_taker_fee(size, dollars_to_cents(price))
         fee_dollars = fee_cents / 100.0
+        cost = price * size + fee_dollars
 
         order = Order(
             id=self._generate_order_id(),

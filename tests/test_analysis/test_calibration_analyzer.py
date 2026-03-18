@@ -146,48 +146,48 @@ class TestCategoryAdjustments:
     def test_detects_overestimate(self, analyzer, tmp_db):
         """Claude predicts high, actuals are low → overestimate → negative adjustment."""
         _seed_resolved(tmp_db, [
-            ("MKT-1", "Politics", 0.80, 0),
-            ("MKT-2", "Politics", 0.70, 0),
-            ("MKT-3", "Politics", 0.75, 1),
+            (f"MKT-{i}", "Politics", 0.75, 0) for i in range(1, 9)
+        ] + [
+            ("MKT-9", "Politics", 0.75, 1),
+            ("MKT-10", "Politics", 0.80, 1),
         ])
 
         adjustments = analyzer.get_category_adjustments()
-        # avg_predicted ≈ 0.75, avg_actual ≈ 0.33 → bias ≈ -0.42
+        # avg_predicted ≈ 0.76, avg_actual = 0.20 → bias ≈ -0.56
         assert "Politics" in adjustments
         assert adjustments["Politics"] < 0  # Overestimates
 
     def test_detects_underestimate(self, analyzer, tmp_db):
         """Claude predicts low, actuals are high → underestimate → positive adjustment."""
         _seed_resolved(tmp_db, [
-            ("MKT-1", "Economics", 0.30, 1),
-            ("MKT-2", "Economics", 0.25, 1),
-            ("MKT-3", "Economics", 0.35, 0),
+            (f"MKT-{i}", "Economics", 0.30, 1) for i in range(1, 9)
+        ] + [
+            ("MKT-9", "Economics", 0.25, 0),
+            ("MKT-10", "Economics", 0.35, 0),
         ])
 
         adjustments = analyzer.get_category_adjustments()
-        # avg_predicted ≈ 0.30, avg_actual ≈ 0.67 → bias ≈ +0.37
+        # avg_predicted ≈ 0.30, avg_actual = 0.80 → bias ≈ +0.50
         assert "Economics" in adjustments
         assert adjustments["Economics"] > 0  # Underestimates
 
     def test_small_bias_ignored(self, analyzer, tmp_db):
-        """Biases under 2% should not produce adjustments."""
+        """Biases under 3% should not produce adjustments."""
+        # 5 YES, 5 NO with predictions near 0.50 → minimal bias
         _seed_resolved(tmp_db, [
-            ("MKT-1", "Other", 0.50, 1),
-            ("MKT-2", "Other", 0.50, 0),
-            ("MKT-3", "Other", 0.51, 1),
+            (f"MKT-{i}", "Other", 0.50, 1) for i in range(1, 6)
+        ] + [
+            (f"MKT-{i}", "Other", 0.50, 0) for i in range(6, 11)
         ])
 
         adjustments = analyzer.get_category_adjustments()
-        # avg_predicted ≈ 0.503, avg_actual ≈ 0.67 → bias is significant here
-        # Let me recalculate: this actually gives a noticeable bias
-        # For a true test of small bias, need more balanced data
-        # The key behavior: <2% bias is filtered out
+        # avg_predicted = 0.50, avg_actual = 0.50 → bias = 0.0
+        assert "Other" not in adjustments
 
     def test_minimum_sample_size(self, analyzer, tmp_db):
-        """Categories with fewer than 3 predictions should be excluded."""
+        """Categories with fewer than 10 predictions should be excluded."""
         _seed_resolved(tmp_db, [
-            ("MKT-1", "Rare", 0.90, 0),
-            ("MKT-2", "Rare", 0.90, 0),
+            (f"MKT-{i}", "Rare", 0.90, 0) for i in range(1, 10)
         ])
 
         adjustments = analyzer.get_category_adjustments()

@@ -35,13 +35,17 @@ class TestEnsembleForecast:
         result = ensemble_forecast(forecast, market_price=0.50)
         assert abs(result.edge) < 0.01
 
-    def test_confidence_decreases_with_disagreement(self):
-        # Small disagreement → higher confidence
-        f1 = _make_forecast(0.52)
+    def test_confidence_based_on_ci_width(self):
+        # Narrow CI → higher confidence
+        f1 = ForecastResult(
+            probability=0.60, confidence_low=0.55, confidence_high=0.65, reasoning="test"
+        )
         r1 = ensemble_forecast(f1, market_price=0.50)
 
-        # Large disagreement → lower confidence
-        f2 = _make_forecast(0.80)
+        # Wide CI → lower confidence
+        f2 = ForecastResult(
+            probability=0.60, confidence_low=0.30, confidence_high=0.90, reasoning="test"
+        )
         r2 = ensemble_forecast(f2, market_price=0.50)
 
         assert r1.confidence > r2.confidence

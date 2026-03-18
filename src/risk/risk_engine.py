@@ -103,7 +103,12 @@ class RiskEngine:
         if self.positions.has_position(signal.market_id):
             failed.append(f"Already have position in {signal.market_id}")
 
-        # 8. Edge minimum check
+        # 8a. Minimum trade cost check
+        MIN_TRADE_COST = 1.00
+        if proposed_cost < MIN_TRADE_COST:
+            failed.append(f"Trade too small: ${proposed_cost:.2f} < ${MIN_TRADE_COST:.2f} minimum")
+
+        # 8b. Edge minimum check
         min_edge = self._get_min_edge(signal.strategy)
         if abs(signal.edge) < min_edge:
             failed.append(

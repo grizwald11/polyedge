@@ -85,6 +85,10 @@ async def scan_and_trade(
         logger.info("No qualifying markets found")
         return
 
+    # Update unrealized P&L with latest market prices
+    for market in markets:
+        position_manager.update_price(market.ticker, market.yes_price)
+
     # Generate signals from both strategies
     ai_signals = await ai_strategy.scan_for_opportunities(markets[:30])
     no_signals = no_strategy.scan_for_opportunities(markets)
@@ -126,20 +130,18 @@ async def scan_and_trade(
         if contracts <= 0:
             continue
 
-        # Calculate cost
+        # Build order first to get fee-inclusive cost
         price = signal.market_price
-        proposed_cost = price * contracts
+        if settings.trading.prefer_maker:
+            order = order_builder.build_limit_order(market, signal, contracts, price)
+        else:
+            order = order_builder.build_market_order(market, signal, contracts)
+        proposed_cost = order.cost
 
         # Risk check
         risk_result = risk_engine.check_all(signal, market, contracts, proposed_cost)
         if not risk_result.passed:
             continue
-
-        # Build order (prefer maker/limit)
-        if settings.trading.prefer_maker:
-            order = order_builder.build_limit_order(market, signal, contracts, price)
-        else:
-            order = order_builder.build_market_order(market, signal, contracts)
 
         # Route order
         result = await order_router.route_order(order)

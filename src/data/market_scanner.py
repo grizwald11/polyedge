@@ -45,7 +45,7 @@ class MarketScanner:
         """Apply all configured filters to raw market list."""
         cfg = self.settings.scanning
         filtered = []
-        reasons = {"inactive": 0, "volume": 0, "excluded_cat": 0, "not_binary": 0, "no_price": 0}
+        reasons = {"inactive": 0, "volume": 0, "excluded_cat": 0, "not_binary": 0, "no_price": 0, "invalid_prices": 0}
 
         for m in markets:
             # Skip inactive or closed
@@ -90,6 +90,12 @@ class MarketScanner:
             # Must have some price data
             if m.yes_price <= 0 and m.no_price <= 0:
                 reasons["no_price"] += 1
+                continue
+
+            # Price sum must be roughly 1.0 (reject corrupt/stale data)
+            price_sum = m.yes_price + m.no_price
+            if price_sum < 0.90 or price_sum > 1.10:
+                reasons["invalid_prices"] += 1
                 continue
 
             filtered.append(m)

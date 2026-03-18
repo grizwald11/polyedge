@@ -52,7 +52,8 @@ class TestBuildLimitOrder:
         assert order.token_id == "FED-RATE-CUT-MAY26_yes"
         assert order.price == 0.34
         assert order.size == 10
-        assert order.cost == pytest.approx(3.40)
+        # cost = price * size + maker_fee = 3.40 + 0.01 = 3.41
+        assert order.cost == pytest.approx(3.41)
         assert order.order_type == OrderType.GTC
         assert order.status == OrderStatus.PENDING
         assert order.strategy == StrategyName.AI_PROBABILITY

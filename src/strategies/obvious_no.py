@@ -67,9 +67,8 @@ class ObviousNoStrategy:
         simple_return = (1.0 - no_price) / no_price
         annualized_return = simple_return * (365.0 / days) if days > 0 else 0
 
-        # Must have minimum edge
-        edge = 1.0 - no_price - (1.0 - no_price)  # This simplifies but let's use yes_price as edge
-        edge = yes_price  # The edge is essentially the YES price (our profit per contract)
+        # Edge = profit per contract when NO resolves to $1.00
+        edge = 1.0 - no_price
 
         if edge < min_edge:
             return None
