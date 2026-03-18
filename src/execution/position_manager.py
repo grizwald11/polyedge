@@ -14,6 +14,11 @@ from src.core.models import (
 )
 from src.storage.database import Database
 
+if __name__ != "__main__":
+    from typing import TYPE_CHECKING
+    if TYPE_CHECKING:
+        from src.core.kalshi_client import KalshiClient
+
 logger = logging.getLogger(__name__)
 
 
@@ -146,6 +151,59 @@ class PositionManager:
         """Number of open positions."""
         return len(self._positions)
 
+    async def sync_with_kalshi(self, kalshi) -> int:
+        """Reconcile local positions against Kalshi API positions.
+
+        Logs warnings for any discrepancies. Returns count of mismatches found.
+
+        Args:
+            kalshi: KalshiClient instance
+        """
+        try:
+            api_positions = await kalshi.get_positions()
+        except Exception as e:
+            logger.error(f"Failed to sync positions with Kalshi: {e}")
+            return 0
+
+        if not api_positions:
+            return 0
+
+        mismatches = 0
+        api_tickers = set()
+
+        for api_pos in api_positions:
+            ticker = api_pos.get("ticker", "")
+            if not ticker:
+                continue
+            api_tickers.add(ticker)
+
+            # Kalshi returns yes_count / no_count
+            api_yes = api_pos.get("market_exposure", 0)
+            local_pos = self.get_position(ticker)
+
+            if local_pos is None and api_yes != 0:
+                logger.warning(
+                    f"Position mismatch: Kalshi has position in {ticker}, "
+                    f"local tracker does not"
+                )
+                mismatches += 1
+
+        # Check for local positions not on Kalshi
+        for market_id, local_pos in self._positions.items():
+            if not local_pos.paper and market_id not in api_tickers:
+                logger.warning(
+                    f"Position mismatch: local tracker has live position "
+                    f"in {market_id}, Kalshi does not"
+                )
+                mismatches += 1
+
+        if mismatches:
+            logger.warning(f"Position sync found {mismatches} mismatches")
+        else:
+            logger.debug(f"Position sync OK: {len(api_tickers)} Kalshi positions checked")
+
+        return mismatches
+
     def _load_positions_from_db(self):
         """Reconstruct open positions from trade history on startup."""
         conn = self.db._get_conn()
@@ -173,6 +231,7 @@ class PositionManager:
                 realized_pnl=row["realized_pnl"],
                 strategy=StrategyName(row["strategy"]),
                 paper=bool(row["paper"]),
+                timestamp=datetime.fromisoformat(row["timestamp"]),
             )
             self.update_from_trade(trade)
 

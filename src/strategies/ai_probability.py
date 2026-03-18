@@ -31,11 +31,13 @@ class AIProbabilityStrategy:
         settings: Settings,
         db: _Optional[Database] = None,
         calibration_analyzer: _Optional[CalibrationAnalyzer] = None,
+        data_enricher=None,
     ):
         self.forecaster = forecaster
         self.settings = settings
         self.db = db
         self.calibration_analyzer = calibration_analyzer
+        self.data_enricher = data_enricher
         self._category_adjustments: dict[str, float] = {}
         self._category_base_rates: dict[str, dict] = {}
 
@@ -122,6 +124,13 @@ class AIProbabilityStrategy:
         """Assess a single market and return a signal if edge is sufficient."""
         category = classify_market(market)
         base_rate_context = self._build_base_rate_context(category.value)
+
+        # Use data enricher for context if available, otherwise fall back to news_context
+        if self.data_enricher:
+            try:
+                news_context = await self.data_enricher.get_context(market)
+            except Exception as e:
+                logger.warning(f"Data enricher failed for {market.ticker}, using news_context: {e}")
 
         # Get Claude's forecast (cross-check or regular)
         if use_cross_check:

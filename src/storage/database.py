@@ -17,7 +17,7 @@ from src.core.models import Market, MarketSnapshot, Signal, Order, Trade, Calibr
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 -- Markets (Kalshi uses ticker as primary key)
@@ -167,6 +167,28 @@ CREATE TABLE IF NOT EXISTS cooldowns (
     exit_time TEXT NOT NULL
 );
 
+-- Arbitrage relationships (cached Claude validations)
+CREATE TABLE IF NOT EXISTS arb_relationships (
+    market_a TEXT NOT NULL,
+    market_b TEXT NOT NULL,
+    relationship_data TEXT NOT NULL,
+    validated_at TEXT NOT NULL,
+    PRIMARY KEY (market_a, market_b)
+);
+
+-- Whale trades (Phase 6)
+CREATE TABLE IF NOT EXISTS whale_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet_address TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    size REAL DEFAULT 0,
+    price REAL DEFAULT 0,
+    detected_at TEXT NOT NULL,
+    FOREIGN KEY (wallet_address) REFERENCES whale_wallets(address)
+);
+CREATE INDEX IF NOT EXISTS idx_whale_trades_market ON whale_trades(market_id);
+
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -252,6 +274,35 @@ class Database:
                 )
             """)
             logger.info("Migration: created cooldowns table")
+
+        # Migration v4 -> v5: arb_relationships and whale_trades tables
+        if "arb_relationships" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS arb_relationships (
+                    market_a TEXT NOT NULL,
+                    market_b TEXT NOT NULL,
+                    relationship_data TEXT NOT NULL,
+                    validated_at TEXT NOT NULL,
+                    PRIMARY KEY (market_a, market_b)
+                )
+            """)
+            logger.info("Migration: created arb_relationships table")
+        if "whale_trades" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS whale_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    wallet_address TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    size REAL DEFAULT 0,
+                    price REAL DEFAULT 0,
+                    detected_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_whale_trades_market ON whale_trades(market_id)"
+            )
+            logger.info("Migration: created whale_trades table")
         conn.commit()
 
     # ──────────────────────────────────────
@@ -403,6 +454,18 @@ class Database:
         finally:
             conn.close()
 
+    def update_signal_acted_on(self, signal_id: int, order_id: str):
+        """Mark a signal as acted on after successful trade execution."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE signals SET acted_on=1, order_id=? WHERE id=?",
+                (order_id, signal_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def get_recent_signals(self, limit: int = 50) -> list[dict]:
         """Get recent signals."""
         conn = self._get_conn()
@@ -453,6 +516,67 @@ class Database:
                 (today,)
             ).fetchall()
             return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_trades_for_date(self, date_str: str | None = None) -> list[dict]:
+        """Get all trades for a specific date.
+
+        Args:
+            date_str: Date in YYYY-MM-DD format. Defaults to today (UTC).
+        """
+        from datetime import date as date_type, timedelta
+        if date_str is None:
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp DESC",
+                (date_str, next_date_str),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_strategy_pnl(self, date_str: str | None = None) -> dict[str, dict]:
+        """Get P&L breakdown by strategy for a date.
+
+        Returns dict of strategy_name -> {"count": int, "pnl": float}
+        """
+        from datetime import date as date_type, timedelta
+        if date_str is None:
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT strategy, COUNT(*) as cnt, COALESCE(SUM(realized_pnl), 0) as total "
+                "FROM trades WHERE timestamp >= ? AND timestamp < ? GROUP BY strategy",
+                (date_str, next_date_str),
+            ).fetchall()
+            return {
+                row["strategy"]: {"count": row["cnt"], "pnl": row["total"]}
+                for row in rows
+            }
+        finally:
+            conn.close()
+
+    def get_portfolio_summary(self) -> dict:
+        """Get portfolio-level summary stats."""
+        conn = self._get_conn()
+        try:
+            trades = conn.execute(
+                "SELECT COUNT(*) as cnt, COALESCE(SUM(realized_pnl), 0) as total FROM trades"
+            ).fetchone()
+            wins = conn.execute(
+                "SELECT COUNT(*) as cnt FROM trades WHERE realized_pnl > 0"
+            ).fetchone()
+            return {
+                "total_trades": trades["cnt"] if trades else 0,
+                "total_pnl": trades["total"] if trades else 0.0,
+                "winning_trades": wins["cnt"] if wins else 0,
+            }
         finally:
             conn.close()
 

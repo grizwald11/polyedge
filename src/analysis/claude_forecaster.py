@@ -164,6 +164,55 @@ class ClaudeForecaster:
                 latency_ms=int((time.monotonic() - start_time) * 1000),
             )
 
+    async def assess_market_with_prompt(
+        self,
+        market: Market,
+        custom_prompt: str,
+        position_value: float = 0.0,
+    ) -> Optional[ForecastResult]:
+        """Assess a market using a custom prompt (e.g., news impact, arb validation).
+
+        Args:
+            market: The market being assessed
+            custom_prompt: Pre-built prompt string
+            position_value: Expected position size (determines model selection)
+
+        Returns:
+            ForecastResult or None on failure
+        """
+        model = self._select_model(position_value)
+        start_time = time.monotonic()
+
+        try:
+            client = self._get_client()
+            response = await client.messages.create(
+                model=model,
+                max_tokens=self.settings.claude.max_tokens,
+                temperature=self.settings.claude.temperature,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": custom_prompt}],
+            )
+
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+            raw_text = response.content[0].text
+            tokens_used = response.usage.input_tokens + response.usage.output_tokens
+
+            forecast = self._parse_response(raw_text)
+            forecast.model_used = model
+            forecast.tokens_used = tokens_used
+            forecast.latency_ms = latency_ms
+            forecast.raw_response = raw_text
+
+            logger.info(
+                f"Claude [{model}] custom assessment for '{market.question[:50]}...' → "
+                f"{forecast.probability:.0%} (latency: {latency_ms}ms)"
+            )
+            return forecast
+
+        except Exception as e:
+            logger.error(f"Custom Claude assessment failed: {e}")
+            return None
+
     async def cross_check_assess(
         self,
         market: Market,
@@ -333,8 +382,8 @@ class ClaudeForecaster:
 
         return ForecastResult(
             probability=probability,
-            confidence_low=float(data.get("confidence_low", max(0, probability - 0.15))),
-            confidence_high=float(data.get("confidence_high", min(1, probability + 0.15))),
+            confidence_low=max(0.0, min(1.0, float(data.get("confidence_low", max(0, probability - 0.15))))),
+            confidence_high=max(0.0, min(1.0, float(data.get("confidence_high", min(1, probability + 0.15))))),
             key_factors_for=data.get("key_factors_for", []),
             key_factors_against=data.get("key_factors_against", []),
             uncertainties=data.get("uncertainties", []),

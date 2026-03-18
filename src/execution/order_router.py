@@ -6,6 +6,7 @@ Live mode submits to Kalshi API via KalshiClient.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -44,6 +45,7 @@ class OrderRouter:
         self.settings = settings
         self.kalshi = kalshi
         self.db = db
+        self._session_confirmed = False  # Gate 3: first-trade confirmation
 
     async def route_order(self, order: Order) -> OrderResult:
         """Route an order based on current trading mode.
@@ -112,6 +114,19 @@ class OrderRouter:
                 error="Live trading gates not passed"
             )
 
+        # Gate 3: Interactive confirmation on first live trade per session
+        if not self._session_confirmed:
+            confirmed = await self._request_confirmation(order)
+            if not confirmed:
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = "User declined live trade confirmation"
+                self._log_order(order)
+                return OrderResult(
+                    success=False, order=order,
+                    error="User declined live trade confirmation"
+                )
+            self._session_confirmed = True
+
         # Determine Kalshi side and order type
         kalshi_side = "yes" if "yes" in order.token_id.lower() else "no"
         kalshi_type = "limit" if order.order_type == OrderType.GTC else "market"
@@ -140,12 +155,34 @@ class OrderRouter:
                     success=False, order=order, error="Kalshi API returned None"
                 )
 
-            # Update order with Kalshi response
-            order.status = OrderStatus.FILLED
-            order.filled_at = datetime.now(timezone.utc)
-            order.fill_price = order.price
+            # Poll for fill status (limit orders may rest)
+            kalshi_order_id = result.get("order_id", "")
+            final_status = await self._poll_order_status(kalshi_order_id, result)
 
-            # Create trade record
+            # Capture timestamp once for consistency
+            now = datetime.now(timezone.utc)
+
+            if final_status in ("executed", "filled"):
+                order.status = OrderStatus.FILLED
+                order.filled_at = now
+                order.fill_price = order.price
+            elif final_status == "resting":
+                order.status = OrderStatus.OPEN
+                self._log_order(order)
+                logger.info(
+                    f"[LIVE] Order resting: {order.side.value} {int(order.size)}x "
+                    f"{order.token_id} @ ${order.price:.2f}"
+                )
+                return OrderResult(success=True, order=order, trade=None)
+            elif final_status in ("canceled", "cancelled"):
+                order.status = OrderStatus.CANCELLED
+                order.cancelled_at = now
+                self._log_order(order)
+                return OrderResult(
+                    success=False, order=order, error="Order was cancelled"
+                )
+
+            # Create trade record for filled orders
             price_cents = dollars_to_cents(order.price)
             if order.order_type == OrderType.GTC:
                 fee_cents = kalshi_maker_fee(int(order.size), price_cents)
@@ -163,7 +200,7 @@ class OrderRouter:
                 realized_pnl=0.0,
                 strategy=order.strategy,
                 paper=False,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=now,
             )
 
             self._log_order(order)
@@ -182,6 +219,55 @@ class OrderRouter:
             self._log_order(order)
             logger.error(f"Live order failed: {e}")
             return OrderResult(success=False, order=order, error=str(e))
+
+    async def _poll_order_status(
+        self, kalshi_order_id: str, initial_data: dict
+    ) -> str:
+        """Poll Kalshi for order fill status up to 5 times with 2s delays.
+
+        Returns the final status string.
+        """
+        status = initial_data.get("status", "").lower()
+        if status in ("executed", "filled", "canceled", "cancelled"):
+            return status
+
+        if not kalshi_order_id:
+            return status
+
+        for attempt in range(5):
+            await asyncio.sleep(2)
+            try:
+                order_data = await self.kalshi.get_order(kalshi_order_id)
+                if order_data:
+                    status = order_data.get("status", "").lower()
+                    if status in ("executed", "filled", "canceled", "cancelled"):
+                        return status
+            except Exception as e:
+                logger.warning(f"Order poll attempt {attempt + 1} failed: {e}")
+
+        return status  # Return last known status
+
+    async def _request_confirmation(self, order: Order) -> bool:
+        """Request interactive confirmation for the first live trade of the session.
+
+        Uses asyncio.run_in_executor to avoid blocking the event loop.
+        """
+        prompt = (
+            f"\n{'='*60}\n"
+            f"LIVE TRADE: {order.side.value} {int(order.size)}x "
+            f"{order.token_id} @ ${order.price:.2f} "
+            f"(cost=${order.cost:.2f})\n"
+            f"Market: {order.market_id}\n"
+            f"Strategy: {order.strategy.value}\n"
+            f"{'='*60}\n"
+            f"Confirm first live trade of session? [y/N]: "
+        )
+        loop = asyncio.get_event_loop()
+        try:
+            response = await loop.run_in_executor(None, input, prompt)
+            return response.strip().lower() in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            return False
 
     def _live_gates_passed(self) -> bool:
         """Three-gate safety system for live trading."""

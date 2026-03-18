@@ -85,9 +85,28 @@ class ClaudeConfig(BaseModel):
     cross_check_disagreement_threshold: float = 0.15
 
 
+class NewsConfig(BaseModel):
+    rss_feeds: list[str] = Field(default_factory=lambda: [
+        "https://feeds.reuters.com/reuters/topNews",
+        "https://feeds.reuters.com/reuters/businessNews",
+    ])
+    poll_interval_seconds: int = 120
+    min_relevance: float = 0.3
+    max_article_age_minutes: int = 30
+
+
+class WhaleConfig(BaseModel):
+    basket_path: str = "config/whale_basket.yaml"
+    consensus_threshold: float = 0.8
+    poll_interval_seconds: int = 600
+
+
 class AlertsConfig(BaseModel):
     enabled: bool = True
     imessage_enabled: bool = False
+    imessage_endpoint: Optional[str] = None
+    alert_on_trade: bool = True
+    alert_on_circuit_breaker: bool = True
     daily_report_time: str = "21:00"
 
 
@@ -108,6 +127,8 @@ class Settings(BaseModel):
     scanning: ScanningConfig = Field(default_factory=ScanningConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
+    news: NewsConfig = Field(default_factory=NewsConfig)
+    whales: WhaleConfig = Field(default_factory=WhaleConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
@@ -117,6 +138,7 @@ class Settings(BaseModel):
     kalshi_private_key_path: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     serper_api_key: Optional[str] = None
+    fred_api_key: Optional[str] = None
     live_enabled: bool = False
 
 
@@ -138,6 +160,7 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     settings.kalshi_private_key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
     settings.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     settings.serper_api_key = os.environ.get("SERPER_API_KEY") or None
+    settings.fred_api_key = os.environ.get("FRED_API_KEY") or None
     settings.live_enabled = os.environ.get("POLYEDGE_LIVE_ENABLED", "false").lower() == "true"
 
     return settings

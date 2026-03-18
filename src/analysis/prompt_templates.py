@@ -22,6 +22,7 @@ CALIBRATION RULES:
 - Do not anchor too heavily on the current market price, but do consider it as information.
 - Express genuine uncertainty. Avoid false precision.
 - Use the provided news context to inform your assessment. If the news contradicts your prior beliefs, update accordingly.
+- When structured data is provided (economic indicators, community forecasts, cross-platform prices), treat these as real-time factual inputs. They are current as of today.
 
 CRITICAL: Respond ONLY with a valid JSON object. No explanation, no markdown, no code fences, no text before or after the JSON. Your entire response must be parseable as JSON.
 
@@ -152,6 +153,48 @@ Consider:
 5. Whether the resolution criteria has a specific technical definition
 
 Provide your probability estimate as JSON."""
+
+
+NEWS_IMPACT_TEMPLATE = """BREAKING NEWS IMPACT ASSESSMENT
+
+A breaking news article may affect the following prediction market.
+
+BREAKING NEWS:
+Headline: {headline}
+Summary: {summary}
+Source: {source}
+
+MARKET: {question}
+RESOLUTION CRITERIA: {resolution_criteria}
+CURRENT MARKET PRICE: {market_price:.0%} (YES)
+
+Assess how this news changes the probability of the market resolving YES.
+Consider:
+1. How directly does this news relate to the market's resolution criteria?
+2. How much should the probability shift based on this information?
+3. Has the market likely already priced in this information?
+4. What is your updated probability estimate?
+
+Provide your probability estimate as JSON."""
+
+
+ARB_VALIDATION_TEMPLATE = """ARBITRAGE RELATIONSHIP VALIDATION
+
+Determine if these two prediction markets have a logical relationship.
+
+MARKET A: {question_a}
+CURRENT PRICE A: {price_a:.0%} (YES)
+
+MARKET B: {question_b}
+CURRENT PRICE B: {price_b:.0%} (YES)
+
+Questions:
+1. If Market A resolves YES, must Market B also resolve YES? (A is subset of B)
+2. If Market B resolves YES, must Market A also resolve YES? (B is subset of A)
+3. Can both markets resolve YES simultaneously, or are they mutually exclusive?
+4. Is the current pricing logically consistent?
+
+Respond with JSON: {{"relationship": "subset_ab"|"subset_ba"|"mutual_exclusive"|"independent"|"correlated", "confidence": <float 0-1>, "reasoning": "<explanation>", "arbitrage_exists": <bool>, "suggested_direction": "<description or null>"}}"""
 
 
 # Map categories to templates

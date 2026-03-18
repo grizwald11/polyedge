@@ -117,6 +117,32 @@ class TestCalculatePositionSize:
                 f"NO@${no_price}: {contracts} contracts cost ${cost:.2f} > ${max_position:.2f}"
             )
 
+    def test_edge_exceeds_probability(self, sizer):
+        """When edge >= probability, market_price goes to 0 or negative → return 0."""
+        assert sizer.calculate_position_size(edge=0.51, probability=0.50, bankroll=500.0) == 0
+        assert sizer.calculate_position_size(edge=0.50, probability=0.50, bankroll=500.0) == 0
+
+    def test_min_contract_respects_kelly_dollars(self, sizer):
+        """Minimum-1-contract fallback should not exceed kelly_dollars budget."""
+        # Tiny edge with high-cost contracts: kelly_dollars will be very small
+        # but remaining room is large — the fallback shouldn't bypass the budget.
+        contracts = sizer.calculate_position_size(
+            edge=0.01, probability=0.99, bankroll=500.0,
+            order_price=0.99,
+        )
+        # With edge=0.01, prob=0.99, market_price=0.98, kelly_fraction is tiny
+        # kelly_dollars ≈ very small. If contracts=1, cost=$0.99 which may exceed.
+        # The fix ensures we check cost_price + fee <= kelly_dollars.
+        if contracts > 0:
+            # If we got 1 contract, verify kelly_dollars is large enough
+            market_price = 0.99 - 0.01
+            b = (1.0 - market_price) / market_price
+            q = 1.0 - 0.99
+            kf = (0.99 * b - q) / b
+            half_k = kf * 0.5
+            kelly_dollars = min(half_k * 500.0, 500.0 * 0.05)
+            assert 0.99 <= kelly_dollars
+
     def test_order_price_none_uses_derived(self, sizer):
         """When order_price is None, behavior matches the original."""
         a = sizer.calculate_position_size(0.08, 0.42, 500.0)

@@ -1,0 +1,305 @@
+"""Cross-market arbitrage strategy — detects logical pricing inconsistencies.
+
+Three arbitrage types:
+- Type A (intra-market): YES + NO prices sum to < 0.98
+- Type B (logical/subset): Claude-validated subset/superset relationships
+- Type C (mutual exclusivity): Multi-outcome event prices don't sum to 100%
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Optional
+
+from src.analysis.claude_forecaster import ClaudeForecaster
+from src.analysis.prompt_templates import ARB_VALIDATION_TEMPLATE
+from src.config import Settings
+from src.core.models import (
+    Direction, Market, Signal, StrategyName,
+)
+from src.data.market_graph import MarketGraph
+from src.storage.database import Database
+
+logger = logging.getLogger(__name__)
+
+
+class CrossArbStrategy:
+    """Detects and trades logical pricing inconsistencies between related markets."""
+
+    def __init__(
+        self,
+        market_graph: MarketGraph,
+        forecaster: ClaudeForecaster,
+        settings: Settings,
+        db: Database,
+    ):
+        self.graph = market_graph
+        self.forecaster = forecaster
+        self.settings = settings
+        self.db = db
+        self.min_edge = settings.trading.min_edge_arb
+
+    async def scan_for_opportunities(
+        self, markets: list[Market]
+    ) -> list[Signal]:
+        """Scan all markets for arbitrage opportunities.
+
+        Returns signals for Type A, B, and C arbitrage.
+        """
+        signals: list[Signal] = []
+
+        # Type A: Intra-market rebalancing
+        for market in markets:
+            signal = self._check_intra_market(market)
+            if signal:
+                signals.append(signal)
+
+        # Type C: Mutual exclusivity sum check (grouped by event)
+        event_markets: dict[str, list[Market]] = {}
+        for market in markets:
+            if market.event_ticker:
+                event_markets.setdefault(market.event_ticker, []).append(market)
+
+        for event_ticker, event_mkts in event_markets.items():
+            if len(event_mkts) >= 2:
+                event_signals = self._check_mutual_exclusivity(event_mkts, event_ticker)
+                signals.extend(event_signals)
+
+        # Type B: Logical/subset arbitrage via market graph
+        subset_signals = await self._check_subset_arb(markets)
+        signals.extend(subset_signals)
+
+        if signals:
+            logger.info(f"Cross-arb: {len(signals)} opportunities found")
+
+        return signals
+
+    def _check_intra_market(self, market: Market) -> Optional[Signal]:
+        """Type A: Check if YES + NO prices sum to less than 1.0 (minus fee threshold)."""
+        if not market.yes_price or not market.no_price:
+            return None
+
+        total = market.yes_price + market.no_price
+        # If total < 0.98, buying both sides guarantees a profit
+        edge = 1.0 - total
+        if edge < self.min_edge:
+            return None
+
+        # Buy the cheaper side
+        if market.yes_price < market.no_price:
+            direction = Direction.BUY_YES
+            price = market.yes_price
+        else:
+            direction = Direction.BUY_NO
+            price = market.no_price
+
+        return Signal(
+            strategy=StrategyName.CROSS_ARB,
+            market_id=market.ticker,
+            market_question=market.question,
+            direction=direction,
+            edge=edge,
+            probability_estimate=0.50,  # Not probability-based
+            market_price=price,
+            confidence=0.9,  # High confidence — mathematical
+            reasoning=f"Intra-market arb: YES({market.yes_price:.2f}) + NO({market.no_price:.2f}) = {total:.2f} < 1.00",
+        )
+
+    def _check_mutual_exclusivity(
+        self, markets: list[Market], event_ticker: str
+    ) -> list[Signal]:
+        """Type C: Check if sum of YES prices in a multi-outcome event != 100%."""
+        if len(markets) < 2:
+            return []
+
+        yes_sum = sum(m.yes_price for m in markets)
+
+        # If sum > 1.0 + threshold: sell overpriced outcomes
+        # If sum < 1.0 - threshold: buy all outcomes for guaranteed profit
+        signals: list[Signal] = []
+
+        if yes_sum < 1.0 - self.min_edge:
+            edge = 1.0 - yes_sum
+            # Buy the cheapest outcome (best risk/reward)
+            cheapest = min(markets, key=lambda m: m.yes_price)
+            signals.append(Signal(
+                strategy=StrategyName.CROSS_ARB,
+                market_id=cheapest.ticker,
+                market_question=cheapest.question,
+                direction=Direction.BUY_YES,
+                edge=edge,
+                probability_estimate=cheapest.yes_price + edge / len(markets),
+                market_price=cheapest.yes_price,
+                confidence=0.85,
+                reasoning=(
+                    f"Mutual exclusivity arb: {event_ticker} YES prices sum "
+                    f"to {yes_sum:.2f} < 1.00 ({len(markets)} outcomes)"
+                ),
+            ))
+
+        elif yes_sum > 1.0 + self.min_edge:
+            edge = yes_sum - 1.0
+            # Sell (buy NO on) the most expensive outcome
+            most_expensive = max(markets, key=lambda m: m.yes_price)
+            signals.append(Signal(
+                strategy=StrategyName.CROSS_ARB,
+                market_id=most_expensive.ticker,
+                market_question=most_expensive.question,
+                direction=Direction.BUY_NO,
+                edge=edge,
+                probability_estimate=1.0 - most_expensive.yes_price + edge / len(markets),
+                market_price=most_expensive.no_price,
+                confidence=0.85,
+                reasoning=(
+                    f"Mutual exclusivity arb: {event_ticker} YES prices sum "
+                    f"to {yes_sum:.2f} > 1.00 ({len(markets)} outcomes)"
+                ),
+            ))
+
+        return signals
+
+    async def _check_subset_arb(self, markets: list[Market]) -> list[Signal]:
+        """Type B: Use market graph + Claude to find subset/superset mispricing."""
+        signals: list[Signal] = []
+
+        # Find potential pairs via market graph
+        pairs = self.graph.find_subset_superset_pairs(markets, similarity_threshold=0.6)
+
+        market_lookup = {m.ticker: m for m in markets}
+
+        for ticker_a, ticker_b, similarity in pairs[:5]:  # Limit Claude calls
+            market_a = market_lookup.get(ticker_a)
+            market_b = market_lookup.get(ticker_b)
+            if not market_a or not market_b:
+                continue
+
+            # Check cached relationship first
+            cached = self._get_cached_relationship(ticker_a, ticker_b)
+            if cached is not None:
+                if cached.get("arbitrage_exists"):
+                    signal = self._build_subset_signal(
+                        market_a, market_b, cached
+                    )
+                    if signal:
+                        signals.append(signal)
+                continue
+
+            # Validate with Claude
+            relationship = await self._validate_relationship(market_a, market_b)
+            if relationship:
+                self._cache_relationship(ticker_a, ticker_b, relationship)
+                if relationship.get("arbitrage_exists"):
+                    signal = self._build_subset_signal(
+                        market_a, market_b, relationship
+                    )
+                    if signal:
+                        signals.append(signal)
+
+        return signals
+
+    async def _validate_relationship(
+        self, market_a: Market, market_b: Market
+    ) -> Optional[dict]:
+        """Use Claude to validate a logical relationship between two markets."""
+        try:
+            prompt = ARB_VALIDATION_TEMPLATE.format(
+                question_a=market_a.question,
+                price_a=market_a.yes_price,
+                question_b=market_b.question,
+                price_b=market_b.yes_price,
+            )
+
+            result = await self.forecaster.assess_market_with_prompt(
+                market=market_a,
+                custom_prompt=prompt,
+            )
+
+            if result and result.raw_response:
+                import json
+                try:
+                    data = json.loads(result.raw_response)
+                    return data
+                except json.JSONDecodeError:
+                    pass
+        except Exception as e:
+            logger.error(f"Arb validation failed: {e}")
+
+        return None
+
+    def _build_subset_signal(
+        self,
+        market_a: Market,
+        market_b: Market,
+        relationship: dict,
+    ) -> Optional[Signal]:
+        """Build a signal from a validated subset/superset relationship."""
+        rel_type = relationship.get("relationship", "")
+
+        if rel_type == "subset_ab":
+            # A is subset of B — A's YES should be <= B's YES
+            if market_a.yes_price > market_b.yes_price + self.min_edge:
+                edge = market_a.yes_price - market_b.yes_price
+                return Signal(
+                    strategy=StrategyName.CROSS_ARB,
+                    market_id=market_b.ticker,
+                    market_question=market_b.question,
+                    direction=Direction.BUY_YES,
+                    edge=edge,
+                    probability_estimate=market_a.yes_price,
+                    market_price=market_b.yes_price,
+                    confidence=relationship.get("confidence", 0.5),
+                    reasoning=f"Subset arb: {market_a.ticker}(YES={market_a.yes_price:.2f}) ⊂ {market_b.ticker}(YES={market_b.yes_price:.2f})",
+                )
+        elif rel_type == "subset_ba":
+            # B is subset of A
+            if market_b.yes_price > market_a.yes_price + self.min_edge:
+                edge = market_b.yes_price - market_a.yes_price
+                return Signal(
+                    strategy=StrategyName.CROSS_ARB,
+                    market_id=market_a.ticker,
+                    market_question=market_a.question,
+                    direction=Direction.BUY_YES,
+                    edge=edge,
+                    probability_estimate=market_b.yes_price,
+                    market_price=market_a.yes_price,
+                    confidence=relationship.get("confidence", 0.5),
+                    reasoning=f"Subset arb: {market_b.ticker}(YES={market_b.yes_price:.2f}) ⊂ {market_a.ticker}(YES={market_a.yes_price:.2f})",
+                )
+
+        return None
+
+    def _get_cached_relationship(self, ticker_a: str, ticker_b: str) -> Optional[dict]:
+        """Check for a cached arb relationship in the database."""
+        conn = self.db._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT relationship_data FROM arb_relationships "
+                "WHERE (market_a=? AND market_b=?) OR (market_a=? AND market_b=?)",
+                (ticker_a, ticker_b, ticker_b, ticker_a),
+            ).fetchone()
+            if row:
+                import json
+                return json.loads(row["relationship_data"])
+            return None
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+    def _cache_relationship(self, ticker_a: str, ticker_b: str, data: dict):
+        """Cache an arb relationship in the database."""
+        import json
+        conn = self.db._get_conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO arb_relationships "
+                "(market_a, market_b, relationship_data, validated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (ticker_a, ticker_b, json.dumps(data), datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to cache arb relationship: {e}")
+        finally:
+            conn.close()

@@ -159,3 +159,25 @@ class TestPersistence:
         assert cb2.is_halted() is False
         assert cb2._consecutive_losing_days == 0
         assert cb2.is_reduced_sizing is False
+
+    def test_reset_clears_db_state(self, settings, tmp_db):
+        """After reset, the DB row should reflect cleared state."""
+        cb = CircuitBreaker(settings, tmp_db)
+        for _ in range(5):
+            cb.record_daily_result(-10.0)
+        cb.check(500.0)
+
+        # Verify DB has halted state
+        state = tmp_db.load_circuit_breaker_state()
+        assert state is not None
+        assert state["halted"] == 1
+        assert state["consecutive_losing_days"] == 5
+
+        cb.reset()
+
+        # Verify DB reflects reset
+        state = tmp_db.load_circuit_breaker_state()
+        assert state is not None
+        assert state["halted"] == 0
+        assert state["consecutive_losing_days"] == 0
+        assert state["reduced_sizing"] == 0

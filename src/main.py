@@ -26,12 +26,25 @@ from src.analysis.resolution_tracker import ResolutionTracker
 from src.analysis.calibration_analyzer import CalibrationAnalyzer
 from src.strategies.ai_probability import AIProbabilityStrategy
 from src.strategies.obvious_no import ObviousNoStrategy
+from src.data.data_enricher import DataEnricher
 from src.execution.order_builder import OrderBuilder
 from src.execution.order_router import OrderRouter
 from src.execution.position_manager import PositionManager
+from src.execution.fill_tracker import FillTracker
+from src.alerts.alert_manager import AlertManager, LogBackend
+from src.alerts.imessage_alert import IMessageBackend
+from src.alerts.daily_report import DailyReport
 from src.risk.risk_engine import RiskEngine
 from src.risk.kelly_sizer import KellySizer
 from src.risk.circuit_breaker import CircuitBreaker
+from src.risk.portfolio_risk import PortfolioRisk
+from src.strategies.news_reactive import NewsReactiveStrategy
+from src.strategies.cross_arb import CrossArbStrategy
+from src.strategies.whale_tracker import WhaleTrackerStrategy
+from src.data.news_ingestion import NewsIngestion
+from src.data.market_graph import MarketGraph
+from src.data.whale_monitor import WhaleMonitor
+from src.core.websocket_client import KalshiWebSocket, TickerUpdate
 
 
 def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log"):
@@ -61,6 +74,10 @@ async def scan_and_trade(
     scanner: MarketScanner,
     ai_strategy: AIProbabilityStrategy,
     no_strategy: ObviousNoStrategy,
+    news_strategy: NewsReactiveStrategy | None,
+    cross_arb_strategy: CrossArbStrategy | None,
+    whale_strategy: WhaleTrackerStrategy | None,
+    market_graph: MarketGraph | None,
     risk_engine: RiskEngine,
     kelly_sizer: KellySizer,
     circuit_breaker: CircuitBreaker,
@@ -70,6 +87,8 @@ async def scan_and_trade(
     calibration: CalibrationTracker,
     resolution_tracker: ResolutionTracker,
     calibration_analyzer: CalibrationAnalyzer,
+    fill_tracker: FillTracker,
+    alert_manager: AlertManager,
     settings,
     cycle_count: int = 0,
 ):
@@ -77,9 +96,24 @@ async def scan_and_trade(
     logger = logging.getLogger("polyedge.main")
     bankroll = settings.trading.bankroll
 
+    # Check for fills on pending live orders
+    try:
+        new_fills = await fill_tracker.check_fills()
+        for fill in new_fills:
+            position_manager.update_from_trade(fill)
+    except Exception as e:
+        logger.error(f"Fill tracker check failed: {e}")
+
     # Check circuit breaker
     if not circuit_breaker.check(bankroll):
         logger.warning("Circuit breaker active — skipping trade cycle")
+        if settings.alerts.alert_on_circuit_breaker:
+            try:
+                await alert_manager.send_circuit_breaker_alert(
+                    circuit_breaker.halt_reason or "Unknown"
+                )
+            except Exception:
+                pass
         return
 
     # Scan and filter markets
@@ -92,10 +126,38 @@ async def scan_and_trade(
     for market in markets:
         position_manager.update_price(market.ticker, market.yes_price, market.no_price)
 
-    # Generate signals from both strategies
+    # Index markets in graph (if available)
+    if market_graph is not None:
+        try:
+            market_graph.index_markets(markets)
+        except Exception as e:
+            logger.warning(f"Market graph indexing failed: {e}")
+
+    # Generate signals from all strategies
     ai_signals = await ai_strategy.scan_for_opportunities(markets[:30])
     no_signals = no_strategy.scan_for_opportunities(markets)
     all_signals = ai_signals + no_signals
+
+    if news_strategy is not None:
+        try:
+            news_signals = await news_strategy.scan_for_opportunities(markets)
+            all_signals.extend(news_signals)
+        except Exception as e:
+            logger.error(f"News strategy failed: {e}")
+
+    if cross_arb_strategy is not None:
+        try:
+            arb_signals = await cross_arb_strategy.scan_for_opportunities(markets)
+            all_signals.extend(arb_signals)
+        except Exception as e:
+            logger.error(f"Cross-arb strategy failed: {e}")
+
+    if whale_strategy is not None:
+        try:
+            whale_signals = whale_strategy.scan_for_opportunities(markets)
+            all_signals.extend(whale_signals)
+        except Exception as e:
+            logger.error(f"Whale strategy failed: {e}")
 
     if not all_signals:
         logger.info("No signals generated this cycle")
@@ -111,6 +173,9 @@ async def scan_and_trade(
 
     trades_executed = 0
     for signal in all_signals:
+        # Log every signal immediately for analysis (acted_on=False by default)
+        signal_id = scanner.db.log_signal(signal)
+
         market = market_lookup.get(signal.market_id)
         if market is None:
             logger.warning(
@@ -171,10 +236,23 @@ async def scan_and_trade(
                 strategy=signal.strategy,
             )
 
-            # Log signal as acted on
-            signal.acted_on = True
-            signal.order_id = order.id
-            scanner.db.log_signal(signal)
+            # Update signal as acted on
+            scanner.db.update_signal_acted_on(signal_id, order.id)
+
+            # Send trade alert
+            if settings.alerts.alert_on_trade:
+                try:
+                    await alert_manager.send_trade_alert(
+                        market_id=signal.market_id,
+                        direction=signal.direction.value,
+                        size=int(order.size),
+                        price=order.price,
+                        cost=order.cost,
+                        strategy=signal.strategy.value,
+                        edge=signal.edge,
+                    )
+                except Exception:
+                    pass
 
             trades_executed += 1
 
@@ -221,18 +299,21 @@ async def scan_and_trade(
 
 
 async def run_trading_loop(
-    scanner, ai_strategy, no_strategy, risk_engine, kelly_sizer,
+    scanner, ai_strategy, no_strategy, news_strategy, cross_arb_strategy,
+    whale_strategy, market_graph, risk_engine, kelly_sizer,
     circuit_breaker, order_builder, order_router, position_manager,
-    calibration, resolution_tracker, calibration_analyzer, settings, interval,
+    calibration, resolution_tracker, calibration_analyzer, fill_tracker,
+    alert_manager, daily_report, settings, interval,
 ):
     """Run the scan-assess-trade loop on an interval."""
     logger = logging.getLogger("polyedge.main")
     cycle_count = 0
     last_trading_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _last_report_date: str = ""
 
     while True:
         try:
-            # Day-boundary: record previous day's result and reset daily halt
+            # Day-boundary: record previous day's result, reset daily halt, send report
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if today != last_trading_day:
                 yesterday_pnl = scanner.db.get_daily_pnl(last_trading_day)
@@ -241,12 +322,29 @@ async def run_trading_loop(
                 logger.info(f"New trading day: previous day P&L=${yesterday_pnl:.2f}")
                 last_trading_day = today
 
+            # Send daily report at configured time (once per day)
+            now = datetime.now(timezone.utc)
+            report_time = settings.alerts.daily_report_time
+            current_time = now.strftime("%H:%M")
+            if (
+                settings.alerts.enabled
+                and current_time >= report_time
+                and _last_report_date != today
+            ):
+                try:
+                    await daily_report.generate_and_send(today)
+                    _last_report_date = today
+                except Exception as e:
+                    logger.error(f"Daily report failed: {e}")
+
             cycle_count += 1
             await scan_and_trade(
-                scanner, ai_strategy, no_strategy, risk_engine, kelly_sizer,
+                scanner, ai_strategy, no_strategy, news_strategy,
+                cross_arb_strategy, whale_strategy, market_graph,
+                risk_engine, kelly_sizer,
                 circuit_breaker, order_builder, order_router, position_manager,
-                calibration, resolution_tracker, calibration_analyzer, settings,
-                cycle_count,
+                calibration, resolution_tracker, calibration_analyzer,
+                fill_tracker, alert_manager, settings, cycle_count,
             )
             stats = scanner.db.get_stats()
             logger.info(
@@ -313,14 +411,68 @@ async def main():
     resolution_tracker = ResolutionTracker(kalshi, db)
     calibration_analyzer = CalibrationAnalyzer(db)
 
-    # Strategies
-    ai_strategy = AIProbabilityStrategy(forecaster, settings, db, calibration_analyzer)
+    # Data enrichment
+    data_enricher = DataEnricher(settings)
+
+    # Strategies — core
+    ai_strategy = AIProbabilityStrategy(forecaster, settings, db, calibration_analyzer, data_enricher)
     no_strategy = ObviousNoStrategy(settings)
+
+    # Strategies — optional (gracefully skip if deps missing)
+    news_strategy: NewsReactiveStrategy | None = None
+    cross_arb_strategy: CrossArbStrategy | None = None
+    whale_strategy: WhaleTrackerStrategy | None = None
+    market_graph: MarketGraph | None = None
+    portfolio_risk: PortfolioRisk | None = None
+
+    try:
+        news_ingestion = NewsIngestion(settings)
+        news_strategy = NewsReactiveStrategy(forecaster, news_ingestion, settings, db)
+        logger.info("News-reactive strategy enabled")
+    except Exception as e:
+        logger.info(f"News-reactive strategy disabled: {e}")
+
+    try:
+        market_graph = MarketGraph()
+        cross_arb_strategy = CrossArbStrategy(market_graph, forecaster, settings, db)
+        logger.info("Cross-arb strategy enabled")
+    except Exception as e:
+        logger.info(f"Cross-arb strategy disabled: {e}")
+
+    try:
+        whale_monitor = WhaleMonitor(settings, db)
+        if whale_monitor.basket_size > 0:
+            whale_strategy = WhaleTrackerStrategy(whale_monitor, settings, db)
+            logger.info(f"Whale tracker strategy enabled ({whale_monitor.basket_size} whales)")
+        else:
+            logger.info("Whale tracker strategy disabled: empty basket")
+    except Exception as e:
+        logger.info(f"Whale tracker strategy disabled: {e}")
+
+    try:
+        portfolio_risk = PortfolioRisk(position_manager, db)
+    except Exception as e:
+        logger.info(f"Portfolio risk module disabled: {e}")
 
     # Execution
     order_builder = OrderBuilder(settings)
     order_router = OrderRouter(settings, kalshi, db)
     position_manager = PositionManager(db, settings.trading.bankroll)
+    fill_tracker = FillTracker(kalshi, db)
+
+    # Sync positions with Kalshi on startup (live mode only)
+    if settings.trading.mode == "live" and healthy:
+        mismatches = await position_manager.sync_with_kalshi(kalshi)
+        if mismatches:
+            logger.warning(f"Position sync found {mismatches} mismatches — review manually")
+
+    # Alerts
+    alert_manager = AlertManager()
+    alert_manager.register(LogBackend())
+    if settings.alerts.imessage_enabled and settings.alerts.imessage_endpoint:
+        alert_manager.register(IMessageBackend(settings.alerts.imessage_endpoint))
+        logger.info(f"iMessage alerts enabled: {settings.alerts.imessage_endpoint}")
+    daily_report = DailyReport(db, alert_manager, settings)
 
     # Risk
     circuit_breaker = CircuitBreaker(settings, db)
@@ -340,18 +492,65 @@ async def main():
             f"{m.question[:65]}"
         )
 
+    # Start WebSocket for real-time price feeds
+    ws_client: KalshiWebSocket | None = None
+    ws_task = None
+    if settings.kalshi_api_key_id and settings.kalshi_private_key_path:
+        try:
+            ws_host = settings.kalshi.active_host.replace("https://", "wss://") + "/ws/v2"
+            # Strip /v2 duplication if host already ends with /v2
+            ws_host = ws_host.replace("/v2/ws/v2", "/ws/v2")
+            ws_client = KalshiWebSocket(
+                host=ws_host,
+                api_key_id=settings.kalshi_api_key_id,
+                private_key_path=settings.kalshi_private_key_path,
+            )
+            ws_client.set_channels(["ticker", "fill", "market_lifecycle_v2"])
+
+            async def _on_price(update: TickerUpdate):
+                no_price = 1.0 - update.price if update.price > 0 else 0.0
+                position_manager.update_price(update.market_ticker, update.price, no_price)
+
+            ws_client.on_price_update(_on_price)
+            ws_task = asyncio.create_task(ws_client.connect())
+            logger.info(f"WebSocket client starting: {ws_host}")
+        except Exception as e:
+            logger.info(f"WebSocket client disabled: {e}")
+    else:
+        logger.info("WebSocket client disabled (no API keys)")
+
+    # Start dashboard as background task (if FastAPI available)
+    dashboard_task = None
+    try:
+        from src.dashboard.server import start_dashboard
+        dashboard_task = asyncio.create_task(start_dashboard(db))
+        logger.info("Dashboard starting at http://0.0.0.0:8080")
+    except ImportError:
+        logger.info("Dashboard disabled (install fastapi + uvicorn)")
+    except Exception as e:
+        logger.warning(f"Dashboard failed to start: {e}")
+
     # Enter trading loop
     logger.info(f"\nEntering trading loop (every {settings.scanning.interval_seconds}s)...")
     try:
         await run_trading_loop(
-            scanner, ai_strategy, no_strategy, risk_engine, kelly_sizer,
+            scanner, ai_strategy, no_strategy, news_strategy,
+            cross_arb_strategy, whale_strategy, market_graph,
+            risk_engine, kelly_sizer,
             circuit_breaker, order_builder, order_router, position_manager,
             calibration, resolution_tracker, calibration_analyzer,
+            fill_tracker, alert_manager, daily_report,
             settings, settings.scanning.interval_seconds,
         )
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")
     finally:
+        if ws_client is not None:
+            await ws_client.close()
+        if ws_task is not None:
+            ws_task.cancel()
+        if dashboard_task is not None:
+            dashboard_task.cancel()
         await discovery.close()
         logger.info("PolyEdge stopped.")
 

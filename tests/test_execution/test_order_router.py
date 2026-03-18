@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -18,7 +18,8 @@ from src.storage.database import Database
 @pytest.fixture
 def mock_kalshi():
     client = AsyncMock(spec=KalshiClient)
-    client.create_order = AsyncMock(return_value={"order_id": "kalshi-123", "status": "resting"})
+    client.create_order = AsyncMock(return_value={"order_id": "kalshi-123", "status": "executed"})
+    client.get_order = AsyncMock(return_value={"order_id": "kalshi-123", "status": "executed"})
     return client
 
 
@@ -108,6 +109,7 @@ class TestLiveFill:
     @pytest.mark.asyncio
     async def test_live_fill_succeeds(self, live_settings, mock_kalshi, tmp_db):
         router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True  # Pre-confirm for test
         order = _make_order(paper=False)
 
         result = await router.route_order(order)
@@ -120,6 +122,7 @@ class TestLiveFill:
     async def test_live_fill_api_failure(self, live_settings, mock_kalshi, tmp_db):
         mock_kalshi.create_order = AsyncMock(return_value=None)
         router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
         order = _make_order(paper=False)
 
         result = await router.route_order(order)
@@ -131,6 +134,7 @@ class TestLiveFill:
     async def test_live_fill_api_exception(self, live_settings, mock_kalshi, tmp_db):
         mock_kalshi.create_order = AsyncMock(side_effect=Exception("API down"))
         router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
         order = _make_order(paper=False)
 
         result = await router.route_order(order)
@@ -138,12 +142,72 @@ class TestLiveFill:
         assert result.success is False
         assert "API down" in result.error
 
+    @pytest.mark.asyncio
+    async def test_gate3_blocks_without_confirmation(self, live_settings, mock_kalshi, tmp_db):
+        """Gate 3 should block live trades until user confirms."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        order = _make_order(paper=False)
+
+        # Mock input to return "n"
+        with patch.object(router, '_request_confirmation', new_callable=AsyncMock, return_value=False):
+            result = await router.route_order(order)
+
+        assert result.success is False
+        assert "declined" in result.error
+
+    @pytest.mark.asyncio
+    async def test_gate3_allows_after_confirmation(self, live_settings, mock_kalshi, tmp_db):
+        """Gate 3 should allow trading after first confirmation."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        order = _make_order(paper=False)
+
+        # Mock input to return "y"
+        with patch.object(router, '_request_confirmation', new_callable=AsyncMock, return_value=True):
+            result = await router.route_order(order)
+
+        assert result.success is True
+        assert router._session_confirmed is True
+
+
+class TestLiveFillFee:
+    @pytest.mark.asyncio
+    async def test_live_fill_fee_calculation(self, live_settings, mock_kalshi, tmp_db):
+        """Live fill should calculate fee > 0 matching expected value."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        assert result.trade is not None
+        assert result.trade.fee > 0
+        # Maker fee: ceil(0.0175 * 10 * 34 * (100-34)) / 100 cents -> dollars
+        # = ceil(0.0175 * 10 * 34 * 66) / 100 = ceil(392.7) / 100 = $3.93
+        import math
+        from src.core.models import dollars_to_cents, kalshi_maker_fee
+        expected_fee_cents = kalshi_maker_fee(10, dollars_to_cents(0.34))
+        assert result.trade.fee == expected_fee_cents / 100.0
+
+    @pytest.mark.asyncio
+    async def test_live_fill_consistent_timestamps(self, live_settings, mock_kalshi, tmp_db):
+        """Order filled_at and trade timestamp should match exactly."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        assert result.order.filled_at == result.trade.timestamp
+
 
 class TestLiveBuyNoPrice:
     @pytest.mark.asyncio
     async def test_live_buy_no_sends_correct_yes_price(self, live_settings, mock_kalshi, tmp_db):
         """BUY NO at $0.97 should send yes_price=3 (i.e., YES=$0.03)."""
         router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
         order = Order(
             id="PE-no-test",
             market_id="MKT-TEST",
@@ -170,6 +234,7 @@ class TestLiveBuyNoPrice:
     async def test_live_buy_yes_sends_correct_yes_price(self, live_settings, mock_kalshi, tmp_db):
         """BUY YES at $0.34 should send yes_price=34."""
         router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
         order = _make_order(paper=False)  # YES at $0.34
 
         await router.route_order(order)

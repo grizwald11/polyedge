@@ -1,0 +1,112 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e1e4ed;
+    --muted: #6b7280;
+    --accent: #6366f1;
+    --positive: #22c55e;
+    --negative: #ef4444;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+}
+
+.navbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.5rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+
+.nav-brand {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--accent);
+}
+
+.nav-links { display: flex; gap: 1rem; }
+
+.nav-link {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 0.9rem;
+}
+.nav-link.active, .nav-link:hover { color: var(--text); }
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 1.5rem;
+}
+
+h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
+
+.subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.card-label { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
+.card-value { font-size: 1.4rem; font-weight: 600; }
+.card-value.positive { color: var(--positive); }
+.card-value.negative { color: var(--negative); }
+
+.section { margin-bottom: 2rem; }
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+
+.data-table th, .data-table td {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.data-table th {
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.data-table tr:hover td { background: var(--surface); }
+
+.muted { color: var(--muted); text-align: center; }
+
+.footer {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    position: fixed;
+    bottom: 0;
+    width: 100%;
+    background: var(--bg);
+}

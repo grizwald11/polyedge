@@ -184,6 +184,23 @@ class TestCheckAll:
         assert result.passed is False
         assert any("Obvious NO" in c for c in result.failed_checks)
 
+    def test_fails_correlated_exposure(self, engine, signal, market, position_manager):
+        """Filling AI_PROBABILITY to near 20% limit should block another AI_PROBABILITY trade."""
+        from src.core.models import Side, Trade
+        # Fill up strategy exposure to near 20% of $500 = $100
+        for i in range(4):
+            trade = Trade(
+                order_id=f"PE-corr-{i}", market_id=f"AI-MKT-{i}",
+                token_id=f"AI-MKT-{i}_yes", side=Side.BUY,
+                price=0.50, size=50,  # $25 each = $100 total
+                strategy=StrategyName.AI_PROBABILITY, paper=True,
+            )
+            position_manager.update_from_trade(trade)
+
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+        assert any("Correlated exposure" in c for c in result.failed_checks)
+
     def test_warns_long_dated(self, engine, signal):
         long_market = Market(
             ticker="FED-RATE-CUT-MAY26",

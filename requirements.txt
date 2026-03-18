@@ -29,13 +29,20 @@ pytest-asyncio>=0.24.0
 # Logging
 # (built-in)
 
-# Phase 2+ dependencies (install when needed):
+# WebSocket
+websockets>=13.0
+
+# Dashboard
+fastapi>=0.115.0
+uvicorn>=0.32.0
+jinja2>=3.1
+
+# News
+feedparser>=6.0
+
+# Phase 2+ optional dependencies (install when needed):
 # chromadb>=0.5.0
 # sentence-transformers>=3.0
-# fastapi>=0.115.0
-# uvicorn>=0.32.0
 # apscheduler>=3.10
 # pandas>=2.2
 # numpy>=2.0
-# feedparser>=6.0
-# jinja2>=3.1

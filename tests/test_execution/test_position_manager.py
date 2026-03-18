@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from src.core.models import Direction, Side, StrategyName, Trade
@@ -157,6 +159,54 @@ class TestPortfolioMetrics:
 
         positions = pm.get_all_positions()
         assert len(positions) == 2
+
+    def test_load_positions_preserves_timestamps(self, tmp_db):
+        """Positions loaded from DB should have historical timestamps, not restart time."""
+        historical_ts = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+        trade = Trade(
+            order_id="PE-ts-test",
+            market_id="TS-MKT",
+            token_id="TS-MKT_yes",
+            side=Side.BUY,
+            price=0.40,
+            size=5.0,
+            fee=0.01,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=True,
+            timestamp=historical_ts,
+        )
+        # Log trade directly to DB
+        tmp_db.log_trade(trade)
+
+        # Create new PositionManager — simulates restart
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pos = pm.get_position("TS-MKT")
+
+        assert pos is not None
+        assert pos.opened_at == historical_ts
+        assert pos.last_updated == historical_ts
+
+    def test_multiple_partial_closes(self, tmp_db):
+        """BUY 10, SELL 3, SELL 4, SELL 3 should fully close position."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade(side=Side.BUY, size=10))
+        pm.update_from_trade(_make_trade(side=Side.SELL, size=3))
+        assert pm.get_position("FED-RATE-CUT-MAY26").size == 7.0
+
+        pm.update_from_trade(_make_trade(side=Side.SELL, size=4))
+        assert pm.get_position("FED-RATE-CUT-MAY26").size == 3.0
+
+        pm.update_from_trade(_make_trade(side=Side.SELL, size=3))
+        assert pm.has_position("FED-RATE-CUT-MAY26") is False
+
+    def test_sell_more_than_held(self, tmp_db):
+        """Selling more than held should close position, not go negative."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade(side=Side.BUY, size=10))
+        pm.update_from_trade(_make_trade(side=Side.SELL, size=15))
+
+        assert pm.has_position("FED-RATE-CUT-MAY26") is False
+        assert pm.get_position_count() == 0
 
     def test_total_unrealized_pnl(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)

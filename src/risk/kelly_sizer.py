@@ -103,9 +103,13 @@ class KellySizer:
             if contracts * cost_price + fee_dollars > kelly_dollars:
                 contracts -= 1
 
-        # Minimum 1 contract if we have any edge and room
+        # Minimum 1 contract if we have any edge and room,
+        # but only if the single contract cost + fee stays within kelly_dollars.
         if contracts == 0 and kelly_fraction > 0 and remaining >= cost_price:
-            contracts = 1
+            fee_cents = math.ceil(self.fee_rate * 1 * cost_price * (1.0 - cost_price)) if 0 < cost_price < 1 else 0
+            fee_dollars = fee_cents / 100.0
+            if cost_price + fee_dollars <= kelly_dollars:
+                contracts = 1
 
         logger.debug(
             f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "

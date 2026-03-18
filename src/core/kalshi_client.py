@@ -315,6 +315,17 @@ class KalshiClient:
             logger.error(f"Failed to cancel order {order_id}: {e}")
             return None
 
+    async def get_order(self, order_id: str) -> Optional[dict]:
+        """Get a single order by ID."""
+        try:
+            data = await self._request("GET", f"/portfolio/orders/{order_id}")
+            if data and "order" in data:
+                return data["order"]
+            return data
+        except Exception as e:
+            logger.error(f"Failed to get order {order_id}: {e}")
+            return None
+
     async def get_open_orders(self) -> list[dict]:
         """Get all open orders."""
         try:
