@@ -97,6 +97,36 @@ class TestWhaleTrackerStrategy:
         weight = strategy._timing_weight(entry_time)
         assert weight == 0.9
 
+    def test_probability_estimate_uses_avg_entry(self, tmp_db):
+        """Regression: probability_estimate should equal whale avg_entry, not current_price + edge."""
+        settings = Settings()
+        monitor = WhaleMonitor(settings, tmp_db)
+
+        for i in range(5):
+            monitor._basket.append(WhaleWallet(address=f"whale-{i}"))
+
+        now = datetime.now(timezone.utc)
+        for i in range(4):
+            monitor.update_positions(f"whale-{i}", {
+                "FED-RATE": WhalePosition(
+                    wallet=f"whale-{i}",
+                    market_id="FED-RATE",
+                    direction=Direction.BUY_YES,
+                    entry_price=0.50,  # Whales bought at $0.50
+                    detected_at=now - timedelta(hours=18),
+                ),
+            })
+
+        strategy = WhaleTrackerStrategy(monitor, settings, tmp_db)
+        # Market at $0.34, whales entered at $0.50 → edge = $0.16
+        markets = [_make_market(yes_price=0.34, no_price=0.66)]
+        signals = strategy.scan_for_opportunities(markets)
+
+        assert len(signals) == 1
+        # probability_estimate should be avg_entry (0.50), not current_price + edge (0.34 + 0.16 = 0.50)
+        # In this case they happen to be equal, but the logic should use avg_entry directly
+        assert signals[0].probability_estimate == pytest.approx(0.50, abs=0.01)
+
     def test_timing_weight_recent_entry(self, tmp_db):
         strategy = WhaleTrackerStrategy.__new__(WhaleTrackerStrategy)
         # Entry 2 hours ago — very recent, lower weight

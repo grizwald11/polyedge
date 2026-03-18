@@ -216,6 +216,35 @@ class TestCheckAll:
         assert any("Long-dated" in w for w in result.warnings)
 
 
+class TestNegativeEdgeRejection:
+    """Regression: negative edge signals must be rejected (not just small ones)."""
+
+    def test_negative_edge_rejected(self, engine, market):
+        neg_signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="FED-RATE-CUT-MAY26",
+            direction=Direction.BUY_YES,
+            edge=-0.03,
+            probability_estimate=0.31,
+            market_price=0.34,
+        )
+        result = engine.check_all(neg_signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+        assert any("Negative" in c or "zero edge" in c for c in result.failed_checks)
+
+    def test_zero_edge_rejected(self, engine, market):
+        zero_signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="FED-RATE-CUT-MAY26",
+            direction=Direction.BUY_YES,
+            edge=0.0,
+            probability_estimate=0.34,
+            market_price=0.34,
+        )
+        result = engine.check_all(zero_signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+
+
 class TestCooldownPersistence:
     def test_cooldown_survives_restart(self, settings, tmp_db):
         """Cooldowns should persist across RiskEngine restarts."""

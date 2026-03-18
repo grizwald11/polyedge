@@ -82,13 +82,14 @@ class PositionManager:
             else:
                 # Reducing position — avg_entry_price stays the same
                 # (it represents the cost basis of remaining contracts)
-                if trade.size > existing.size:
+                sell_size = trade.size
+                if sell_size > existing.size:
                     logger.warning(
-                        f"Sell size ({trade.size}) exceeds position size ({existing.size}) "
+                        f"Sell size ({sell_size}) exceeds position size ({existing.size}) "
                         f"for {trade.market_id} — clamping to position size"
                     )
-                    trade.size = existing.size
-                existing.size -= trade.size
+                    sell_size = existing.size
+                existing.size -= sell_size
                 if existing.size <= 0:
                     # Position closed
                     self._positions.pop(key, None)

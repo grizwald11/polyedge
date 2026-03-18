@@ -57,6 +57,25 @@ class TestDailyLossLimit:
         assert cb.check(500.0) is False
 
 
+class TestUnrealizedPnlInDailyLimit:
+    """Regression: unrealized P&L from open positions should count toward daily limit."""
+
+    def test_unrealized_loss_triggers_halt(self, cb, tmp_db):
+        # Realized = -30, unrealized = -25, total = -55 > 10% of 500 = 50
+        _log_losing_trade(tmp_db, pnl=-30.0)
+        assert cb.check(500.0, unrealized_pnl=-25.0) is False
+        assert cb.is_halted() is True
+
+    def test_unrealized_loss_alone_insufficient(self, cb):
+        # Only unrealized = -30, no realized losses
+        assert cb.check(500.0, unrealized_pnl=-30.0) is True
+
+    def test_unrealized_profit_offsets(self, cb, tmp_db):
+        # Realized = -40, unrealized = +20, net = -20, under limit
+        _log_losing_trade(tmp_db, pnl=-40.0)
+        assert cb.check(500.0, unrealized_pnl=20.0) is True
+
+
 class TestConsecutiveLosses:
     def test_three_losing_days_reduces_sizing(self, cb):
         cb.record_daily_result(-10.0)

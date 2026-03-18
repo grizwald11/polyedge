@@ -208,6 +208,17 @@ class TestPortfolioMetrics:
         assert pm.has_position("FED-RATE-CUT-MAY26") is False
         assert pm.get_position_count() == 0
 
+    def test_sell_clamping_does_not_mutate_trade(self, tmp_db):
+        """Regression: clamping sell size should not mutate the Trade object."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade(side=Side.BUY, size=10))
+
+        sell_trade = _make_trade(side=Side.SELL, size=15)
+        pm.update_from_trade(sell_trade)
+
+        # Trade object should not have been mutated
+        assert sell_trade.size == 15
+
     def test_total_unrealized_pnl(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
         pm.update_from_trade(_make_trade(market_id="A", token_id="A_yes", price=0.30, size=10))

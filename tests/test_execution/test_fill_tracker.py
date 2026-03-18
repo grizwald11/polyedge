@@ -153,6 +153,52 @@ class TestFillTracker:
         assert tracker.pending_count == 1
 
     @pytest.mark.asyncio
+    async def test_fills_loaded_from_db_on_init(self, mock_kalshi, tmp_db):
+        """Regression: previously filled order IDs should be loaded from DB on init,
+        preventing duplicate trade recording after restart."""
+        from src.core.models import Trade, StrategyName
+
+        # Simulate a pre-existing trade in the DB
+        trade = Trade(
+            order_id="PE-already-filled",
+            market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes",
+            side=Side.BUY,
+            price=0.34,
+            size=10,
+            fee=0.01,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+        )
+        tmp_db.log_trade(trade)
+
+        # Create a new tracker (simulates restart)
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        assert "PE-already-filled" in tracker._processed_fills
+
+        # Now if the same order is detected as filled, it should be skipped
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "executed",
+        })
+        order = Order(
+            id="PE-already-filled",
+            market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes",
+            side=Side.BUY,
+            price=0.34,
+            size=10,
+            cost=3.40,
+            order_type=OrderType.GTC,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+        )
+        tracker.track(order)
+        fills = await tracker.check_fills()
+        assert len(fills) == 0  # Should be deduplicated
+
+    @pytest.mark.asyncio
     async def test_duplicate_fill_deduplicated(self, mock_kalshi, tmp_db):
         """If the same order fill is detected twice (e.g. REST + WebSocket),
         it should only be recorded once."""

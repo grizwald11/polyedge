@@ -108,7 +108,9 @@ class WhaleTrackerStrategy:
             return None
 
         edge = price_edge
-        probability_estimate = min(0.99, current_price + edge)
+        # Whale entry price is our best estimate of true probability
+        # (proven traders paid this price, implying they believe prob >= avg_entry)
+        probability_estimate = min(0.99, avg_entry)
 
         if edge < self.min_edge:
             return None

@@ -152,6 +152,7 @@ class ClaudeForecaster:
                 reasoning="Rate limited — using market price as fallback",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
+                parse_failed=True,  # Not a real assessment — don't trade on this
             )
         except Exception as e:
             logger.error(f"Claude assessment failed: {e}")
@@ -162,6 +163,7 @@ class ClaudeForecaster:
                 reasoning=f"Assessment failed: {e}",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
+                parse_failed=True,  # Not a real assessment — don't trade on this
             )
 
     async def assess_market_with_prompt(

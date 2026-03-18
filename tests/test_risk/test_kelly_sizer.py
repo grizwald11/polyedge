@@ -172,6 +172,22 @@ class TestCalculatePositionSize:
             f"+ fee ${fee_dollars:.2f} = ${total:.2f} exceeds cap ${max_position:.2f}"
         )
 
+class TestNonFiniteInputs:
+    """Regression: NaN and infinity inputs should return 0, not crash."""
+
+    def test_nan_edge(self, sizer):
+        assert sizer.calculate_position_size(float("nan"), 0.50, 500.0) == 0
+
+    def test_inf_probability(self, sizer):
+        assert sizer.calculate_position_size(0.10, float("inf"), 500.0) == 0
+
+    def test_nan_bankroll(self, sizer):
+        assert sizer.calculate_position_size(0.10, 0.50, float("nan")) == 0
+
+    def test_neg_inf_exposure(self, sizer):
+        assert sizer.calculate_position_size(0.10, 0.50, 500.0, current_exposure=float("-inf")) == 0
+
+
 class TestCalibrationMultiplier:
     def test_default_multiplier_is_one(self, sizer):
         assert sizer.calibration_multiplier == 1.0

@@ -150,8 +150,11 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     # Load YAML if it exists
     yaml_data = {}
     if config_path.exists():
-        with open(config_path) as f:
-            yaml_data = yaml.safe_load(f) or {}
+        try:
+            with open(config_path) as f:
+                yaml_data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            raise RuntimeError(f"Failed to parse config file {config_path}: {e}") from e
 
     # Build settings from YAML
     settings = Settings(**yaml_data)

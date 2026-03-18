@@ -149,6 +149,11 @@ class AIProbabilityStrategy:
                 base_rate_context=base_rate_context,
             )
 
+        # Skip if Claude failed to parse the response (fallback 0.5 is unreliable)
+        if getattr(forecast, "parse_failed", False):
+            logger.warning(f"Skipping {market.ticker}: Claude response parse failed")
+            return None
+
         # Apply calibration adjustment before ensemble
         adjustment = self._category_adjustments.get(category.value, 0.0)
         if adjustment != 0.0:

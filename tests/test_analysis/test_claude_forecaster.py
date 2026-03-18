@@ -145,6 +145,40 @@ class TestClaudeForecaster:
         assert result.probability == sample_market.yes_price
         assert "failed" in result.reasoning.lower()
 
+    def test_parse_failed_flag_set_on_unparseable(self, forecaster):
+        """Regression: when Claude returns unparseable text, parse_failed should be True."""
+        raw = "I cannot provide a probability estimate for this."
+        result = forecaster._parse_response(raw)
+        assert result.parse_failed is True
+        assert result.probability == 0.5
+
+    @pytest.mark.asyncio
+    async def test_api_error_sets_parse_failed(self, forecaster, sample_market):
+        """Regression: fallback forecasts from API errors should have parse_failed=True."""
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(side_effect=Exception("API Error"))
+        forecaster._client = mock_client
+
+        result = await forecaster.assess_market(sample_market)
+        assert result.parse_failed is True
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_sets_parse_failed(self, forecaster, sample_market):
+        """Regression: rate limit fallback should have parse_failed=True."""
+        import anthropic
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(
+            side_effect=anthropic.RateLimitError(
+                message="rate limited",
+                response=MagicMock(status_code=429, headers={}, json=MagicMock(return_value={})),
+                body=None,
+            )
+        )
+        forecaster._client = mock_client
+
+        result = await forecaster.assess_market(sample_market)
+        assert result.parse_failed is True
+
     def test_no_api_key_raises(self):
         s = Settings()
         s.anthropic_api_key = None

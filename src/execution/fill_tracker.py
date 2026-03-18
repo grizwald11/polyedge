@@ -5,6 +5,7 @@ Polls Kalshi API for order status updates and reconciles with local state.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -58,7 +59,9 @@ class FillTracker:
 
         for order_id, order in self._pending_orders.items():
             try:
-                status = await self.kalshi.get_order(order_id)
+                status = await asyncio.wait_for(
+                    self.kalshi.get_order(order_id), timeout=10
+                )
                 if status is None:
                     continue
 

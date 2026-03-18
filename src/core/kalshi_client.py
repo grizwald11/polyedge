@@ -114,6 +114,7 @@ class KalshiClient:
         json_body: Optional[dict] = None,
     ) -> Any:
         """Make an authenticated request with retry logic."""
+        import random
         client = await self._get_client()
         max_retries = 3
         for attempt in range(max_retries):
@@ -129,25 +130,28 @@ class KalshiClient:
                     raise ValueError(f"Unsupported method: {method}")
 
                 if resp.status_code == 429:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(f"Rate limited on {path}, waiting {wait}s")
-                    await asyncio.sleep(wait)
-                    continue
+                    if attempt < max_retries - 1:
+                        wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+                        logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.error(f"Rate limited on {path} after {max_retries} attempts — giving up")
+                    return None
                 resp.raise_for_status()
                 if resp.status_code == 204:
                     return {}
                 return resp.json()
             except httpx.HTTPStatusError as e:
                 if e.response.status_code >= 500 and attempt < max_retries - 1:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(f"Server error {e.response.status_code} on {path}, retrying in {wait}s")
+                    wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+                    logger.warning(f"Server error {e.response.status_code} on {path}, retrying in {wait:.1f}s")
                     await asyncio.sleep(wait)
                     continue
                 raise
             except httpx.RequestError as e:
                 if attempt < max_retries - 1:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(f"Request error on {path}: {e}, retrying in {wait}s")
+                    wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+                    logger.warning(f"Request error on {path}: {e}, retrying in {wait:.1f}s")
                     await asyncio.sleep(wait)
                     continue
                 raise
