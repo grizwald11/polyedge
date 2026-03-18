@@ -246,6 +246,9 @@ async def run_backtest(
                 brier = (predicted_prob - actual_outcome_int) ** 2
                 brier_sum += brier
 
+                # Upsert market first (calibration_records has FK to markets)
+                db.upsert_market(market)
+
                 # Store prediction
                 db.store_prediction(
                     market_ticker=ticker,
@@ -257,9 +260,6 @@ async def run_backtest(
                     confidence_high=forecast.confidence_high,
                     market_question=market.question,
                 )
-
-                # Also upsert the market so calibration analyzer can join on category
-                db.upsert_market(market)
 
                 # Immediately resolve (we know the outcome)
                 db.update_resolution(
