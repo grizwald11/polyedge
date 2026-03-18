@@ -58,8 +58,10 @@ class NewsResearcher:
         # Build queries with different angles
         queries = [cleaned]
 
-        # Add a time-scoped query
-        queries.append(f"{cleaned} latest news 2026")
+        # Add a time-scoped query using current year
+        from datetime import datetime, timezone
+        current_year = datetime.now(timezone.utc).year
+        queries.append(f"{cleaned} latest news {current_year}")
 
         # Add a more specific query focusing on key entities
         # Extract capitalized words as likely entities

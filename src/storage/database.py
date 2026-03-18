@@ -118,6 +118,8 @@ CREATE TABLE IF NOT EXISTS trades (
     timestamp TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades(market_id);
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
+CREATE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id);
 
 -- Calibration records
 CREATE TABLE IF NOT EXISTS calibration_records (
@@ -877,3 +879,23 @@ class Database:
             "total_trades": trades["cnt"] if trades else 0,
             "total_pnl": pnl["total"] if pnl else 0.0,
         }
+
+    def cleanup_old_snapshots(self, max_age_days: int = 30) -> int:
+        """Delete market snapshots older than max_age_days.
+
+        Prevents unbounded growth of the snapshots table in long-running
+        deployments. Call this periodically (e.g., daily).
+
+        Returns number of rows deleted.
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "DELETE FROM market_snapshots WHERE timestamp < ?", (cutoff,)
+        )
+        conn.commit()
+        deleted = cursor.rowcount
+        if deleted > 0:
+            logger.info(f"Cleaned up {deleted} snapshots older than {max_age_days} days")
+        return deleted

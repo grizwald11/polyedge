@@ -19,7 +19,7 @@ from src.storage.database import Database
 logger = logging.getLogger(__name__)
 
 MAX_POLLS = 5
-POLL_STATES_TERMINAL = {"executed", "canceled", "pending"}
+POLL_STATES_TERMINAL = {"executed", "canceled", "cancelled"}
 
 
 class FillTracker:
@@ -35,7 +35,10 @@ class FillTracker:
         self.db = db
         self._pending_orders: dict[str, Order] = {}  # order_id -> Order
         self._ws_fills: list[Trade] = []  # Fills received via WebSocket
-        self._processed_fills: set[str] = set()  # Dedup: order_ids already filled
+        # Load previously filled order IDs from database to prevent duplicate
+        # recording after restart. Without this, a restart + re-detection of
+        # old fills would double-count trades and corrupt position tracking.
+        self._processed_fills: set[str] = self._load_filled_order_ids()
 
     def track(self, order: Order):
         """Register an order for fill tracking."""
@@ -194,6 +197,24 @@ class FillTracker:
             order.rejection_reason,
         ))
         conn.commit()
+
+    def _load_filled_order_ids(self) -> set[str]:
+        """Load order IDs that already have trades recorded in the database.
+
+        This prevents duplicate trade recording after a restart.
+        """
+        try:
+            conn = self.db._get_conn()
+            rows = conn.execute(
+                "SELECT DISTINCT order_id FROM trades"
+            ).fetchall()
+            ids = {row["order_id"] for row in rows if row["order_id"]}
+            if ids:
+                logger.info(f"Fill tracker: loaded {len(ids)} previously filled order IDs")
+            return ids
+        except Exception as e:
+            logger.warning(f"Failed to load filled order IDs: {e}")
+            return set()
 
     @property
     def pending_count(self) -> int:

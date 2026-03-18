@@ -80,7 +80,14 @@ class PositionManager:
                 existing.size += trade.size
                 existing.avg_entry_price = total_cost / existing.size if existing.size > 0 else 0
             else:
-                # Reducing position
+                # Reducing position — avg_entry_price stays the same
+                # (it represents the cost basis of remaining contracts)
+                if trade.size > existing.size:
+                    logger.warning(
+                        f"Sell size ({trade.size}) exceeds position size ({existing.size}) "
+                        f"for {trade.market_id} — clamping to position size"
+                    )
+                    trade.size = existing.size
                 existing.size -= trade.size
                 if existing.size <= 0:
                     # Position closed
@@ -235,20 +242,45 @@ class PositionManager:
     def _calculate_remaining_edge(self, position: Position, market: Market) -> float:
         """Calculate remaining edge for a position given current market prices.
 
-        Returns the edge as a positive fraction if still favorable, negative if adverse.
+        Edge is measured as the difference between where we think the market
+        should resolve and the current price. For a BUY_YES position, our entry
+        price implies we believed the true probability was >= entry price.
+        If the market price has moved toward 1.0 (our thesis), edge shrinks
+        because there's less upside. If price moved away, we still have edge
+        but are underwater.
+
+        Returns a positive fraction if the position still has favorable risk/reward,
+        zero or negative if the edge has evaporated.
         """
         if position.direction in (Direction.BUY_YES, Direction.SELL_NO):
-            # We're long YES — edge is how much current price exceeds our entry
-            # (we profit if price goes up toward 1.0)
-            # Remaining edge = potential upside / cost
-            remaining = (1.0 - market.yes_price) / market.yes_price if market.yes_price > 0 else 0
-            entry_edge = (1.0 - position.avg_entry_price) / position.avg_entry_price if position.avg_entry_price > 0 else 0
-            # If current price moved above entry, edge is shrinking
-            return max(0.0, remaining)
+            # We're long YES — we entered expecting the price to rise toward 1.0.
+            # Remaining edge = how much room there is between current price and 1.0,
+            # relative to what existed when we entered.
+            # If price moved UP past entry, edge is consumed (less upside left).
+            # If price moved DOWN below entry, edge expanded but we're losing.
+            current = market.yes_price
+            entry = position.avg_entry_price
+            if current <= 0 or entry <= 0:
+                return 0.0
+            # Edge at entry: (1 - entry) / entry
+            # Edge now: (1 - current) / current
+            # Remaining = current edge as fraction of entry edge
+            entry_edge = (1.0 - entry) / entry
+            current_edge = (1.0 - current) / current
+            if entry_edge <= 0:
+                return 0.0
+            return max(0.0, current_edge / entry_edge - 0.5)  # <50% of original edge = exit
         else:
-            # We're long NO — edge is potential upside on NO side
-            remaining = (1.0 - market.no_price) / market.no_price if market.no_price > 0 else 0
-            return max(0.0, remaining)
+            # We're long NO
+            current = market.no_price
+            entry = position.avg_entry_price
+            if current <= 0 or entry <= 0:
+                return 0.0
+            entry_edge = (1.0 - entry) / entry
+            current_edge = (1.0 - current) / current
+            if entry_edge <= 0:
+                return 0.0
+            return max(0.0, current_edge / entry_edge - 0.5)
 
     async def sync_with_kalshi(self, kalshi, auto_correct: bool = True) -> int:
         """Reconcile local positions against Kalshi API positions.
@@ -374,20 +406,25 @@ class PositionManager:
             return
 
         for row in rows:
-            trade = Trade(
-                order_id=row["order_id"],
-                market_id=row["market_id"],
-                token_id=row["token_id"],
-                side=Side(row["side"]),
-                price=row["price"],
-                size=row["size"],
-                fee=row["fee"],
-                realized_pnl=row["realized_pnl"],
-                strategy=StrategyName(row["strategy"]),
-                paper=bool(row["paper"]),
-                timestamp=datetime.fromisoformat(row["timestamp"]),
-            )
-            self.update_from_trade(trade)
+            try:
+                trade = Trade(
+                    order_id=row["order_id"],
+                    market_id=row["market_id"],
+                    token_id=row["token_id"],
+                    side=Side(row["side"]),
+                    price=row["price"],
+                    size=row["size"],
+                    fee=row["fee"],
+                    realized_pnl=row["realized_pnl"],
+                    strategy=StrategyName(row["strategy"]),
+                    paper=bool(row["paper"]),
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                )
+                self.update_from_trade(trade)
+            except (ValueError, KeyError, TypeError) as e:
+                logger.warning(
+                    f"Skipping corrupted trade row (order_id={row.get('order_id', '?')}): {e}"
+                )
 
         if self._positions:
             logger.info(f"Loaded {len(self._positions)} open positions from DB")

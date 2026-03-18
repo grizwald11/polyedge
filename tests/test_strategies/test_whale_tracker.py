@@ -44,7 +44,7 @@ class TestWhaleTrackerStrategy:
                     wallet=f"whale-{i}",
                     market_id="FED-RATE",
                     direction=Direction.BUY_YES,
-                    entry_price=0.34,
+                    entry_price=0.40,  # Whales bought at $0.40, market is $0.34 — price edge
                     detected_at=now - timedelta(hours=18),
                 ),
             })

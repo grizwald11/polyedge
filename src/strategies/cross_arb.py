@@ -123,13 +123,14 @@ class CrossArbStrategy:
             edge = 1.0 - yes_sum
             # Buy the cheapest outcome (best risk/reward)
             cheapest = min(markets, key=lambda m: m.yes_price)
+            # Probability estimate: market price is the base, edge is the mispricing
             signals.append(Signal(
                 strategy=StrategyName.CROSS_ARB,
                 market_id=cheapest.ticker,
                 market_question=cheapest.question,
                 direction=Direction.BUY_YES,
                 edge=edge,
-                probability_estimate=cheapest.yes_price + edge / len(markets),
+                probability_estimate=min(0.99, cheapest.yes_price + edge),
                 market_price=cheapest.yes_price,
                 confidence=0.85,
                 reasoning=(
@@ -142,13 +143,14 @@ class CrossArbStrategy:
             edge = yes_sum - 1.0
             # Sell (buy NO on) the most expensive outcome
             most_expensive = max(markets, key=lambda m: m.yes_price)
+            # Our probability that NO wins = 1 - most_expensive.yes_price
             signals.append(Signal(
                 strategy=StrategyName.CROSS_ARB,
                 market_id=most_expensive.ticker,
                 market_question=most_expensive.question,
                 direction=Direction.BUY_NO,
                 edge=edge,
-                probability_estimate=1.0 - most_expensive.yes_price + edge / len(markets),
+                probability_estimate=1.0 - most_expensive.yes_price,
                 market_price=most_expensive.no_price,
                 confidence=0.85,
                 reasoning=(
@@ -237,22 +239,25 @@ class CrossArbStrategy:
         rel_type = relationship.get("relationship", "")
 
         if rel_type == "subset_ab":
-            # A is subset of B — A's YES should be <= B's YES
+            # A is subset of B — if A resolves YES, B must also resolve YES.
+            # Therefore B's YES price should be >= A's YES price.
+            # If A > B, we buy YES on B (the underpriced superset).
             if market_a.yes_price > market_b.yes_price + self.min_edge:
                 edge = market_a.yes_price - market_b.yes_price
+                # Our estimate for B's true YES probability: at least as high as A's
                 return Signal(
                     strategy=StrategyName.CROSS_ARB,
                     market_id=market_b.ticker,
                     market_question=market_b.question,
                     direction=Direction.BUY_YES,
                     edge=edge,
-                    probability_estimate=market_a.yes_price,
+                    probability_estimate=min(0.99, market_b.yes_price + edge),
                     market_price=market_b.yes_price,
                     confidence=relationship.get("confidence", 0.5),
                     reasoning=f"Subset arb: {market_a.ticker}(YES={market_a.yes_price:.2f}) ⊂ {market_b.ticker}(YES={market_b.yes_price:.2f})",
                 )
         elif rel_type == "subset_ba":
-            # B is subset of A
+            # B is subset of A — B YES → A YES must hold
             if market_b.yes_price > market_a.yes_price + self.min_edge:
                 edge = market_b.yes_price - market_a.yes_price
                 return Signal(
@@ -261,7 +266,7 @@ class CrossArbStrategy:
                     market_question=market_a.question,
                     direction=Direction.BUY_YES,
                     edge=edge,
-                    probability_estimate=market_b.yes_price,
+                    probability_estimate=min(0.99, market_a.yes_price + edge),
                     market_price=market_a.yes_price,
                     confidence=relationship.get("confidence", 0.5),
                     reasoning=f"Subset arb: {market_b.ticker}(YES={market_b.yes_price:.2f}) ⊂ {market_a.ticker}(YES={market_a.yes_price:.2f})",

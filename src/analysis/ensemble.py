@@ -49,11 +49,17 @@ def ensemble_forecast(
     Returns:
         EnsembleForecast with final combined probability
     """
-    market_weight = 1.0 - claude_weight
+    # Adaptive weighting: when Claude's confidence interval is wide,
+    # trust the market more. When Claude is very confident, trust Claude more.
+    ci_width = claude_forecast.confidence_high - claude_forecast.confidence_low
+    # Scale claude_weight down as CI widens: at CI=0 → full weight, at CI=0.5+ → reduced
+    ci_penalty = min(1.0, ci_width / 0.5)  # 0 to 1 as CI goes from 0 to 0.5
+    effective_claude_weight = claude_weight * (1.0 - ci_penalty * 0.3)  # At most 30% reduction
+    market_weight = 1.0 - effective_claude_weight
 
     # Weighted average
     final_prob = (
-        claude_forecast.probability * claude_weight
+        claude_forecast.probability * effective_claude_weight
         + market_price * market_weight
     )
 

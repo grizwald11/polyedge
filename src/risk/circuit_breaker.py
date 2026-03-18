@@ -38,11 +38,12 @@ class CircuitBreaker:
     def is_reduced_sizing(self) -> bool:
         return self._reduced_sizing
 
-    def check(self, bankroll: float) -> bool:
+    def check(self, bankroll: float, unrealized_pnl: float = 0.0) -> bool:
         """Run circuit breaker checks. Returns True if trading should continue.
 
         Args:
             bankroll: Current bankroll for loss limit calculation
+            unrealized_pnl: Unrealized P&L from open positions (typically negative)
 
         Returns:
             True if trading is allowed, False if halted
@@ -50,8 +51,9 @@ class CircuitBreaker:
         if self._halted:
             return False
 
-        # Check daily loss limit
+        # Check daily loss limit (realized + unrealized)
         daily_pnl = self.db.get_daily_pnl()
+        daily_pnl += unrealized_pnl  # Include open position losses
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
 
         if daily_pnl < -daily_limit:

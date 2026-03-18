@@ -75,13 +75,21 @@ class AlertManager:
         await self._dispatch(title, summary)
 
     async def _dispatch(self, title: str, body: str):
-        """Send alert to all registered backends with error isolation."""
+        """Send alert to all registered backends with error isolation.
+
+        Each backend gets a 10-second timeout to prevent a slow/dead endpoint
+        from blocking the trading loop.
+        """
+        import asyncio
+
         if not self._backends:
             logger.debug(f"No alert backends registered, logging: {title}")
             return
 
         for backend in self._backends:
             try:
-                await backend.send(title, body)
+                await asyncio.wait_for(backend.send(title, body), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"Alert backend {type(backend).__name__} timed out (>10s)")
             except Exception as e:
                 logger.warning(f"Alert backend {type(backend).__name__} failed: {e}")

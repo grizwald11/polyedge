@@ -128,9 +128,15 @@ class RiskEngine:
         if proposed_cost < MIN_TRADE_COST:
             failed.append(f"Trade too small: ${proposed_cost:.2f} < ${MIN_TRADE_COST:.2f} minimum")
 
-        # 8b. Edge minimum check
+        # 8b. Edge minimum check — edge must be positive (we have a favorable view)
+        # and exceed the strategy-specific threshold. Negative edge means we agree
+        # with the market, so there's nothing to trade.
         min_edge = self._get_min_edge(signal.strategy)
-        if abs(signal.edge) < min_edge:
+        if signal.edge <= 0:
+            failed.append(
+                f"Negative or zero edge: {signal.edge:.1%} — no favorable view"
+            )
+        elif signal.edge < min_edge:
             failed.append(
                 f"Edge too small: {signal.edge:.1%} < {min_edge:.1%} minimum "
                 f"for {signal.strategy.value}"

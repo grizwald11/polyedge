@@ -87,7 +87,7 @@ class ObviousNoStrategy:
             market_question=market.question,
             direction=Direction.BUY_NO,
             edge=edge,
-            probability_estimate=no_price,  # We think NO is ~100% likely
+            probability_estimate=min(0.99, no_price + edge),  # Our estimate of NO probability
             market_price=no_price,
             confidence=0.95,  # High confidence on obvious outcomes
             reasoning=(

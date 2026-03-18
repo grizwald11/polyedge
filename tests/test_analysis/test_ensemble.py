@@ -20,8 +20,11 @@ class TestEnsembleForecast:
     def test_weighted_average(self):
         forecast = _make_forecast(0.70)
         result = ensemble_forecast(forecast, market_price=0.50, claude_weight=0.7)
-        # 0.70 * 0.7 + 0.50 * 0.3 = 0.49 + 0.15 = 0.64
-        assert abs(result.final_probability - 0.64) < 0.01
+        # With adaptive weighting (CI width 0.2 → penalty factor 0.12),
+        # effective claude_weight ≈ 0.7 * (1 - 0.2/0.5 * 0.3) ≈ 0.616
+        # Result should be between market (0.50) and naive weighted (0.64)
+        assert 0.58 < result.final_probability < 0.66
+        assert result.final_probability > 0.50  # Still leans toward Claude
 
     def test_edge_positive(self):
         forecast = _make_forecast(0.70)

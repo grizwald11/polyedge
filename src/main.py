@@ -116,8 +116,9 @@ async def scan_and_trade(
     except Exception as e:
         logger.error(f"Stale order cancellation failed: {e}")
 
-    # Check circuit breaker
-    if not circuit_breaker.check(bankroll):
+    # Check circuit breaker (include unrealized losses from open positions)
+    unrealized_pnl = position_manager.get_total_unrealized_pnl()
+    if not circuit_breaker.check(bankroll, unrealized_pnl=unrealized_pnl):
         logger.warning("Circuit breaker active — skipping trade cycle")
         if settings.alerts.alert_on_circuit_breaker:
             try:
@@ -177,7 +178,7 @@ async def scan_and_trade(
         )
 
         result = await order_router.route_order(exit_order)
-        if result.success and result.trade:
+        if result is not None and result.success and result.trade:
             position_manager.update_from_trade(result.trade)
             logger.info(f"[EXIT] {position.market_id} — {exit_reason}")
             if settings.alerts.alert_on_trade:
@@ -300,7 +301,7 @@ async def scan_and_trade(
 
         # Route order
         result = await order_router.route_order(order)
-        if result.success and result.trade:
+        if result is not None and result.success and result.trade:
             # Update position tracker
             position_manager.update_from_trade(result.trade, market.question)
 
@@ -419,13 +420,23 @@ async def run_trading_loop(
                 logger.info(f"New trading day: previous day P&L=${yesterday_pnl:.2f}")
                 last_trading_day = today
 
+                # Daily maintenance: clean up old snapshots to prevent DB bloat
+                try:
+                    scanner.db.cleanup_old_snapshots(max_age_days=30)
+                except Exception as e:
+                    logger.warning(f"Snapshot cleanup failed: {e}")
+
             # Send daily report at configured time (once per day)
             now = datetime.now(timezone.utc)
             report_time = settings.alerts.daily_report_time
-            current_time = now.strftime("%H:%M")
+            try:
+                report_h, report_m = map(int, report_time.split(":"))
+                past_report_time = (now.hour > report_h) or (now.hour == report_h and now.minute >= report_m)
+            except (ValueError, AttributeError):
+                past_report_time = False
             if (
                 settings.alerts.enabled
-                and current_time >= report_time
+                and past_report_time
                 and _last_report_date != today
             ):
                 try:
@@ -435,14 +446,16 @@ async def run_trading_loop(
                     logger.error(f"Daily report failed: {e}")
 
             cycle_count += 1
-            await scan_and_trade(
+            # Hard timeout: if any individual scan cycle hangs (stuck API call,
+            # unresponsive Claude, etc.), abort it and try again next cycle.
+            await asyncio.wait_for(scan_and_trade(
                 scanner, ai_strategy, no_strategy, news_strategy,
                 cross_arb_strategy, whale_strategy, market_graph,
                 risk_engine, kelly_sizer,
                 circuit_breaker, order_builder, order_router, position_manager,
                 calibration, resolution_tracker, calibration_analyzer,
                 fill_tracker, alert_manager, metrics, settings, cycle_count,
-            )
+            ), timeout=300)  # 5-minute hard timeout per cycle
             stats = scanner.db.get_stats()
             logger.info(
                 f"DB stats: {stats['active_markets']} markets, "
@@ -453,6 +466,8 @@ async def run_trading_loop(
         except KeyboardInterrupt:
             logger.info("Shutting down...")
             break
+        except asyncio.TimeoutError:
+            logger.error("Trade cycle timed out (>5 minutes) — skipping")
         except Exception as e:
             logger.error(f"Trade cycle failed: {e}", exc_info=True)
 
@@ -601,9 +616,14 @@ async def main():
     ws_task = None
     if settings.kalshi_api_key_id and settings.kalshi_private_key_path:
         try:
-            ws_host = settings.kalshi.active_host.replace("https://", "wss://") + "/ws/v2"
-            # Strip /v2 duplication if host already ends with /v2
-            ws_host = ws_host.replace("/v2/ws/v2", "/ws/v2")
+            # Build WebSocket URL: strip the REST path suffix and add WS path
+            base = settings.kalshi.active_host.replace("https://", "wss://")
+            # Remove /trade-api/v2 or /v2 suffix if present to get the base host
+            for suffix in ("/trade-api/v2", "/v2"):
+                if base.endswith(suffix):
+                    base = base[:-len(suffix)]
+                    break
+            ws_host = base.rstrip("/") + "/trade-api/ws/v2"
             ws_client = KalshiWebSocket(
                 host=ws_host,
                 api_key_id=settings.kalshi_api_key_id,
@@ -612,8 +632,10 @@ async def main():
             ws_client.set_channels(["ticker", "fill", "market_lifecycle_v2"])
 
             async def _on_price(update: TickerUpdate):
-                no_price = 1.0 - update.price if update.price > 0 else 0.0
-                position_manager.update_price(update.market_ticker, update.price, no_price)
+                # Use yes_bid as the YES price when available (more accurate than last trade)
+                yes_price = update.yes_bid if update.yes_bid > 0 else update.price
+                no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
+                position_manager.update_price(update.market_ticker, yes_price, no_price)
 
             async def _on_fill(update: FillUpdate):
                 trade = await fill_tracker.handle_ws_fill(update)
@@ -655,13 +677,33 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")
     finally:
-        if ws_client is not None:
-            await ws_client.close()
+        # Graceful shutdown: close each component independently so one
+        # failure doesn't prevent cleanup of the others.
+        try:
+            if ws_client is not None:
+                await ws_client.close()
+        except Exception as e:
+            logger.warning(f"WebSocket close failed: {e}")
+
         if ws_task is not None:
             ws_task.cancel()
+            try:
+                await ws_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
         if dashboard_task is not None:
             dashboard_task.cancel()
-        await discovery.close()
+            try:
+                await dashboard_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        try:
+            await discovery.close()
+        except Exception as e:
+            logger.warning(f"Discovery close failed: {e}")
+
         logger.info("PolyEdge stopped.")
 
 

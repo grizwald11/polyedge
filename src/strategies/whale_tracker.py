@@ -96,13 +96,18 @@ class WhaleTrackerStrategy:
             current_price = market.no_price
             avg_entry = consensus.avg_entry_price
 
-        # Edge combines two components:
-        # 1. Price edge: can we buy cheaper than whales did?
-        # 2. Consensus edge: strong agreement from proven traders is itself signal
-        price_edge = max(0.0, avg_entry - current_price) if avg_entry > 0 else 0.0
-        consensus_edge = consensus.consensus_pct * 0.03  # Small informational edge
+        # Edge is derived from the price difference between whale entry and
+        # current market. If whales bought at $0.55 and market is now $0.50,
+        # that's a $0.05 edge — we can enter cheaper than proven traders did.
+        # If there's no price edge (we can't buy cheaper), there's no signal.
+        if avg_entry <= 0:
+            return None
+        price_edge = avg_entry - current_price
+        if price_edge <= 0:
+            # We can't buy cheaper than the whales — no edge
+            return None
 
-        edge = max(0.01, price_edge + consensus_edge)
+        edge = price_edge
         probability_estimate = min(0.99, current_price + edge)
 
         if edge < self.min_edge:

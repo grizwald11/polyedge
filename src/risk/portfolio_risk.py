@@ -28,10 +28,19 @@ class PortfolioRisk:
 
         Markets in the same Kalshi event (same event_ticker) are fully correlated.
         Returns total cost_basis of positions in the same event.
+
+        If event_ticker is unknown, falls back to treating the market as its
+        own event (returns only that market's exposure). This prevents treating
+        unknown markets as having zero correlation, which could allow
+        over-concentration.
         """
         event_ticker = self._get_event_ticker(market_id)
         if not event_ticker:
-            return 0.0
+            # Fallback: use market_id itself as the "event" — this ensures we
+            # at least count our own exposure in this market, rather than
+            # returning 0 and silently allowing correlated overexposure.
+            pos = self.positions.get_position(market_id)
+            return pos.cost_basis if pos else 0.0
 
         total = 0.0
         for pos in self.positions.get_all_positions():

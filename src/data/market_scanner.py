@@ -92,9 +92,11 @@ class MarketScanner:
                 reasons["no_price"] += 1
                 continue
 
-            # Price sum must be roughly 1.0 (reject corrupt/stale data)
+            # Price sum must be roughly 1.0 (reject corrupt/stale data).
+            # Kalshi binary markets should always have YES + NO = 1.0.
+            # Allow small tolerance for floating point and API rounding.
             price_sum = m.yes_price + m.no_price
-            if price_sum < 0.90 or price_sum > 1.10:
+            if price_sum < 0.95 or price_sum > 1.05:
                 reasons["invalid_prices"] += 1
                 continue
 

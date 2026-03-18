@@ -57,6 +57,17 @@ class KellySizer:
         Returns:
             Number of contracts (integers, minimum 1 if any edge exists)
         """
+        # Validate inputs — NaN/infinity can propagate from upstream division
+        # by zero or malformed API responses and would corrupt sizing.
+        if (
+            not math.isfinite(edge) or not math.isfinite(probability)
+            or not math.isfinite(bankroll) or not math.isfinite(current_exposure)
+        ):
+            logger.warning(
+                f"Kelly: non-finite input detected (edge={edge}, prob={probability}, "
+                f"bankroll={bankroll}, exposure={current_exposure}) — returning 0"
+            )
+            return 0
         if edge <= 0 or probability <= 0 or probability >= 1 or bankroll <= 0:
             return 0
 
