@@ -704,6 +704,16 @@ async def main():
         except Exception as e:
             logger.warning(f"Discovery close failed: {e}")
 
+        try:
+            await kalshi.close()
+        except Exception as e:
+            logger.warning(f"Kalshi client close failed: {e}")
+
+        try:
+            db.close()
+        except Exception as e:
+            logger.warning(f"Database close failed: {e}")
+
         logger.info("PolyEdge stopped.")
 
 

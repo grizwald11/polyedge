@@ -80,20 +80,35 @@ class DataEnricher:
             market.question, market.yes_price
         )
 
-        # Run all concurrently with a hard timeout, catch individual failures
+        # Run all concurrently with a hard timeout, preserving partial results
         results: dict[str, str] = {}
-        try:
-            gathered = await asyncio.wait_for(
-                asyncio.gather(
-                    *[self._safe_fetch(name, coro) for name, coro in tasks.items()],
-                    return_exceptions=False,
-                ),
-                timeout=30,  # 30s hard timeout for all data sources combined
-            )
-            for (name, result) in gathered:
+        wrapped_tasks = [
+            asyncio.create_task(self._safe_fetch(name, coro))
+            for name, coro in tasks.items()
+        ]
+        done, pending = await asyncio.wait(wrapped_tasks, timeout=30)
+
+        # Collect results from completed tasks
+        for task in done:
+            try:
+                name, result = task.result()
                 results[name] = result
-        except asyncio.TimeoutError:
-            logger.warning("Data enrichment timed out after 30s — using partial results")
+            except Exception:
+                pass  # _safe_fetch already handles exceptions
+
+        # Cancel any still-pending tasks
+        if pending:
+            pending_names = []
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            logger.warning(
+                f"Data enrichment: {len(pending)} sources timed out after 30s, "
+                f"{len(done)} completed"
+            )
 
         # Assemble in priority order
         sections: list[str] = []
