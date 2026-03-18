@@ -39,7 +39,7 @@ trading:
   max_obvious_no_pct: 0.10      # Max 10% bankroll in obvious NO positions
 
 claude:
-  model_primary: "claude-sonnet-4-6"
+  model_primary: "claude-opus-4-6"
   model_highstakes: "claude-opus-4-6"
   highstakes_threshold: 50.0    # Use Opus for positions > $50
   max_tokens: 2000
