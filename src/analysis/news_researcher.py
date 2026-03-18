@@ -1,7 +1,7 @@
 """News researcher — enriches Claude's probability assessments with real-time context.
 
-Uses Brave Search API to find recent news relevant to a market question,
-then formats a concise context block for injection into Claude prompts.
+Uses Serper.dev (Google Search API) to find recent news relevant to a market
+question, then formats a concise context block for injection into Claude prompts.
 Gracefully degrades if no API key is configured.
 """
 
@@ -16,8 +16,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
-MAX_RESULTS_PER_QUERY = 3
+SERPER_SEARCH_URL = "https://google.serper.dev/search"
+MAX_RESULTS_PER_QUERY = 5
 MAX_QUERIES = 3
 MAX_CONTEXT_CHARS = 3200  # ~800 tokens
 
@@ -35,8 +35,8 @@ class NewsResult:
 class NewsResearcher:
     """Fetches recent news context for market probability assessments."""
 
-    def __init__(self, brave_api_key: Optional[str] = None):
-        self.brave_api_key = brave_api_key
+    def __init__(self, serper_api_key: Optional[str] = None):
+        self.serper_api_key = serper_api_key
 
     def generate_queries(self, market_question: str) -> list[str]:
         """Generate 2-3 targeted search queries from a market question.
@@ -69,32 +69,32 @@ class NewsResearcher:
 
         return queries[:MAX_QUERIES]
 
-    async def search_brave(self, query: str) -> list[NewsResult]:
-        """Search Brave API for a single query. Returns top results."""
-        if not self.brave_api_key:
+    async def search(self, query: str) -> list[NewsResult]:
+        """Search Serper.dev for a single query. Returns top results."""
+        if not self.serper_api_key:
             return []
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    BRAVE_SEARCH_URL,
-                    params={"q": query, "count": MAX_RESULTS_PER_QUERY, "freshness": "pw"},
-                    headers={"X-Subscription-Token": self.brave_api_key},
+                response = await client.post(
+                    SERPER_SEARCH_URL,
+                    json={"q": query, "num": MAX_RESULTS_PER_QUERY},
+                    headers={"X-API-KEY": self.serper_api_key},
                 )
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as e:
-            logger.warning(f"Brave search failed for '{query}': {e}")
+            logger.warning(f"Serper search failed for '{query}': {e}")
             return []
 
         results = []
-        for item in data.get("web", {}).get("results", [])[:MAX_RESULTS_PER_QUERY]:
+        for item in data.get("organic", [])[:MAX_RESULTS_PER_QUERY]:
             results.append(NewsResult(
                 title=item.get("title", ""),
-                snippet=item.get("description", ""),
-                source=_extract_source(item.get("url", "")),
-                date=_extract_date(item.get("age", "")),
-                url=item.get("url", ""),
+                snippet=item.get("snippet", ""),
+                source=_extract_source(item.get("link", "")),
+                date=item.get("date", ""),
+                url=item.get("link", ""),
             ))
         return results
 
@@ -104,8 +104,8 @@ class NewsResearcher:
         Returns a formatted text block ready for prompt injection.
         Returns empty string if no API key or no results found.
         """
-        if not self.brave_api_key:
-            logger.debug("No Brave API key configured, skipping news research")
+        if not self.serper_api_key:
+            logger.debug("No Serper API key configured, skipping news research")
             return ""
 
         queries = self.generate_queries(market_question)
@@ -113,7 +113,7 @@ class NewsResearcher:
         seen_urls: set[str] = set()
 
         for query in queries:
-            results = await self.search_brave(query)
+            results = await self.search(query)
             for r in results:
                 if r.url not in seen_urls:
                     seen_urls.add(r.url)
@@ -161,8 +161,3 @@ def _extract_source(url: str) -> str:
         return host
     except Exception:
         return url
-
-
-def _extract_date(age_string: str) -> str:
-    """Convert Brave's 'age' field (e.g. '2 days ago') to a readable date."""
-    return age_string if age_string else ""

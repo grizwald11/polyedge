@@ -45,33 +45,31 @@ class TestGenerateQueries:
         assert len(queries) >= 2
 
 
-class TestSearchBrave:
+class TestSearch:
     @pytest.mark.asyncio
     async def test_no_api_key_returns_empty(self):
-        researcher = NewsResearcher(brave_api_key=None)
-        results = await researcher.search_brave("test query")
+        researcher = NewsResearcher(serper_api_key=None)
+        results = await researcher.search("test query")
         assert results == []
 
     @pytest.mark.asyncio
     async def test_successful_search(self):
-        researcher = NewsResearcher(brave_api_key="test-key")
+        researcher = NewsResearcher(serper_api_key="test-key")
         mock_response_data = {
-            "web": {
-                "results": [
-                    {
-                        "title": "DHS Funding Bill Stalls in Senate",
-                        "description": "Senate leaders failed to reach agreement...",
-                        "url": "https://www.reuters.com/article/dhs-funding",
-                        "age": "2 days ago",
-                    },
-                    {
-                        "title": "House Passes DHS Bill",
-                        "description": "The House narrowly approved...",
-                        "url": "https://apnews.com/article/dhs-bill",
-                        "age": "5 days ago",
-                    },
-                ]
-            }
+            "organic": [
+                {
+                    "title": "DHS Funding Bill Stalls in Senate",
+                    "snippet": "Senate leaders failed to reach agreement...",
+                    "link": "https://www.reuters.com/article/dhs-funding",
+                    "date": "2 days ago",
+                },
+                {
+                    "title": "House Passes DHS Bill",
+                    "snippet": "The House narrowly approved...",
+                    "link": "https://apnews.com/article/dhs-bill",
+                    "date": "5 days ago",
+                },
+            ]
         }
 
         mock_response = MagicMock()
@@ -80,12 +78,12 @@ class TestSearchBrave:
 
         with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.post = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            results = await researcher.search_brave("DHS funding bill")
+            results = await researcher.search("DHS funding bill")
 
         assert len(results) == 2
         assert results[0].title == "DHS Funding Bill Stalls in Senate"
@@ -94,35 +92,35 @@ class TestSearchBrave:
 
     @pytest.mark.asyncio
     async def test_http_error_returns_empty(self):
-        researcher = NewsResearcher(brave_api_key="test-key")
+        researcher = NewsResearcher(serper_api_key="test-key")
 
         with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
-            mock_client.get = AsyncMock(side_effect=httpx.HTTPError("timeout"))
+            mock_client.post = AsyncMock(side_effect=httpx.HTTPError("timeout"))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            results = await researcher.search_brave("test")
+            results = await researcher.search("test")
 
         assert results == []
 
     @pytest.mark.asyncio
     async def test_empty_response(self):
-        researcher = NewsResearcher(brave_api_key="test-key")
+        researcher = NewsResearcher(serper_api_key="test-key")
 
         mock_response = MagicMock()
-        mock_response.json.return_value = {"web": {"results": []}}
+        mock_response.json.return_value = {"organic": []}
         mock_response.raise_for_status = MagicMock()
 
         with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.post = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            results = await researcher.search_brave("nothing here")
+            results = await researcher.search("nothing here")
 
         assert results == []
 
@@ -130,13 +128,13 @@ class TestSearchBrave:
 class TestGetContext:
     @pytest.mark.asyncio
     async def test_no_api_key_returns_empty_string(self):
-        researcher = NewsResearcher(brave_api_key=None)
+        researcher = NewsResearcher(serper_api_key=None)
         context = await researcher.get_context("Will X happen?")
         assert context == ""
 
     @pytest.mark.asyncio
     async def test_formats_context_block(self):
-        researcher = NewsResearcher(brave_api_key="test-key")
+        researcher = NewsResearcher(serper_api_key="test-key")
 
         mock_results = [
             NewsResult(
@@ -155,7 +153,7 @@ class TestGetContext:
             ),
         ]
 
-        with patch.object(researcher, "search_brave", new_callable=AsyncMock) as mock_search:
+        with patch.object(researcher, "search", new_callable=AsyncMock) as mock_search:
             mock_search.return_value = mock_results
             context = await researcher.get_context("Will X happen?")
 
@@ -167,7 +165,7 @@ class TestGetContext:
 
     @pytest.mark.asyncio
     async def test_deduplicates_results(self):
-        researcher = NewsResearcher(brave_api_key="test-key")
+        researcher = NewsResearcher(serper_api_key="test-key")
 
         same_result = NewsResult(
             title="Same Article",
@@ -177,7 +175,7 @@ class TestGetContext:
             url="https://cnn.com/same",
         )
 
-        with patch.object(researcher, "search_brave", new_callable=AsyncMock) as mock_search:
+        with patch.object(researcher, "search", new_callable=AsyncMock) as mock_search:
             # All queries return the same result
             mock_search.return_value = [same_result]
             context = await researcher.get_context("Will X happen?")
