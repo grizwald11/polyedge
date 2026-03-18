@@ -44,7 +44,7 @@ from src.strategies.whale_tracker import WhaleTrackerStrategy
 from src.data.news_ingestion import NewsIngestion
 from src.data.market_graph import MarketGraph
 from src.data.whale_monitor import WhaleMonitor
-from src.core.websocket_client import KalshiWebSocket, TickerUpdate
+from src.core.websocket_client import KalshiWebSocket, TickerUpdate, FillUpdate
 
 
 def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log"):
@@ -514,7 +514,13 @@ async def main():
                 no_price = 1.0 - update.price if update.price > 0 else 0.0
                 position_manager.update_price(update.market_ticker, update.price, no_price)
 
+            async def _on_fill(update: FillUpdate):
+                trade = await fill_tracker.handle_ws_fill(update)
+                if trade:
+                    position_manager.update_from_trade(trade)
+
             ws_client.on_price_update(_on_price)
+            ws_client.on_fill(_on_fill)
             ws_task = asyncio.create_task(ws_client.connect())
             logger.info(f"WebSocket client starting: {ws_host}")
         except Exception as e:

@@ -1,0 +1,50 @@
+# Market category definitions and priority weights.
+# Higher weight = more Claude API budget allocated to this category.
+# Categories not listed here get weight 1.0 by default.
+
+categories:
+  Politics:
+    weight: 1.5
+    description: "Elections, nominations, policy decisions"
+    keywords: ["election", "vote", "president", "nominee", "congress", "senate", "house"]
+
+  Geopolitics:
+    weight: 1.3
+    description: "International events, conflicts, treaties"
+    keywords: ["war", "conflict", "treaty", "sanctions", "NATO", "UN", "invasion"]
+
+  Fed/Macro:
+    weight: 1.5
+    description: "Interest rates, CPI, employment, GDP"
+    keywords: ["fed", "fomc", "rate", "cpi", "inflation", "gdp", "employment", "jobs"]
+
+  Tech/AI:
+    weight: 1.2
+    description: "Product launches, AI benchmarks, regulatory"
+    keywords: ["ai", "artificial intelligence", "benchmark", "launch", "tech", "model"]
+
+  Culture:
+    weight: 0.8
+    description: "Awards, entertainment, viral events"
+    keywords: ["oscar", "grammy", "emmy", "award", "movie", "album"]
+
+  Earnings:
+    weight: 1.0
+    description: "Corporate earnings reports"
+    keywords: ["earnings", "revenue", "profit", "quarterly"]
+
+  Crypto:
+    weight: 0.0
+    description: "Crypto price markets — excluded (HFT dominated, fees)"
+    keywords: ["bitcoin", "btc", "eth", "crypto"]
+
+  Sports:
+    weight: 0.0
+    description: "Sports markets — excluded (fees, efficient pricing)"
+    keywords: ["nba", "nfl", "mlb", "ncaa", "game", "match"]
+
+# Resolution time preferences (days to resolution)
+resolution_preferences:
+  ideal_min: 3       # Markets resolving too soon are hard to trade
+  ideal_max: 90      # Markets too far out have high uncertainty
+  max_allowed: 365   # Absolute maximum

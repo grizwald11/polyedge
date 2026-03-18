@@ -23,12 +23,18 @@ POLL_STATES_TERMINAL = {"executed", "canceled", "pending"}
 
 
 class FillTracker:
-    """Tracks pending live orders and detects fills/cancellations."""
+    """Tracks pending live orders and detects fills/cancellations.
+
+    Supports two modes:
+    - REST polling: check_fills() polls Kalshi API for order status
+    - WebSocket: handle_ws_fill() processes real-time fill notifications
+    """
 
     def __init__(self, kalshi: KalshiClient, db: Database):
         self.kalshi = kalshi
         self.db = db
         self._pending_orders: dict[str, Order] = {}  # order_id -> Order
+        self._ws_fills: list[Trade] = []  # Fills received via WebSocket
 
     def track(self, order: Order):
         """Register an order for fill tracking."""
@@ -73,6 +79,39 @@ class FillTracker:
         if fills:
             logger.info(f"Fill tracker: {len(fills)} new fills detected")
 
+        return fills
+
+    async def handle_ws_fill(self, fill_update) -> Optional[Trade]:
+        """Handle a fill notification from the WebSocket.
+
+        Args:
+            fill_update: FillUpdate from the WebSocket client
+
+        Returns:
+            Trade if the fill matches a tracked order, None otherwise
+        """
+        order_id = fill_update.order_id
+        order = self._pending_orders.get(order_id)
+        if order is None:
+            logger.debug(f"WebSocket fill for untracked order {order_id}")
+            return None
+
+        # Build a minimal kalshi_data dict for _record_fill
+        kalshi_data = {
+            "order_id": order_id,
+            "status": "executed",
+        }
+        trade = self._record_fill(order, kalshi_data)
+        if trade:
+            self._pending_orders.pop(order_id, None)
+            self._ws_fills.append(trade)
+            logger.info(f"WebSocket fill detected for {order_id}")
+        return trade
+
+    def drain_ws_fills(self) -> list[Trade]:
+        """Return and clear any fills received via WebSocket since last drain."""
+        fills = self._ws_fills[:]
+        self._ws_fills.clear()
         return fills
 
     def _record_fill(self, order: Order, kalshi_data: dict) -> Optional[Trade]:
