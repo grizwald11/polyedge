@@ -206,7 +206,10 @@ async def run_backtest(
 
         # Step 3: Initialize Claude forecaster and news researcher
         forecaster = ClaudeForecaster(settings)
-        news_researcher = NewsResearcher(serper_api_key=settings.serper_api_key)
+        news_researcher = NewsResearcher(
+            serper_api_key=settings.serper_api_key,
+            searxng_url=settings.searxng_url,
+        )
 
         # Step 4: Process each market
         print(f"\nBacktesting {len(backtestable)} markets...")

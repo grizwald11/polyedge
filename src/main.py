@@ -298,6 +298,10 @@ async def scan_and_trade(
             contracts = max(1, int(contracts * cb_mult))
 
         if contracts <= 0:
+            logger.debug(
+                f"Kelly sized to 0 contracts for {signal.market_id} "
+                f"(exposure=${current_exposure:.2f}, edge={signal.edge:.1%})"
+            )
             continue
 
         # Build order first to get fee-inclusive cost

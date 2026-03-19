@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 import pytest
 
-from src.analysis.news_researcher import NewsResearcher, NewsResult, _extract_source
+from src.analysis.news_researcher import (
+    NewsResearcher, NewsResult, _extract_source,
+)
 
 
 class TestGenerateQueries:
@@ -16,7 +18,6 @@ class TestGenerateQueries:
         )
         assert len(queries) >= 2
         assert len(queries) <= 3
-        # First query should be the cleaned question
         assert "Will" not in queries[0]
         assert "DHS" in queries[0]
 
@@ -34,7 +35,6 @@ class TestGenerateQueries:
     def test_includes_time_scoped_query(self):
         researcher = NewsResearcher()
         queries = researcher.generate_queries("Will Trump win 2028?")
-        # Second query should have time scope
         assert any("2026" in q for q in queries)
 
     def test_extracts_entities(self):
@@ -47,51 +47,122 @@ class TestGenerateQueries:
 
 class TestSearch:
     @pytest.mark.asyncio
-    async def test_no_api_key_returns_empty(self):
+    async def test_ddg_results_returned(self):
+        """DDG results are returned when available."""
+        researcher = NewsResearcher()
+        ddg_result = NewsResult(
+            title="DDG Result", snippet="From DDG", source="cnn.com",
+            date="2026-03-19", url="https://cnn.com/1",
+        )
+
+        with patch.object(researcher, "_search_ddg", new_callable=AsyncMock) as mock_ddg:
+            mock_ddg.return_value = [ddg_result]
+            results = await researcher.search("test query")
+
+        assert len(results) == 1
+        assert results[0].title == "DDG Result"
+
+    @pytest.mark.asyncio
+    async def test_serper_fallback_when_ddg_fails(self):
+        """When DDG returns nothing, Serper fallback is used."""
+        researcher = NewsResearcher(serper_api_key="test-key")
+
+        serper_data = {
+            "organic": [
+                {
+                    "title": "Serper Result",
+                    "snippet": "From Serper...",
+                    "link": "https://reuters.com/serper",
+                    "date": "1 day ago",
+                },
+            ]
+        }
+
+        mock_serper_response = MagicMock()
+        mock_serper_response.json.return_value = serper_data
+        mock_serper_response.raise_for_status = MagicMock()
+
+        with patch.object(researcher, "_search_ddg", new_callable=AsyncMock) as mock_ddg:
+            mock_ddg.return_value = []
+
+            with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.post = AsyncMock(return_value=mock_serper_response)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+
+                results = await researcher.search("test query")
+
+        assert len(results) == 1
+        assert results[0].title == "Serper Result"
+
+    @pytest.mark.asyncio
+    async def test_serper_not_tried_when_ddg_succeeds(self):
+        """When DDG returns results, Serper is not called."""
+        researcher = NewsResearcher(serper_api_key="test-key")
+
+        ddg_result = NewsResult(
+            title="DDG Result", snippet="From DDG", source="cnn.com",
+            date="", url="https://cnn.com/1",
+        )
+
+        with patch.object(researcher, "_search_ddg", new_callable=AsyncMock) as mock_ddg:
+            mock_ddg.return_value = [ddg_result]
+
+            with patch.object(researcher, "_search_serper", new_callable=AsyncMock) as mock_serper:
+                results = await researcher.search("test query")
+                mock_serper.assert_not_called()
+
+        assert len(results) == 1
+        assert results[0].title == "DDG Result"
+
+    @pytest.mark.asyncio
+    async def test_no_serper_key_no_fallback(self):
+        """Without Serper key, DDG failure returns empty."""
         researcher = NewsResearcher(serper_api_key=None)
-        results = await researcher.search("test query")
+
+        with patch.object(researcher, "_search_ddg", new_callable=AsyncMock) as mock_ddg:
+            mock_ddg.return_value = []
+            results = await researcher.search("test query")
+
         assert results == []
 
     @pytest.mark.asyncio
-    async def test_successful_search(self):
+    async def test_ddg_unavailable_uses_serper(self):
+        """When DDG_AVAILABLE is False, Serper is used directly."""
         researcher = NewsResearcher(serper_api_key="test-key")
-        mock_response_data = {
+
+        serper_data = {
             "organic": [
                 {
-                    "title": "DHS Funding Bill Stalls in Senate",
-                    "snippet": "Senate leaders failed to reach agreement...",
-                    "link": "https://www.reuters.com/article/dhs-funding",
-                    "date": "2 days ago",
-                },
-                {
-                    "title": "House Passes DHS Bill",
-                    "snippet": "The House narrowly approved...",
-                    "link": "https://apnews.com/article/dhs-bill",
-                    "date": "5 days ago",
+                    "title": "Serper Only",
+                    "snippet": "...",
+                    "link": "https://example.com/1",
+                    "date": "",
                 },
             ]
         }
 
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = serper_data
         mock_response.raise_for_status = MagicMock()
 
-        with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
+        with patch("src.analysis.news_researcher.DDG_AVAILABLE", False):
+            with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.post = AsyncMock(return_value=mock_response)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
 
-            results = await researcher.search("DHS funding bill")
+                results = await researcher.search("test query")
 
-        assert len(results) == 2
-        assert results[0].title == "DHS Funding Bill Stalls in Senate"
-        assert results[0].source == "reuters.com"
-        assert results[1].date == "5 days ago"
+        assert len(results) == 1
+        assert results[0].title == "Serper Only"
 
     @pytest.mark.asyncio
-    async def test_http_error_returns_empty(self):
+    async def test_serper_http_error_returns_empty(self):
         researcher = NewsResearcher(serper_api_key="test-key")
 
         with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
@@ -101,40 +172,110 @@ class TestSearch:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            results = await researcher.search("test")
+            results = await researcher._search_serper("test")
 
         assert results == []
 
+
+class TestDDGSearch:
     @pytest.mark.asyncio
-    async def test_empty_response(self):
-        researcher = NewsResearcher(serper_api_key="test-key")
+    async def test_ddg_news_search(self):
+        """Test DDG news search via duckduckgo-search library."""
+        researcher = NewsResearcher()
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"organic": []}
-        mock_response.raise_for_status = MagicMock()
+        mock_ddgs = MagicMock()
+        mock_ddgs.__enter__ = MagicMock(return_value=mock_ddgs)
+        mock_ddgs.__exit__ = MagicMock(return_value=False)
+        mock_ddgs.news.return_value = [
+            {
+                "title": "Breaking News",
+                "body": "Something important happened...",
+                "source": "Reuters",
+                "date": "2026-03-19T10:00:00",
+                "url": "https://reuters.com/article/1",
+            },
+        ]
 
-        with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
+        with patch("src.analysis.news_researcher.DDG_AVAILABLE", True):
+            with patch("src.analysis.news_researcher.DDGS", return_value=mock_ddgs):
+                results = await researcher._search_ddg("test query")
 
-            results = await researcher.search("nothing here")
+        assert len(results) == 1
+        assert results[0].title == "Breaking News"
+        assert results[0].source == "Reuters"
+
+    @pytest.mark.asyncio
+    async def test_ddg_falls_back_to_text_search(self):
+        """When DDG news returns nothing, falls back to text search."""
+        researcher = NewsResearcher()
+
+        mock_ddgs_news = MagicMock()
+        mock_ddgs_news.__enter__ = MagicMock(return_value=mock_ddgs_news)
+        mock_ddgs_news.__exit__ = MagicMock(return_value=False)
+        mock_ddgs_news.news.return_value = []  # No news results
+
+        mock_ddgs_text = MagicMock()
+        mock_ddgs_text.__enter__ = MagicMock(return_value=mock_ddgs_text)
+        mock_ddgs_text.__exit__ = MagicMock(return_value=False)
+        mock_ddgs_text.text.return_value = [
+            {
+                "title": "Text Result",
+                "body": "From text search...",
+                "href": "https://example.com/1",
+            },
+        ]
+
+        call_count = 0
+
+        def mock_ddgs_factory(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return mock_ddgs_news
+            return mock_ddgs_text
+
+        with patch("src.analysis.news_researcher.DDG_AVAILABLE", True):
+            with patch("src.analysis.news_researcher.DDGS", side_effect=mock_ddgs_factory):
+                results = await researcher._search_ddg("test query")
+
+        assert len(results) == 1
+        assert results[0].title == "Text Result"
+
+    @pytest.mark.asyncio
+    async def test_ddg_exception_returns_empty(self):
+        """DDG exceptions are caught and return empty list."""
+        researcher = NewsResearcher()
+
+        mock_ddgs = MagicMock()
+        mock_ddgs.__enter__ = MagicMock(return_value=mock_ddgs)
+        mock_ddgs.__exit__ = MagicMock(return_value=False)
+        mock_ddgs.news.side_effect = Exception("rate limited")
+
+        mock_ddgs_text = MagicMock()
+        mock_ddgs_text.__enter__ = MagicMock(return_value=mock_ddgs_text)
+        mock_ddgs_text.__exit__ = MagicMock(return_value=False)
+        mock_ddgs_text.text.side_effect = Exception("also failed")
+
+        call_count = 0
+
+        def mock_ddgs_factory(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return mock_ddgs
+            return mock_ddgs_text
+
+        with patch("src.analysis.news_researcher.DDG_AVAILABLE", True):
+            with patch("src.analysis.news_researcher.DDGS", side_effect=mock_ddgs_factory):
+                results = await researcher._search_ddg("test query")
 
         assert results == []
 
 
 class TestGetContext:
     @pytest.mark.asyncio
-    async def test_no_api_key_returns_empty_string(self):
-        researcher = NewsResearcher(serper_api_key=None)
-        context = await researcher.get_context("Will X happen?")
-        assert context == ""
-
-    @pytest.mark.asyncio
     async def test_formats_context_block(self):
-        researcher = NewsResearcher(serper_api_key="test-key")
+        researcher = NewsResearcher()
 
         mock_results = [
             NewsResult(
@@ -165,7 +306,7 @@ class TestGetContext:
 
     @pytest.mark.asyncio
     async def test_deduplicates_results(self):
-        researcher = NewsResearcher(serper_api_key="test-key")
+        researcher = NewsResearcher()
 
         same_result = NewsResult(
             title="Same Article",
@@ -176,12 +317,20 @@ class TestGetContext:
         )
 
         with patch.object(researcher, "search", new_callable=AsyncMock) as mock_search:
-            # All queries return the same result
             mock_search.return_value = [same_result]
             context = await researcher.get_context("Will X happen?")
 
-        # Should only appear once despite multiple queries
         assert context.count('"Same Article"') == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_results_returns_empty_string(self):
+        researcher = NewsResearcher()
+
+        with patch.object(researcher, "search", new_callable=AsyncMock) as mock_search:
+            mock_search.return_value = []
+            context = await researcher.get_context("Will X happen?")
+
+        assert context == ""
 
 
 class TestFormatContext:

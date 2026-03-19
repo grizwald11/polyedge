@@ -401,5 +401,7 @@ async def start_dashboard(
         await server.serve()
     except ImportError:
         logger.info("uvicorn not installed — dashboard disabled")
+    except SystemExit:
+        logger.warning(f"Dashboard failed to bind port {port} (address in use)")
     except Exception as e:
         logger.error(f"Dashboard failed: {e}")

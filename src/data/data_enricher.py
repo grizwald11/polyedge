@@ -36,7 +36,10 @@ class DataEnricher:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.news_researcher = NewsResearcher(serper_api_key=settings.serper_api_key)
+        self.news_researcher = NewsResearcher(
+            serper_api_key=settings.serper_api_key,
+            searxng_url=settings.searxng_url,
+        )
         self.fred = FREDClient(api_key=settings.fred_api_key)
         self.cleveland_fed = ClevelandFedNowcast()
         self.fedwatch = FedWatchClient()

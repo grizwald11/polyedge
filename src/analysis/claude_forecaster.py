@@ -30,7 +30,10 @@ class ClaudeForecaster:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._client: Optional[anthropic.AsyncAnthropic] = None
-        self.news_researcher = NewsResearcher(serper_api_key=settings.serper_api_key)
+        self.news_researcher = NewsResearcher(
+            serper_api_key=settings.serper_api_key,
+            searxng_url=settings.searxng_url,
+        )
 
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:

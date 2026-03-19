@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -163,13 +164,17 @@ class Settings(BaseModel):
     kalshi_private_key_path: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     serper_api_key: Optional[str] = None
+    searxng_url: Optional[str] = None
     fred_api_key: Optional[str] = None
     live_enabled: bool = False
 
 
 def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     """Load settings from YAML file and overlay environment variables."""
+    # Load .env file (relative to config_path's parent directory)
     config_path = Path(config_path)
+    env_path = config_path.parent / ".env"
+    load_dotenv(env_path)
 
     # Load YAML if it exists
     yaml_data = {}
@@ -188,6 +193,7 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     settings.kalshi_private_key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
     settings.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     settings.serper_api_key = os.environ.get("SERPER_API_KEY") or None
+    settings.searxng_url = os.environ.get("SEARXNG_URL") or None
     settings.fred_api_key = os.environ.get("FRED_API_KEY") or None
     settings.live_enabled = os.environ.get("POLYEDGE_LIVE_ENABLED", "false").lower() == "true"
 

@@ -124,10 +124,10 @@ class RiskEngine:
         if self.positions.has_position(signal.market_id):
             failed.append(f"Already have position in {signal.market_id}")
 
-        # 8a. Minimum trade cost check
-        MIN_TRADE_COST = 1.00
-        if proposed_cost < MIN_TRADE_COST:
-            failed.append(f"Trade too small: ${proposed_cost:.2f} < ${MIN_TRADE_COST:.2f} minimum")
+        # 8a. Minimum trade cost check — Kalshi minimum is 1 contract,
+        # so any non-zero size is valid. We only reject truly zero-cost trades.
+        if proposed_cost <= 0:
+            failed.append("Trade cost is zero")
 
         # 8b. Edge minimum check — edge must be positive (we have a favorable view)
         # and exceed the strategy-specific threshold. Negative edge means we agree

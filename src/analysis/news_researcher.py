@@ -1,14 +1,15 @@
 """News researcher — enriches Claude's probability assessments with real-time context.
 
-Uses Serper.dev (Google Search API) to find recent news relevant to a market
-question, then formats a concise context block for injection into Claude prompts.
-Gracefully degrades if no API key is configured.
+Uses DuckDuckGo search (free, no API key) via the duckduckgo-search library as the
+primary backend, with Serper.dev as an optional paid fallback. Formats a concise
+context block for injection into Claude prompts.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -17,11 +18,22 @@ import httpx
 logger = logging.getLogger(__name__)
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
+
 MAX_RESULTS_PER_QUERY = 5
 MAX_QUERIES = 3
 MAX_CONTEXT_CHARS = 3200  # ~800 tokens
 MAX_RELEVANT_RESULTS = 5
 DEDUP_SIMILARITY_THRESHOLD = 0.7
+
+# Check if duckduckgo_search is available
+try:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        from duckduckgo_search import DDGS
+    DDG_AVAILABLE = True
+except ImportError:
+    DDG_AVAILABLE = False
+    logger.info("duckduckgo-search not installed — DDG search disabled")
 
 
 @dataclass
@@ -35,10 +47,21 @@ class NewsResult:
 
 
 class NewsResearcher:
-    """Fetches recent news context for market probability assessments."""
+    """Fetches recent news context for market probability assessments.
 
-    def __init__(self, serper_api_key: Optional[str] = None):
+    Search priority:
+    1. DuckDuckGo (free, no API key required) — via duckduckgo-search library
+    2. Serper.dev (paid fallback) — if DDG fails and API key is configured
+    """
+
+    def __init__(
+        self,
+        serper_api_key: Optional[str] = None,
+        searxng_url: Optional[str] = None,
+    ):
         self.serper_api_key = serper_api_key
+        # searxng_url kept for backward compatibility
+        self.searxng_url = searxng_url
 
     def generate_queries(self, market_question: str) -> list[str]:
         """Generate 2-3 targeted search queries from a market question.
@@ -74,16 +97,77 @@ class NewsResearcher:
         return queries[:MAX_QUERIES]
 
     async def search(self, query: str) -> list[NewsResult]:
-        """Search Serper.dev for a single query. Returns top results."""
-        if not self.serper_api_key:
-            return []
+        """Search using DuckDuckGo first, fall back to Serper if needed."""
+        # Try DuckDuckGo first (free, no key required)
+        if DDG_AVAILABLE:
+            results = await self._search_ddg(query)
+            if results:
+                return results
 
+        # Fall back to Serper if configured
+        if self.serper_api_key:
+            return await self._search_serper(query)
+
+        return []
+
+    async def _search_ddg(self, query: str) -> list[NewsResult]:
+        """Search via DuckDuckGo using duckduckgo-search library.
+
+        Uses the news endpoint for recency, falls back to text search.
+        Runs synchronous DDGS in a thread to avoid blocking the event loop.
+        """
+        import asyncio
+
+        def _do_search() -> list[NewsResult]:
+            results = []
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    with DDGS() as ddgs:
+                        for item in ddgs.news(query, max_results=MAX_RESULTS_PER_QUERY):
+                            results.append(NewsResult(
+                                title=item.get("title", ""),
+                                snippet=item.get("body", ""),
+                                source=item.get("source", ""),
+                                date=item.get("date", ""),
+                                url=item.get("url", ""),
+                            ))
+            except Exception as e:
+                logger.debug(f"DDG news search failed for '{query}': {e}")
+
+            if not results:
+                # Fall back to text search
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        with DDGS() as ddgs:
+                            for item in ddgs.text(query, max_results=MAX_RESULTS_PER_QUERY):
+                                results.append(NewsResult(
+                                    title=item.get("title", ""),
+                                    snippet=item.get("body", ""),
+                                    source=_extract_source(item.get("href", "")),
+                                    date="",
+                                    url=item.get("href", ""),
+                                ))
+                except Exception as e:
+                    logger.debug(f"DDG text search failed for '{query}': {e}")
+
+            return results
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _do_search)
+
+    async def _search_serper(self, query: str) -> list[NewsResult]:
+        """Search via Serper.dev (paid fallback)."""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     SERPER_SEARCH_URL,
                     json={"q": query, "num": MAX_RESULTS_PER_QUERY},
-                    headers={"X-API-KEY": self.serper_api_key},
+                    headers={
+                        "X-API-KEY": self.serper_api_key,
+                        "Content-Type": "application/json",
+                    },
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -160,12 +244,8 @@ class NewsResearcher:
         """Get formatted news context for a market question.
 
         Returns a formatted text block ready for prompt injection.
-        Returns empty string if no API key or no results found.
+        Returns empty string if no results found.
         """
-        if not self.serper_api_key:
-            logger.debug("No Serper API key configured, skipping news research")
-            return ""
-
         queries = self.generate_queries(market_question)
         all_results: list[NewsResult] = []
         seen_urls: set[str] = set()
