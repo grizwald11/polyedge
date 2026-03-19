@@ -115,6 +115,21 @@ class TestPriceUpdate:
         pm = PositionManager(tmp_db, bankroll=500.0)
         pm.update_price("DOESNT-EXIST", 0.50, 0.50)  # Should not raise
 
+    def test_zero_price_ignored(self, tmp_db):
+        """Zero prices (no data) should not overwrite valid prices."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade(price=0.34, size=10))
+
+        # First update with real prices
+        pm.update_price("FED-RATE-CUT-MAY26", 0.40, 0.60)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        assert pos.current_price == 0.40
+
+        # Update with zero prices — should be ignored
+        pm.update_price("FED-RATE-CUT-MAY26", 0.0, 0.0)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        assert pos.current_price == 0.40  # Unchanged
+
 
 class TestPortfolioMetrics:
     def test_total_exposure(self, tmp_db):

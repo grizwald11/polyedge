@@ -555,6 +555,29 @@ class Database:
         conn.commit()
         return cursor.lastrowid
 
+    def has_recent_trade(self, market_id: str, seconds: int = 300) -> bool:
+        """Check if a BUY trade was placed on this market within the last N seconds.
+
+        Used to prevent duplicate trades when concurrent processes (e.g. pm2
+        restart overlap) try to trade the same market simultaneously.
+
+        Args:
+            market_id: Market ticker
+            seconds: Lookback window (default 5 minutes)
+
+        Returns:
+            True if a recent BUY trade exists
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM trades "
+            "WHERE market_id=? AND side='BUY' AND timestamp > ?",
+            (market_id, cutoff),
+        ).fetchone()
+        return row["cnt"] > 0 if row else False
+
     def get_trades_today(self) -> list[dict]:
         """Get all trades from today."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -721,6 +744,21 @@ class Database:
         ))
         conn.commit()
         return cursor.lastrowid
+
+    def get_latest_prediction(self, market_ticker: str) -> Optional[dict]:
+        """Get the most recent prediction for a market.
+
+        Returns dict with predicted_probability, market_price_at_prediction,
+        predicted_at, or None if no prediction exists.
+        """
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT predicted_probability, market_price_at_prediction, predicted_at "
+            "FROM calibration_records WHERE market_id=? "
+            "ORDER BY predicted_at DESC LIMIT 1",
+            (market_ticker,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def get_resolved_predictions(
         self,

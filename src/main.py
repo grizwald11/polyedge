@@ -74,6 +74,7 @@ def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log")
 
 async def scan_and_trade(
     scanner: MarketScanner,
+    kalshi: KalshiClient,
     ai_strategy: AIProbabilityStrategy,
     no_strategy: ObviousNoStrategy,
     news_strategy: NewsReactiveStrategy | None,
@@ -145,8 +146,31 @@ async def scan_and_trade(
         return
 
     # Update unrealized P&L with latest market prices
+    scanned_tickers = set()
     for market in markets:
         position_manager.update_price(market.ticker, market.yes_price, market.no_price)
+        scanned_tickers.add(market.ticker)
+
+    # Fetch prices for open positions not covered by the scan.
+    # This prevents $0.00 unrealized P&L on positions whose markets
+    # don't rank in the top scanned markets by volume/opportunity.
+    missing_tickers = [
+        p.market_id for p in position_manager.get_all_positions()
+        if p.market_id not in scanned_tickers
+    ]
+    if missing_tickers:
+        logger.debug(f"Fetching prices for {len(missing_tickers)} position markets not in scan")
+        for ticker in missing_tickers:
+            try:
+                raw = await kalshi.get_market(ticker)
+                if raw:
+                    yes_bid = float(raw.get("yes_bid_dollars") or raw.get("yes_bid") or 0)
+                    yes_ask = float(raw.get("yes_ask_dollars") or raw.get("yes_ask") or 0)
+                    yes_price = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else max(yes_bid, yes_ask)
+                    no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
+                    position_manager.update_price(ticker, yes_price, no_price)
+            except Exception as e:
+                logger.debug(f"Failed to fetch price for position market {ticker}: {e}")
 
     # Build market lookup (used by both exit logic and signal processing)
     market_lookup = {m.ticker: m for m in markets}
@@ -269,6 +293,14 @@ async def scan_and_trade(
         # Dedup: skip if we already acted on this market this cycle
         if signal.market_id in acted_markets:
             logger.debug(f"Skipping duplicate signal for {signal.market_id}")
+            continue
+
+        # DB-level dedup: prevent duplicate trades from concurrent pm2 instances.
+        # If another process already placed a trade on this market in the last 5
+        # minutes, skip it. This catches the race condition where pm2 restarts
+        # overlap and both instances try to trade the same signal.
+        if scanner.db.has_recent_trade(signal.market_id):
+            logger.info(f"Skipping {signal.market_id}: recent trade exists (dedup)")
             continue
 
         # Log every signal immediately for analysis (acted_on=False by default)
@@ -418,7 +450,7 @@ async def scan_and_trade(
 
 
 async def run_trading_loop(
-    scanner, ai_strategy, no_strategy, news_strategy, cross_arb_strategy,
+    scanner, kalshi, ai_strategy, no_strategy, news_strategy, cross_arb_strategy,
     whale_strategy, market_graph, risk_engine, kelly_sizer,
     circuit_breaker, order_builder, order_router, position_manager,
     calibration, resolution_tracker, calibration_analyzer, fill_tracker,
@@ -472,7 +504,7 @@ async def run_trading_loop(
             # Hard timeout: if any individual scan cycle hangs (stuck API call,
             # unresponsive Claude, etc.), abort it and try again next cycle.
             await asyncio.wait_for(scan_and_trade(
-                scanner, ai_strategy, no_strategy, news_strategy,
+                scanner, kalshi, ai_strategy, no_strategy, news_strategy,
                 cross_arb_strategy, whale_strategy, market_graph,
                 risk_engine, kelly_sizer,
                 circuit_breaker, order_builder, order_router, position_manager,
@@ -696,7 +728,7 @@ async def main():
     logger.info(f"\nEntering trading loop (every {settings.scanning.interval_seconds}s)...")
     try:
         await run_trading_loop(
-            scanner, ai_strategy, no_strategy, news_strategy,
+            scanner, kalshi, ai_strategy, no_strategy, news_strategy,
             cross_arb_strategy, whale_strategy, market_graph,
             risk_engine, kelly_sizer,
             circuit_breaker, order_builder, order_router, position_manager,

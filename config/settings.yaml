@@ -40,7 +40,7 @@ trading:
   max_trades_per_cycle: 5       # Max trades per scan cycle to prevent overtrading
 
 claude:
-  model_primary: "claude-opus-4-6"
+  model_primary: "claude-sonnet-4-6"
   model_highstakes: "claude-opus-4-6"
   highstakes_threshold: 50.0    # Use Opus for positions > $50
   max_tokens: 2000
@@ -54,11 +54,11 @@ claude:
     "Tech/AI": 0.35
     Culture: 0.4
     Other: 0.35
-  cross_check_enabled: false    # Dual-temperature cross-validation
-  cross_check_top_n: 3          # Only cross-check top N markets by volume
+  cross_check_enabled: true     # Dual-temperature cross-validation
+  cross_check_top_n: 10         # Cross-check top N markets by volume
   cross_check_temp_low: 0.2
   cross_check_temp_high: 0.5
-  cross_check_disagreement_threshold: 0.15  # Skip if temps disagree by more than this
+  cross_check_disagreement_threshold: 0.12  # Skip if temps disagree by more than this
 
 news:
   rss_feeds:

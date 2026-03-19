@@ -112,7 +112,7 @@ class CalibrationAnalyzer:
 
         adjustments = {}
         for cat, records in by_category.items():
-            if len(records) < 10:  # Need minimum sample size
+            if len(records) < 5:  # Need minimum sample size
                 continue
 
             # Bias = avg(actual) - avg(predicted)
@@ -145,10 +145,10 @@ class CalibrationAnalyzer:
 
         base_rates = {}
         for cat, records in by_category.items():
-            # Require a minimum of 15 resolved markets per category before
+            # Require a minimum of 8 resolved markets per category before
             # reporting base rates. With fewer samples, the rate is too noisy
             # and could anchor Claude's estimates to statistical noise.
-            if len(records) < 15:
+            if len(records) < 8:
                 continue
             yes_count = sum(1 for r in records if bool(r["actual_outcome"]))
             base_rates[cat] = {

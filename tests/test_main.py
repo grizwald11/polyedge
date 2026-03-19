@@ -108,6 +108,7 @@ def components(sample_markets):
     position_manager.get_total_exposure.return_value = 0.0
     position_manager.get_total_unrealized_pnl.return_value = 0.0
     position_manager.get_position_count.return_value = 0
+    position_manager.get_all_positions.return_value = []
     position_manager.get_exit_candidates.return_value = []
 
     calibration = MagicMock()
@@ -121,8 +122,16 @@ def components(sample_markets):
     alert_manager.send_circuit_breaker_alert = AsyncMock()
     metrics = MagicMock()
 
+    # Mock kalshi client for position price fetches
+    kalshi = AsyncMock()
+    kalshi.get_market = AsyncMock(return_value=None)
+
+    # Mock DB dedup check
+    scanner.db.has_recent_trade = MagicMock(return_value=False)
+
     return {
         "scanner": scanner,
+        "kalshi": kalshi,
         "ai_strategy": ai_strategy,
         "no_strategy": no_strategy,
         "news_strategy": None,

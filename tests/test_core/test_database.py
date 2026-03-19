@@ -151,6 +151,66 @@ class TestTradeOperations:
         assert len(today) == 1
 
 
+class TestRecentTradeDedup:
+    """Tests for has_recent_trade() dedup method."""
+
+    def _insert_prereqs(self, tmp_db):
+        from src.core.models import Market, MarketToken, MarketCategory
+        m = Market(ticker="MKT-001", question="Test?", category=MarketCategory.OTHER,
+                   tokens=[MarketToken(token_id="MKT-001_yes", outcome="Yes", price=0.5)],
+                   volume_24h=50000, active=True)
+        tmp_db.upsert_market(m)
+
+    def test_no_trades_returns_false(self, tmp_db):
+        assert tmp_db.has_recent_trade("MKT-001") is False
+
+    def test_recent_buy_returns_true(self, tmp_db):
+        self._insert_prereqs(tmp_db)
+        trade = Trade(
+            order_id="ord_dedup", market_id="MKT-001", token_id="MKT-001_yes",
+            side=Side.BUY, price=0.34, size=50.0, fee=0.0, realized_pnl=0.0,
+            strategy=StrategyName.AI_PROBABILITY, paper=True,
+        )
+        tmp_db.log_trade(trade)
+        assert tmp_db.has_recent_trade("MKT-001") is True
+
+    def test_sell_trade_not_counted(self, tmp_db):
+        """Sell trades should not trigger dedup — only BUY entries."""
+        self._insert_prereqs(tmp_db)
+        trade = Trade(
+            order_id="ord_sell", market_id="MKT-001", token_id="MKT-001_yes",
+            side=Side.SELL, price=0.50, size=50.0, fee=0.0, realized_pnl=5.0,
+            strategy=StrategyName.AI_PROBABILITY, paper=True,
+        )
+        tmp_db.log_trade(trade)
+        assert tmp_db.has_recent_trade("MKT-001") is False
+
+    def test_old_trade_not_counted(self, tmp_db):
+        """Trade older than the lookback window should not trigger dedup."""
+        self._insert_prereqs(tmp_db)
+        from datetime import timedelta
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        trade = Trade(
+            order_id="ord_old", market_id="MKT-001", token_id="MKT-001_yes",
+            side=Side.BUY, price=0.34, size=50.0, fee=0.0, realized_pnl=0.0,
+            strategy=StrategyName.AI_PROBABILITY, paper=True,
+            timestamp=old_time,
+        )
+        tmp_db.log_trade(trade)
+        assert tmp_db.has_recent_trade("MKT-001", seconds=300) is False
+
+    def test_different_market_not_counted(self, tmp_db):
+        """Trade on a different market should not trigger dedup."""
+        self._insert_prereqs(tmp_db)
+        trade = Trade(
+            order_id="ord_diff", market_id="MKT-001", token_id="MKT-001_yes",
+            side=Side.BUY, price=0.34, size=50.0, fee=0.0, realized_pnl=0.0,
+            strategy=StrategyName.AI_PROBABILITY, paper=True,
+        )
+        tmp_db.log_trade(trade)
+        assert tmp_db.has_recent_trade("MKT-OTHER") is False
+
+
 class TestCalibrationOperations:
     def _insert_market(self, tmp_db, mid):
         from src.core.models import Market, MarketToken, MarketCategory

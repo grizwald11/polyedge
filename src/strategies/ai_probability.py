@@ -7,16 +7,17 @@ when detected edge exceeds the minimum threshold.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from typing import Optional as _Optional
 
 from src.config import Settings
 from src.analysis.claude_forecaster import ClaudeForecaster
-from src.analysis.ensemble import ensemble_forecast
+from src.analysis.ensemble import ensemble_forecast, multi_model_ensemble
 from src.analysis.market_classifier import classify_market
 from src.analysis.calibration_analyzer import CalibrationAnalyzer
-from src.core.models import Market, Signal, Direction, StrategyName
+from src.core.models import Market, Signal, Direction, StrategyName, ForecastResult
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class AIProbabilityStrategy:
         self.data_enricher = data_enricher
         self._category_adjustments: dict[str, float] = {}
         self._category_base_rates: dict[str, dict] = {}
+        self._category_brier_scores: dict[str, float] = {}
 
     def refresh_calibration_adjustments(self) -> None:
         """Reload per-category bias corrections from calibration data."""
@@ -48,12 +50,48 @@ class AIProbabilityStrategy:
         try:
             self._category_adjustments = self.calibration_analyzer.get_category_adjustments()
             self._category_base_rates = self.calibration_analyzer.get_category_base_rates()
+            # Load per-category Brier scores for accuracy gating
+            report = self.calibration_analyzer.generate_report()
+            self._category_brier_scores = {
+                cs.category: cs.brier_score
+                for cs in report.category_stats
+                if cs.count >= 5
+            }
             if self._category_adjustments:
                 logger.info(f"Loaded calibration adjustments: {self._category_adjustments}")
             if self._category_base_rates:
                 logger.info(f"Loaded base rates for {len(self._category_base_rates)} categories")
+            if self._category_brier_scores:
+                logger.info(f"Category Brier scores: {self._category_brier_scores}")
         except Exception as e:
             logger.error(f"Failed to load calibration adjustments: {e}")
+
+    async def _get_metaculus_forecast(self, market: Market) -> Optional[ForecastResult]:
+        """Extract Metaculus community prediction as a ForecastResult.
+
+        Returns None if no matching Metaculus question found or data enricher
+        is unavailable.
+        """
+        if not self.data_enricher:
+            return None
+        try:
+            match = await self.data_enricher.metaculus.get_best_match(market.question)
+            if match is None:
+                return None
+            prob = match["community_prediction"]
+            forecasters = match.get("forecasters_count", 0)
+            # Wider CI for fewer forecasters
+            ci_half = max(0.05, 0.20 - min(forecasters, 100) * 0.001)
+            return ForecastResult(
+                probability=prob,
+                confidence_low=max(0.0, prob - ci_half),
+                confidence_high=min(1.0, prob + ci_half),
+                reasoning=f"Metaculus community: {prob:.0%} ({forecasters} forecasters)",
+                model_used="metaculus_community",
+            )
+        except Exception as e:
+            logger.debug(f"Metaculus forecast unavailable for {market.ticker}: {e}")
+            return None
 
     def _build_base_rate_context(self, category_value: str) -> str:
         """Build base rate context string from calibration history."""
@@ -122,7 +160,37 @@ class AIProbabilityStrategy:
         use_cross_check: bool = False,
     ) -> Optional[Signal]:
         """Assess a single market and return a signal if edge is sufficient."""
+        # Staleness check: skip re-assessment if recent prediction is still fresh
+        if self.db:
+            try:
+                latest = self.db.get_latest_prediction(market.ticker)
+                if latest:
+                    predicted_at = datetime.fromisoformat(latest["predicted_at"])
+                    age = datetime.now(timezone.utc) - predicted_at
+                    price_move = abs(market.yes_price - latest["market_price_at_prediction"])
+                    if age < timedelta(days=7) and price_move < 0.10:
+                        logger.debug(
+                            f"Skipping {market.ticker}: recent prediction "
+                            f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f})"
+                        )
+                        return None
+            except Exception as e:
+                logger.debug(f"Staleness check failed for {market.ticker}: {e}")
+
         category = classify_market(market)
+
+        # Category accuracy gating: skip categories where we're poorly calibrated
+        cat_brier = self._category_brier_scores.get(category.value)
+        if cat_brier is not None and cat_brier > 0.30:
+            logger.info(
+                f"Skipping {market.ticker}: category {category.value} has poor "
+                f"Brier score ({cat_brier:.3f} > 0.30)"
+            )
+            return None
+        # Raise min edge for categories with mediocre calibration (Brier 0.20-0.30)
+        if cat_brier is not None and cat_brier > 0.20:
+            min_edge = max(min_edge, 0.08)  # Require 8% edge instead of 5%
+
         base_rate_context = self._build_base_rate_context(category.value)
 
         # Use data enricher for context if available, otherwise fall back to news_context
@@ -173,12 +241,23 @@ class AIProbabilityStrategy:
             )
             return None
 
-        # Run ensemble (combines Claude + market price)
-        ensemble = ensemble_forecast(
-            claude_forecast=forecast,
-            market_price=market.yes_price,
-            claude_weight=self.settings.claude.ensemble_weight,
-        )
+        # Try to get Metaculus community forecast as a second model
+        metaculus_forecast = await self._get_metaculus_forecast(market)
+
+        if metaculus_forecast is not None:
+            # Multi-model ensemble: Claude + Metaculus + market price
+            ensemble = multi_model_ensemble(
+                forecasts=[forecast, metaculus_forecast],
+                market_price=market.yes_price,
+                market_weight=1.0 - self.settings.claude.ensemble_weight,
+            )
+        else:
+            # Single-model fallback: Claude + market price
+            ensemble = ensemble_forecast(
+                claude_forecast=forecast,
+                market_price=market.yes_price,
+                claude_weight=self.settings.claude.ensemble_weight,
+            )
 
         # Calculate edge
         edge = ensemble.edge  # positive = YES underpriced, negative = NO underpriced

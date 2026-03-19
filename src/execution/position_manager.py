@@ -122,6 +122,10 @@ class PositionManager:
         if position is None:
             return
 
+        # Skip invalid prices — 0.0 means no data available
+        if yes_price <= 0 and no_price <= 0:
+            return
+
         # Use the price matching the position's side
         if position.direction in (Direction.BUY_NO, Direction.SELL_NO):
             position.current_price = no_price

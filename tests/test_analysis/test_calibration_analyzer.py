@@ -183,9 +183,9 @@ class TestCategoryAdjustments:
         assert "Other" not in adjustments
 
     def test_minimum_sample_size(self, analyzer, tmp_db):
-        """Categories with fewer than 10 predictions should be excluded."""
+        """Categories with fewer than 5 predictions should be excluded."""
         _seed_resolved(tmp_db, [
-            (f"MKT-{i}", "Rare", 0.90, 0) for i in range(1, 10)
+            (f"MKT-{i}", "Rare", 0.90, 0) for i in range(1, 5)
         ])
 
         adjustments = analyzer.get_category_adjustments()
@@ -256,3 +256,17 @@ class TestDatabaseMethods:
 
         assert "brier_score" in cols
         assert "profit_loss" in cols
+
+    def test_get_latest_prediction(self, tmp_db):
+        """get_latest_prediction returns most recent prediction for a market."""
+        tmp_db.store_prediction("MKT-A", 0.60, "YES", 0.50)
+        tmp_db.store_prediction("MKT-A", 0.65, "YES", 0.55)
+
+        latest = tmp_db.get_latest_prediction("MKT-A")
+        assert latest is not None
+        assert latest["predicted_probability"] == 0.65
+        assert latest["market_price_at_prediction"] == 0.55
+
+    def test_get_latest_prediction_none(self, tmp_db):
+        """get_latest_prediction returns None for unknown market."""
+        assert tmp_db.get_latest_prediction("NOPE") is None

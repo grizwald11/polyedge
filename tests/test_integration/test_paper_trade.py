@@ -182,6 +182,7 @@ class TestFullPaperTradeCycle:
         # Run one full cycle
         await scan_and_trade(
             scanner=scanner,
+            kalshi=mock_kalshi,
             ai_strategy=ai_strategy,
             no_strategy=no_strategy,
             news_strategy=None,
@@ -260,6 +261,7 @@ class TestFullPaperTradeCycle:
 
         await scan_and_trade(
             scanner=scanner,
+            kalshi=mock_kalshi,
             ai_strategy=ai_strategy,
             no_strategy=no_strategy,
             news_strategy=None,
@@ -328,6 +330,7 @@ class TestFullPaperTradeCycle:
 
         await scan_and_trade(
             scanner=scanner,
+            kalshi=mock_kalshi,
             ai_strategy=ai_strategy,
             no_strategy=no_strategy,
             news_strategy=None,
@@ -409,6 +412,7 @@ class TestFullPaperTradeCycle:
 
         await scan_and_trade(
             scanner=scanner,
+            kalshi=mock_kalshi,
             ai_strategy=ai_strategy,
             no_strategy=no_strategy,
             news_strategy=None,
@@ -471,7 +475,7 @@ class TestFullPaperTradeCycle:
         risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
 
         kwargs = dict(
-            scanner=scanner, ai_strategy=ai_strategy, no_strategy=no_strategy,
+            scanner=scanner, kalshi=mock_kalshi, ai_strategy=ai_strategy, no_strategy=no_strategy,
             news_strategy=None, cross_arb_strategy=None, whale_strategy=None,
             market_graph=None, risk_engine=risk_engine, kelly_sizer=kelly_sizer,
             circuit_breaker=circuit_breaker, order_builder=order_builder,
@@ -531,7 +535,7 @@ class TestFullPaperTradeCycle:
         risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
 
         kwargs = dict(
-            scanner=scanner, ai_strategy=ai_strategy, no_strategy=no_strategy,
+            scanner=scanner, kalshi=mock_kalshi, ai_strategy=ai_strategy, no_strategy=no_strategy,
             news_strategy=None, cross_arb_strategy=None, whale_strategy=None,
             market_graph=None, risk_engine=risk_engine, kelly_sizer=kelly_sizer,
             circuit_breaker=circuit_breaker, order_builder=order_builder,
@@ -616,7 +620,7 @@ class TestFullPaperTradeCycle:
         risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
 
         await scan_and_trade(
-            scanner=scanner, ai_strategy=ai_strategy, no_strategy=no_strategy,
+            scanner=scanner, kalshi=mock_kalshi, ai_strategy=ai_strategy, no_strategy=no_strategy,
             news_strategy=None, cross_arb_strategy=None, whale_strategy=None,
             market_graph=None, risk_engine=risk_engine, kelly_sizer=kelly_sizer,
             circuit_breaker=circuit_breaker, order_builder=order_builder,
