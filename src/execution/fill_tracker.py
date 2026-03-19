@@ -41,6 +41,10 @@ class FillTracker:
         # recording after restart. Without this, a restart + re-detection of
         # old fills would double-count trades and corrupt position tracking.
         self._processed_fills: set[str] = self._load_filled_order_ids()
+        # Track cumulative recorded fill count per order for partial fills.
+        # This allows recording the delta when subsequent partials or the
+        # final execution arrive.
+        self._partial_recorded: dict[str, int] = {}
 
     def track(self, order: Order):
         """Register an order for fill tracking."""
@@ -135,7 +139,12 @@ class FillTracker:
         return fills
 
     def _record_partial_fill(self, order: Order, kalshi_data: dict) -> Optional[Trade]:
-        """Record a partial fill. Returns Trade for the filled portion only."""
+        """Record a partial fill. Returns Trade for the NEW portion only.
+
+        Tracks cumulative filled count per order so that subsequent partial
+        fills (or the final full execution) only record the delta — contracts
+        filled since the last recording.
+        """
         if order.id in self._processed_fills:
             return None
 
@@ -143,14 +152,20 @@ class FillTracker:
         if filled_count <= 0:
             return None
 
+        # Calculate delta: only record contracts not yet recorded
+        already_recorded = self._partial_recorded.get(order.id, 0)
+        delta = filled_count - already_recorded
+        if delta <= 0:
+            return None
+
         now = datetime.now(timezone.utc)
 
-        # Calculate fee on filled portion only
+        # Calculate fee on newly filled portion only
         price_cents = dollars_to_cents(order.price)
         if order.order_type == OrderType.GTC:
-            fee_cents = kalshi_maker_fee(filled_count, price_cents)
+            fee_cents = kalshi_maker_fee(delta, price_cents)
         else:
-            fee_cents = kalshi_taker_fee(filled_count, price_cents)
+            fee_cents = kalshi_taker_fee(delta, price_cents)
 
         trade = Trade(
             order_id=order.id,
@@ -158,7 +173,7 @@ class FillTracker:
             token_id=order.token_id,
             side=order.side,
             price=order.price,
-            size=float(filled_count),
+            size=float(delta),
             fee=fee_cents / 100.0,
             realized_pnl=0.0,
             strategy=order.strategy,
@@ -166,8 +181,9 @@ class FillTracker:
             timestamp=now,
         )
 
-        # Mark as processed so we don't double-record
-        self._processed_fills.add(order.id)
+        # Track cumulative recorded count (do NOT add to _processed_fills —
+        # the order may receive more fills or transition to "executed")
+        self._partial_recorded[order.id] = filled_count
 
         # Update order status but do NOT mutate order.size — the original
         # size is needed for fee calculations and DB consistency. Track
@@ -179,30 +195,44 @@ class FillTracker:
         self._log_order(order)
 
         logger.info(
-            f"[PARTIAL FILL] {order.side.value} {filled_count}x "
+            f"[PARTIAL FILL] {order.side.value} {delta}x "
             f"{order.token_id} @ ${order.price:.2f} "
             f"({remaining} remaining)"
         )
         return trade
 
     def _record_fill(self, order: Order, kalshi_data: dict) -> Optional[Trade]:
-        """Record a detected fill. Returns None if already processed (dedup)."""
+        """Record a detected fill. Returns None if already processed (dedup).
+
+        If some contracts were already recorded via partial fills, only records
+        the remaining delta to avoid double-counting.
+        """
         if order.id in self._processed_fills:
             logger.debug(f"Fill already processed for {order.id} — skipping duplicate")
             return None
         self._processed_fills.add(order.id)
+        # Clean up partial tracking now that order is fully resolved
+        already_recorded = self._partial_recorded.pop(order.id, 0)
         now = datetime.now(timezone.utc)
 
         order.status = OrderStatus.FILLED
         order.filled_at = now
         order.fill_price = order.price
 
-        # Calculate fee
+        # Only record the delta if some contracts were already logged as partial fills
+        remaining_size = int(order.size) - already_recorded
+        if remaining_size <= 0:
+            # All contracts were already recorded via partial fills
+            self._log_order(order)
+            logger.debug(f"Full fill for {order.id} — all {int(order.size)} contracts already recorded via partials")
+            return None
+
+        # Calculate fee on remaining portion only
         price_cents = dollars_to_cents(order.price)
         if order.order_type == OrderType.GTC:
-            fee_cents = kalshi_maker_fee(int(order.size), price_cents)
+            fee_cents = kalshi_maker_fee(remaining_size, price_cents)
         else:
-            fee_cents = kalshi_taker_fee(int(order.size), price_cents)
+            fee_cents = kalshi_taker_fee(remaining_size, price_cents)
 
         trade = Trade(
             order_id=order.id,
@@ -210,7 +240,7 @@ class FillTracker:
             token_id=order.token_id,
             side=order.side,
             price=order.price,
-            size=order.size,
+            size=float(remaining_size),
             fee=fee_cents / 100.0,
             realized_pnl=0.0,
             strategy=order.strategy,
@@ -222,8 +252,9 @@ class FillTracker:
         self.db.log_trade(trade)
 
         logger.info(
-            f"[FILL] {order.side.value} {int(order.size)}x "
+            f"[FILL] {order.side.value} {remaining_size}x "
             f"{order.token_id} @ ${order.price:.2f}"
+            f"{f' ({already_recorded} already recorded via partials)' if already_recorded else ''}"
         )
         return trade
 

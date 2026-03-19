@@ -187,8 +187,9 @@ class OrderRouter:
                     success=False, order=order, error="Order was cancelled"
                 )
 
-            # Create trade record for filled orders
-            price_cents = dollars_to_cents(order.price)
+            # Create trade record for filled orders — use actual fill price
+            fill_price = order.fill_price if order.fill_price is not None else order.price
+            price_cents = dollars_to_cents(fill_price)
             if order.order_type == OrderType.GTC:
                 fee_cents = kalshi_maker_fee(int(order.size), price_cents)
             else:
@@ -199,7 +200,7 @@ class OrderRouter:
                 market_id=order.market_id,
                 token_id=order.token_id,
                 side=order.side,
-                price=order.price,
+                price=fill_price,
                 size=order.size,
                 fee=fee_cents / 100.0,
                 realized_pnl=0.0,

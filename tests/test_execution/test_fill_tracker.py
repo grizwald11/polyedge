@@ -296,3 +296,78 @@ class TestFillTracker:
         # Second poll — should be deduplicated
         fills2 = await tracker.check_fills()
         assert len(fills2) == 0
+
+    @pytest.mark.asyncio
+    async def test_partial_then_full_fill_records_both(self, mock_kalshi, tmp_db):
+        """Regression: partial fill followed by full execution must record all contracts.
+
+        Previously, _record_partial_fill added order.id to _processed_fills,
+        causing _record_fill to skip the remaining contracts when the order
+        transitioned from 'partial' to 'executed'.
+        """
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()  # size=10
+        tracker.track(order)
+
+        # First poll: partial fill — 6 of 10 contracts
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "partial",
+            "filled_count": 6,
+            "remaining_count": 4,
+        })
+        fills1 = await tracker.check_fills()
+        assert len(fills1) == 1
+        assert fills1[0].size == 6
+
+        # Second poll: fully executed — all 10 contracts filled
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "executed",
+        })
+        fills2 = await tracker.check_fills()
+        assert len(fills2) == 1
+        assert fills2[0].size == 4  # Only the remaining 4
+
+        # Total recorded = 6 + 4 = 10 (full order)
+        assert fills1[0].size + fills2[0].size == order.size
+
+    @pytest.mark.asyncio
+    async def test_multiple_partial_fills_record_deltas(self, mock_kalshi, tmp_db):
+        """Multiple partial fills should each record only the delta."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()  # size=10
+        tracker.track(order)
+
+        # First partial: 3 filled
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "partial",
+            "filled_count": 3,
+            "remaining_count": 7,
+        })
+        fills1 = await tracker.check_fills()
+        assert len(fills1) == 1
+        assert fills1[0].size == 3
+
+        # Second partial: 7 filled (delta = 4)
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "partial",
+            "filled_count": 7,
+            "remaining_count": 3,
+        })
+        fills2 = await tracker.check_fills()
+        assert len(fills2) == 1
+        assert fills2[0].size == 4  # delta: 7 - 3
+
+        # Final execution: all 10 done (delta = 3)
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "executed",
+        })
+        fills3 = await tracker.check_fills()
+        assert len(fills3) == 1
+        assert fills3[0].size == 3  # delta: 10 - 7
+
+        assert fills1[0].size + fills2[0].size + fills3[0].size == order.size

@@ -206,6 +206,8 @@ async def scan_and_trade(
 
     # Generate signals from all strategies
     all_signals: list = []
+    ai_signals: list = []
+    no_signals: list = []
 
     try:
         ai_signals = await ai_strategy.scan_for_opportunities(markets[:30])

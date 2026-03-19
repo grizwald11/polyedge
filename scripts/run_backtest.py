@@ -99,7 +99,7 @@ def run_backtest(
         calibrations = [dict(r) for r in conn.execute(cal_query, cal_params).fetchall()]
 
     finally:
-        conn.close()
+        pass  # Don't close db._get_conn() — it's the persistent connection
 
     # Group by strategy
     strategies: set[str] = set()
