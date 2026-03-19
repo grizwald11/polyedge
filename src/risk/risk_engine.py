@@ -6,6 +6,7 @@ Every trade must pass ALL checks before execution.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 
 from src.config import Settings
@@ -132,9 +133,9 @@ class RiskEngine:
         # and exceed the strategy-specific threshold. Negative edge means we agree
         # with the market, so there's nothing to trade.
         min_edge = self._get_min_edge(signal.strategy)
-        if signal.edge <= 0:
+        if not math.isfinite(signal.edge) or signal.edge <= 0:
             failed.append(
-                f"Negative or zero edge: {signal.edge:.1%} — no favorable view"
+                f"Invalid or non-positive edge: {signal.edge} — no favorable view"
             )
         elif signal.edge < min_edge:
             failed.append(

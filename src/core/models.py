@@ -388,7 +388,8 @@ class ForecastResult(BaseModel):
     @classmethod
     def ci_high_valid(cls, v: float, info) -> float:
         v = max(0.0, min(1.0, v))
-        ci_low = info.data.get("confidence_low", 0.0)
+        # Re-clamp ci_low defensively in case field validation order varies
+        ci_low = max(0.0, min(1.0, info.data.get("confidence_low", 0.0)))
         if v < ci_low:
             # Auto-correct inverted CI bounds rather than rejecting
             # (Claude occasionally returns them swapped)

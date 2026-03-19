@@ -230,7 +230,7 @@ class TestNegativeEdgeRejection:
         )
         result = engine.check_all(neg_signal, market, proposed_size=10, proposed_cost=3.40)
         assert result.passed is False
-        assert any("Negative" in c or "zero edge" in c for c in result.failed_checks)
+        assert any("non-positive edge" in c for c in result.failed_checks)
 
     def test_zero_edge_rejected(self, engine, market):
         zero_signal = Signal(
@@ -242,6 +242,36 @@ class TestNegativeEdgeRejection:
             market_price=0.34,
         )
         result = engine.check_all(zero_signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+
+
+class TestNaNEdgeRejection:
+    """Regression: NaN edge must be rejected — NaN comparisons always return False,
+    so both `nan <= 0` and `nan < min_edge` pass without explicit isfinite check."""
+
+    def test_nan_edge_rejected(self, engine, market):
+        nan_signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="FED-RATE-CUT-MAY26",
+            direction=Direction.BUY_YES,
+            edge=float("nan"),
+            probability_estimate=0.42,
+            market_price=0.34,
+        )
+        result = engine.check_all(nan_signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+        assert any("Invalid" in c or "edge" in c.lower() for c in result.failed_checks)
+
+    def test_inf_edge_rejected(self, engine, market):
+        inf_signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="FED-RATE-CUT-MAY26",
+            direction=Direction.BUY_YES,
+            edge=float("inf"),
+            probability_estimate=0.42,
+            market_price=0.34,
+        )
+        result = engine.check_all(inf_signal, market, proposed_size=10, proposed_cost=3.40)
         assert result.passed is False
 
 

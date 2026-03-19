@@ -133,3 +133,41 @@ class TestWhaleTrackerStrategy:
         entry_time = datetime.now(timezone.utc) - timedelta(hours=2)
         weight = strategy._timing_weight(entry_time)
         assert weight == 0.3
+
+    def test_avg_entry_uses_direction_specific_prices(self, tmp_db):
+        """Regression: avg_entry_price must only include whales going in the
+        consensus direction, not all whales (which would contaminate the price)."""
+        settings = Settings()
+        monitor = WhaleMonitor(settings, tmp_db)
+
+        for i in range(5):
+            monitor._basket.append(WhaleWallet(address=f"whale-{i}"))
+
+        now = datetime.now(timezone.utc)
+        # 4 whales BUY_YES at $0.48
+        for i in range(4):
+            monitor.update_positions(f"whale-{i}", {
+                "FED-RATE": WhalePosition(
+                    wallet=f"whale-{i}",
+                    market_id="FED-RATE",
+                    direction=Direction.BUY_YES,
+                    entry_price=0.48,
+                    detected_at=now - timedelta(hours=18),
+                ),
+            })
+        # 1 whale BUY_NO at $0.52
+        monitor.update_positions("whale-4", {
+            "FED-RATE": WhalePosition(
+                wallet="whale-4",
+                market_id="FED-RATE",
+                direction=Direction.BUY_NO,
+                entry_price=0.52,
+                detected_at=now - timedelta(hours=18),
+            ),
+        })
+
+        signal = monitor.get_consensus("FED-RATE")
+        assert signal is not None
+        assert signal.direction == Direction.BUY_YES
+        # avg_entry should be 0.48 (only YES whales), not 0.496 (all whales)
+        assert signal.avg_entry_price == pytest.approx(0.48, abs=0.001)

@@ -149,7 +149,7 @@ class CalibrationTracker:
                 actual_avg = sum(float(r["actual_outcome"]) for r in in_bin) / len(in_bin)
             else:
                 pred_avg = (lo + hi) / 2
-                actual_avg = 0.0
+                actual_avg = None  # No data — don't bias calibration plot
 
             bins.append({
                 "bin": f"{lo:.1f}-{hi:.1f}",

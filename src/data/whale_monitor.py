@@ -116,7 +116,8 @@ class WhaleMonitor:
         wallets_yes: list[str] = []
         wallets_no: list[str] = []
         earliest_entry: Optional[datetime] = None
-        prices: list[float] = []
+        prices_yes: list[float] = []
+        prices_no: list[float] = []
 
         for wallet in self._basket:
             positions = self._positions.get(wallet.address, {})
@@ -127,12 +128,13 @@ class WhaleMonitor:
             if pos.direction in (Direction.BUY_YES, Direction.SELL_NO):
                 yes_count += 1
                 wallets_yes.append(wallet.address)
+                if pos.entry_price > 0:
+                    prices_yes.append(pos.entry_price)
             else:
                 no_count += 1
                 wallets_no.append(wallet.address)
-
-            if pos.entry_price > 0:
-                prices.append(pos.entry_price)
+                if pos.entry_price > 0:
+                    prices_no.append(pos.entry_price)
             if pos.detected_at:
                 if earliest_entry is None or pos.detected_at < earliest_entry:
                     earliest_entry = pos.detected_at
@@ -150,7 +152,7 @@ class WhaleMonitor:
                 whale_count=yes_count,
                 basket_size=len(self._basket),
                 consensus_pct=yes_count / len(self._basket),
-                avg_entry_price=sum(prices) / len(prices) if prices else 0.0,
+                avg_entry_price=sum(prices_yes) / len(prices_yes) if prices_yes else 0.0,
                 earliest_entry=earliest_entry,
                 wallets=wallets_yes,
             )
@@ -161,7 +163,7 @@ class WhaleMonitor:
                 whale_count=no_count,
                 basket_size=len(self._basket),
                 consensus_pct=no_count / len(self._basket),
-                avg_entry_price=sum(prices) / len(prices) if prices else 0.0,
+                avg_entry_price=sum(prices_no) / len(prices_no) if prices_no else 0.0,
                 earliest_entry=earliest_entry,
                 wallets=wallets_no,
             )
