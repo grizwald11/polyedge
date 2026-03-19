@@ -212,8 +212,11 @@ def _compute_model_weights(
         if total > 0:
             for w, r in zip(has_scores, raw):
                 w.weight = r / total
-        # Models without scores get average weight
-        avg_weight = 1.0 / len(weights) if weights else 1.0
+        # Models without scores get average of scored weights
+        if has_scores:
+            avg_weight = sum(w.weight for w in has_scores) / len(has_scores)
+        else:
+            avg_weight = 1.0 / len(weights) if weights else 1.0
         for w in weights:
             if w.brier_score is None:
                 w.weight = avg_weight

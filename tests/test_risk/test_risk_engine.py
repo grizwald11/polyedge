@@ -310,3 +310,32 @@ class TestCooldownPersistence:
         result = engine2.check_all(sig, mkt, proposed_size=10, proposed_cost=3.40)
         assert result.passed is False
         assert any("Cooldown" in c for c in result.failed_checks)
+
+
+class TestEdgeProbabilityValidation:
+    def test_edge_exceeding_probability_rejected(self, engine, market):
+        """Edge cannot exceed probability_estimate — implies negative market price."""
+        bad_signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id=market.ticker,
+            direction=Direction.BUY_YES,
+            edge=0.60,
+            probability_estimate=0.50,
+            market_price=0.34,
+        )
+        result = engine.check_all(bad_signal, market, proposed_size=5, proposed_cost=1.70)
+        assert result.passed is False
+        assert any("exceeds probability" in c for c in result.failed_checks)
+
+    def test_edge_within_probability_passes_edge_check(self, engine, market):
+        """Edge < probability should not trigger the edge-exceeds-probability check."""
+        signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id=market.ticker,
+            direction=Direction.BUY_YES,
+            edge=0.08,
+            probability_estimate=0.42,
+            market_price=0.34,
+        )
+        result = engine.check_all(signal, market, proposed_size=5, proposed_cost=1.70)
+        assert not any("exceeds probability" in c for c in result.failed_checks)

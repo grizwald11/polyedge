@@ -137,6 +137,11 @@ class RiskEngine:
             failed.append(
                 f"Invalid or non-positive edge: {signal.edge} — no favorable view"
             )
+        elif signal.edge > signal.probability_estimate:
+            failed.append(
+                f"Edge ({signal.edge:.1%}) exceeds probability "
+                f"({signal.probability_estimate:.1%}) — invalid signal"
+            )
         elif signal.edge < min_edge:
             failed.append(
                 f"Edge too small: {signal.edge:.1%} < {min_edge:.1%} minimum "

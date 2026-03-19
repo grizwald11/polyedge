@@ -76,8 +76,10 @@ class CalibrationAnalyzer:
         calibration_curve = self._compute_calibration_curve(resolved)
         category_stats = self._compute_category_stats(resolved)
 
-        best = min(category_stats, key=lambda c: c.brier_score) if category_stats else None
-        worst = max(category_stats, key=lambda c: c.brier_score) if category_stats else None
+        # Only consider categories with enough data for best/worst ranking
+        valid_stats = [c for c in category_stats if c.count >= 5]
+        best = min(valid_stats, key=lambda c: c.brier_score) if valid_stats else None
+        worst = max(valid_stats, key=lambda c: c.brier_score) if valid_stats else None
 
         return CalibrationReport(
             overall_brier=overall_brier,

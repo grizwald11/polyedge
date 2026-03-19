@@ -188,6 +188,10 @@ async def scan_and_trade(
         else:
             exit_price = market.no_price
 
+        if exit_price <= 0:
+            logger.warning(f"Skipping exit for {position.market_id}: invalid price ${exit_price}")
+            continue
+
         exit_order = Order(
             id=order_builder._generate_order_id(),
             market_id=position.market_id,
@@ -324,10 +328,10 @@ async def scan_and_trade(
             order_price=signal.market_price,
         )
 
-        # Apply circuit breaker multiplier
+        # Apply circuit breaker multiplier (reduces sizing after consecutive losses)
         cb_mult = circuit_breaker.get_kelly_multiplier()
         if cb_mult < 1.0:
-            contracts = max(1, int(contracts * cb_mult))
+            contracts = int(contracts * cb_mult)
 
         if contracts <= 0:
             logger.debug(

@@ -108,9 +108,10 @@ class TestGenerateReport:
         assert "Economics" in cat_names
 
     def test_best_worst_category(self, analyzer, tmp_db):
+        # Need >= 5 records per category for best/worst ranking
         _seed_resolved(tmp_db, [
-            ("MKT-1", "Politics", 0.90, 0),   # Bad: Brier = 0.81
-            ("MKT-2", "Economics", 0.90, 1),   # Good: Brier = 0.01
+            *[(f"POL-{i}", "Politics", 0.90, 0) for i in range(5)],   # Bad: Brier = 0.81
+            *[(f"ECO-{i}", "Economics", 0.90, 1) for i in range(5)],  # Good: Brier = 0.01
         ])
 
         report = analyzer.generate_report()
