@@ -120,42 +120,49 @@ class CrossArbStrategy:
         signals: list[Signal] = []
 
         if yes_sum < 1.0 - self.min_edge:
-            edge = 1.0 - yes_sum
+            basket_edge = 1.0 - yes_sum
             # Buy the cheapest outcome (best risk/reward)
             cheapest = min(markets, key=lambda m: m.yes_price)
+            # Scale edge proportionally: this single outcome captures only its
+            # share of the basket mispricing, preventing Kelly from oversizing.
+            single_edge = basket_edge * (cheapest.yes_price / yes_sum) if yes_sum > 0 else basket_edge
             # Probability estimate: market price is the base, edge is the mispricing
             signals.append(Signal(
                 strategy=StrategyName.CROSS_ARB,
                 market_id=cheapest.ticker,
                 market_question=cheapest.question,
                 direction=Direction.BUY_YES,
-                edge=edge,
-                probability_estimate=min(0.99, cheapest.yes_price + edge),
+                edge=single_edge,
+                probability_estimate=min(0.99, cheapest.yes_price + single_edge),
                 market_price=cheapest.yes_price,
                 confidence=0.85,
                 reasoning=(
                     f"Mutual exclusivity arb: {event_ticker} YES prices sum "
-                    f"to {yes_sum:.2f} < 1.00 ({len(markets)} outcomes)"
+                    f"to {yes_sum:.2f} < 1.00 ({len(markets)} outcomes), "
+                    f"basket edge={basket_edge:.2f}"
                 ),
             ))
 
         elif yes_sum > 1.0 + self.min_edge:
-            edge = yes_sum - 1.0
+            basket_edge = yes_sum - 1.0
             # Sell (buy NO on) the most expensive outcome
             most_expensive = max(markets, key=lambda m: m.yes_price)
+            # Scale edge: this outcome's share of overpricing
+            single_edge = basket_edge * (most_expensive.yes_price / yes_sum) if yes_sum > 0 else basket_edge
             # Our probability that NO wins = 1 - most_expensive.yes_price
             signals.append(Signal(
                 strategy=StrategyName.CROSS_ARB,
                 market_id=most_expensive.ticker,
                 market_question=most_expensive.question,
                 direction=Direction.BUY_NO,
-                edge=edge,
+                edge=single_edge,
                 probability_estimate=1.0 - most_expensive.yes_price,
                 market_price=most_expensive.no_price,
                 confidence=0.85,
                 reasoning=(
                     f"Mutual exclusivity arb: {event_ticker} YES prices sum "
-                    f"to {yes_sum:.2f} > 1.00 ({len(markets)} outcomes)"
+                    f"to {yes_sum:.2f} > 1.00 ({len(markets)} outcomes), "
+                    f"basket edge={basket_edge:.2f}"
                 ),
             ))
 
@@ -318,4 +325,5 @@ class CrossArbStrategy:
             )
             conn.commit()
         except Exception as e:
+            conn.rollback()
             logger.warning(f"Failed to cache arb relationship: {e}")

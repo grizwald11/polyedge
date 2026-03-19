@@ -6,13 +6,17 @@
     <title>{% block title %}PolyEdge Dashboard{% endblock %}</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <nav class="navbar">
         <div class="nav-brand">PolyEdge</div>
         <div class="nav-links">
-            <a href="/" class="nav-link active">Portfolio</a>
-            <a href="/api/stats" class="nav-link">API</a>
+            <a href="/" class="nav-link {% if active_page == 'portfolio' %}active{% endif %}">Portfolio</a>
+            <a href="/strategies" class="nav-link {% if active_page == 'strategies' %}active{% endif %}">Strategies</a>
+            <a href="/calibration" class="nav-link {% if active_page == 'calibration' %}active{% endif %}">Calibration</a>
+            <a href="/signals" class="nav-link {% if active_page == 'signals' %}active{% endif %}">Signals</a>
+            <a href="/risk" class="nav-link {% if active_page == 'risk' %}active{% endif %}">Risk</a>
         </div>
     </nav>
     <main class="container">
@@ -29,5 +33,6 @@
         setInterval(updateClock, 1000);
         updateClock();
     </script>
+    {% block scripts %}{% endblock %}
 </body>
 </html>

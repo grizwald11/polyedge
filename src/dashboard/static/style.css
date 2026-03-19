@@ -9,6 +9,7 @@
     --accent: #6366f1;
     --positive: #22c55e;
     --negative: #ef4444;
+    --warning: #f59e0b;
 }
 
 body {
@@ -39,13 +40,18 @@ body {
     color: var(--muted);
     text-decoration: none;
     font-size: 0.9rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    transition: color 0.2s;
 }
-.nav-link.active, .nav-link:hover { color: var(--text); }
+.nav-link.active { color: var(--text); background: rgba(99,102,241,0.15); }
+.nav-link:hover { color: var(--text); }
 
 .container {
-    max-width: 960px;
+    max-width: 1100px;
     margin: 0 auto;
     padding: 1.5rem;
+    padding-bottom: 4rem;
 }
 
 h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
@@ -53,9 +59,34 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
 
 .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
 
+/* Status banners */
+.status-banner {
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+.status-danger {
+    background: rgba(239,68,68,0.15);
+    border: 1px solid var(--negative);
+    color: var(--negative);
+}
+.status-warning {
+    background: rgba(245,158,11,0.15);
+    border: 1px solid var(--warning);
+    color: var(--warning);
+}
+.status-ok {
+    background: rgba(34,197,94,0.1);
+    border: 1px solid var(--positive);
+    color: var(--positive);
+}
+
+/* Cards */
 .cards {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: 1rem;
     margin-bottom: 2rem;
 }
@@ -71,9 +102,22 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
 .card-value { font-size: 1.4rem; font-weight: 600; }
 .card-value.positive { color: var(--positive); }
 .card-value.negative { color: var(--negative); }
+.card-detail { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
 
+/* Chart container */
+.chart-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+    min-height: 250px;
+}
+
+/* Section */
 .section { margin-bottom: 2rem; }
 
+/* Data tables */
 .data-table {
     width: 100%;
     border-collapse: collapse;
@@ -97,7 +141,63 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
 .data-table tr:hover td { background: var(--surface); }
 
 .muted { color: var(--muted); text-align: center; }
+.positive { color: var(--positive); }
+.negative { color: var(--negative); }
 
+/* Badges */
+.badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: rgba(99,102,241,0.2);
+    color: var(--accent);
+}
+.badge-green { background: rgba(34,197,94,0.2); color: var(--positive); }
+.badge-red { background: rgba(239,68,68,0.2); color: var(--negative); }
+
+/* Filter bar */
+.filter-bar {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+.filter-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+}
+.filter-btn.active, .filter-btn:hover {
+    color: var(--text);
+    border-color: var(--accent);
+    background: rgba(99,102,241,0.15);
+}
+
+/* Progress bars */
+.progress-bar-container {
+    width: 100%;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    margin-top: 0.5rem;
+    overflow: hidden;
+}
+.progress-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s;
+}
+.progress-warning { background: var(--warning); }
+.progress-danger { background: var(--negative); }
+
+/* Footer */
 .footer {
     display: flex;
     justify-content: space-between;

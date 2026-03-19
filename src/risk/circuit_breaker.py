@@ -49,7 +49,15 @@ class CircuitBreaker:
             True if trading is allowed, False if halted
         """
         if self._halted:
-            return False
+            # Auto-reset daily halt if a new UTC day has started
+            if "Daily loss limit" in (self._halt_reason or "") and self._halt_time:
+                now = datetime.now(timezone.utc)
+                if now.date() > self._halt_time.date():
+                    self.reset_daily()
+                else:
+                    return False
+            else:
+                return False
 
         # Check daily loss limit (realized + unrealized)
         daily_pnl = self.db.get_daily_pnl()

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}PolyEdge — Strategies{% endblock %}
+
+{% block content %}
+<h1>Strategy Performance</h1>
+<p class="subtitle">Lifetime stats by strategy</p>
+
+<div class="cards">
+    {% for s in strategy_stats %}
+    <div class="card">
+        <div class="card-label">{{ s.strategy }}</div>
+        <div class="card-value {% if s.total_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "%.2f"|format(s.total_pnl) }}
+        </div>
+        <div class="card-detail">
+            {{ s.trade_count }} trades &middot;
+            {{ "%.0f"|format(s.win_rate * 100) }}% win rate
+        </div>
+        {% if s.brier_score is defined and s.brier_score is not none %}
+        <div class="card-detail">Brier: {{ "%.3f"|format(s.brier_score) }}</div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% if not strategy_stats %}
+    <div class="card"><div class="card-label muted">No trade data yet</div></div>
+    {% endif %}
+</div>
+
+<section class="section">
+    <h2>Comparison Chart</h2>
+    <div class="chart-container">
+        <canvas id="stratChart"></canvas>
+    </div>
+</section>
+
+<section class="section">
+    <h2>Details</h2>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Strategy</th>
+                <th>Trades</th>
+                <th>Wins</th>
+                <th>Losses</th>
+                <th>Win Rate</th>
+                <th>Total P&amp;L</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in strategy_stats %}
+            <tr>
+                <td><span class="badge">{{ s.strategy }}</span></td>
+                <td>{{ s.trade_count }}</td>
+                <td>{{ s.winning }}</td>
+                <td>{{ s.losing }}</td>
+                <td>{{ "%.0f"|format(s.win_rate * 100) }}%</td>
+                <td class="{% if s.total_pnl >= 0 %}positive{% else %}negative{% endif %}">${{ "%.2f"|format(s.total_pnl) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+fetch('/api/strategies')
+    .then(r => r.json())
+    .then(data => {
+        if (!data.length) return;
+        const ctx = document.getElementById('stratChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: data.map(d => d.strategy),
+                datasets: [{
+                    label: 'Total P&L',
+                    data: data.map(d => d.total_pnl),
+                    backgroundColor: data.map(d => d.total_pnl >= 0 ? '#22c55e' : '#ef4444'),
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: '#6b7280' }, grid: { color: '#2a2d3a' } },
+                    y: { ticks: { color: '#6b7280', callback: v => '$' + v }, grid: { color: '#2a2d3a' } }
+                }
+            }
+        });
+    });
+</script>
+{% endblock %}

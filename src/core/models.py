@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ──────────────────────────────────────────────
@@ -36,13 +36,13 @@ def dollars_to_cents(dollars: float) -> int:
 # Fee Calculation Helpers
 # ──────────────────────────────────────────────
 
-def kalshi_taker_fee(contracts: int, price_cents: int) -> float:
+def kalshi_taker_fee(contracts: int, price_cents: int) -> int:
     """Calculate Kalshi taker fee in cents. Formula: ceil(0.07 * contracts * price * (1-price))."""
     p = price_cents / 100.0
     return math.ceil(0.07 * contracts * p * (1 - p))
 
 
-def kalshi_maker_fee(contracts: int, price_cents: int) -> float:
+def kalshi_maker_fee(contracts: int, price_cents: int) -> int:
     """Calculate Kalshi maker fee in cents. Formula: ceil(0.0175 * contracts * price * (1-price))."""
     p = price_cents / 100.0
     return math.ceil(0.0175 * contracts * p * (1 - p))
@@ -221,6 +221,27 @@ class Signal(BaseModel):
     acted_on: bool = False
     order_id: Optional[str] = None
 
+    @field_validator("probability_estimate")
+    @classmethod
+    def probability_in_range(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"probability_estimate must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("market_price")
+    @classmethod
+    def market_price_in_range(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"market_price must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("confidence")
+    @classmethod
+    def confidence_in_range(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"confidence must be in [0, 1], got {v}")
+        return v
+
 
 # ──────────────────────────────────────────────
 # Order & Trade Models
@@ -247,6 +268,20 @@ class Order(BaseModel):
     cancelled_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
 
+    @field_validator("price")
+    @classmethod
+    def price_valid(cls, v: float) -> float:
+        if v < 0 or v > 0.99:
+            raise ValueError(f"price must be in [0, 0.99], got {v}")
+        return v
+
+    @field_validator("size")
+    @classmethod
+    def size_positive(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"size must be >= 0, got {v}")
+        return v
+
 
 class Position(BaseModel):
     """An open position (aggregated from fills)."""
@@ -258,6 +293,7 @@ class Position(BaseModel):
     avg_entry_price: float
     current_price: float = 0.0
     unrealized_pnl: float = 0.0
+    total_fees: float = 0.0  # Accumulated fees paid for this position
     strategy: StrategyName = StrategyName.AI_PROBABILITY
     paper: bool = True
     opened_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -269,7 +305,7 @@ class Position(BaseModel):
 
     @property
     def cost_basis(self) -> float:
-        return self.size * self.avg_entry_price
+        return self.size * self.avg_entry_price + self.total_fees
 
 
 class Trade(BaseModel):
@@ -335,6 +371,29 @@ class ForecastResult(BaseModel):
     latency_ms: int = 0
     raw_response: str = ""
     parse_failed: bool = False
+
+    @field_validator("probability")
+    @classmethod
+    def probability_range(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"probability must be in [0.0, 1.0], got {v}")
+        return v
+
+    @field_validator("confidence_low")
+    @classmethod
+    def ci_low_range(cls, v: float) -> float:
+        return max(0.0, min(1.0, v))
+
+    @field_validator("confidence_high")
+    @classmethod
+    def ci_high_valid(cls, v: float, info) -> float:
+        v = max(0.0, min(1.0, v))
+        ci_low = info.data.get("confidence_low", 0.0)
+        if v < ci_low:
+            # Auto-correct inverted CI bounds rather than rejecting
+            # (Claude occasionally returns them swapped)
+            v = ci_low
+        return v
 
 
 class EnsembleForecast(BaseModel):

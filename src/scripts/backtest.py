@@ -98,7 +98,7 @@ def filter_backtestable_markets(raw_markets: list[dict]) -> list[dict]:
             try:
                 volume = max(volume, float(raw.get(key, 0)))
             except (ValueError, TypeError):
-                continue
+                continue  # Expected for missing/malformed fields, try next key
         if volume < 100:
             continue
 
@@ -131,7 +131,7 @@ def build_settled_market(raw: dict) -> Optional[Market]:
                 if last_price > 0:
                     break
             except (ValueError, TypeError):
-                continue
+                continue  # Expected for missing/malformed fields, try next key
 
         if last_price > 0:
             market.tokens = [
@@ -199,7 +199,7 @@ async def run_backtest(
                     try:
                         volume = max(volume, float(raw.get(key, 0)))
                     except (ValueError, TypeError):
-                        continue
+                        continue  # Expected for missing/malformed fields
                 print(f"  {i:3d}. [{result.upper():>3s}] {ticker:<30s} vol={volume:>10,.0f}  {title[:60]}")
             print(f"\nRun without --dry-run to backtest these markets.")
             return

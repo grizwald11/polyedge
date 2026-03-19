@@ -6,6 +6,7 @@ Accessible at localhost:8080.
 
 from __future__ import annotations
 
+import html
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,15 +34,30 @@ except ImportError:
     JINJA2_AVAILABLE = False
 
 
-def create_app(db: Database, metrics: Metrics | None = None) -> Optional[object]:
+def create_app(
+    db: Database,
+    metrics: Metrics | None = None,
+    position_manager=None,
+    calibration_tracker=None,
+    calibration_analyzer=None,
+    circuit_breaker=None,
+) -> Optional[object]:
     """Create the FastAPI dashboard application.
+
+    Args:
+        db: Database instance (required).
+        metrics: Metrics instance for health endpoint.
+        position_manager: Optional PositionManager for live position data.
+        calibration_tracker: Optional CalibrationTracker for calibration bins.
+        calibration_analyzer: Optional CalibrationAnalyzer for reports.
+        circuit_breaker: Optional CircuitBreaker for risk status.
 
     Returns None if FastAPI is not installed.
     """
     if not FASTAPI_AVAILABLE:
         return None
 
-    app = FastAPI(title="PolyEdge Dashboard", version="1.0")
+    app = FastAPI(title="PolyEdge Dashboard", version="2.0")
 
     # Static files
     static_dir = Path(__file__).parent / "static"
@@ -52,40 +68,149 @@ def create_app(db: Database, metrics: Metrics | None = None) -> Optional[object]
     templates_dir = Path(__file__).parent / "templates"
     jinja_env = None
     if JINJA2_AVAILABLE and templates_dir.exists():
-        jinja_env = Environment(loader=FileSystemLoader(str(templates_dir)))
+        jinja_env = Environment(loader=FileSystemLoader(str(templates_dir)), autoescape=True)
+
+    def _render(template_name: str, **ctx) -> str:
+        if jinja_env:
+            template = jinja_env.get_template(template_name)
+            return template.render(**ctx)
+        return f"<h1>PolyEdge</h1><p>Install jinja2 for full UI.</p>"
 
     # ─── HTML Routes ──────────────────────────────
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
         """Portfolio overview page."""
-        if jinja_env:
-            template = jinja_env.get_template("index.html")
-            stats = db.get_stats()
-            summary = db.get_portfolio_summary()
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            daily_pnl = db.get_daily_pnl(today)
+        stats = db.get_stats()
+        summary = db.get_portfolio_summary()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        daily_pnl = db.get_daily_pnl(today)
 
-            return template.render(
-                stats=stats,
-                summary=summary,
-                daily_pnl=daily_pnl,
-                today=today,
-            )
-        return HTMLResponse("<h1>PolyEdge Dashboard</h1><p>Install jinja2 for full UI.</p>")
+        positions = []
+        exposure = 0.0
+        unrealized_pnl = 0.0
+        if position_manager is not None:
+            positions = [
+                {
+                    "market_id": p.market_id,
+                    "direction": p.direction.value,
+                    "size": p.size,
+                    "avg_entry": p.avg_entry_price,
+                    "current": p.current_price,
+                    "pnl": p.unrealized_pnl,
+                    "strategy": p.strategy.value,
+                }
+                for p in position_manager.get_all_positions()
+            ]
+            exposure = position_manager.get_total_exposure()
+            unrealized_pnl = position_manager.get_total_unrealized_pnl()
+
+        cb_halted = False
+        cb_reason = None
+        if circuit_breaker is not None:
+            cb_halted = circuit_breaker.is_halted()
+            cb_reason = circuit_breaker.halt_reason
+
+        return _render(
+            "index.html",
+            stats=stats,
+            summary=summary,
+            daily_pnl=daily_pnl,
+            today=today,
+            positions=positions,
+            exposure=exposure,
+            unrealized_pnl=unrealized_pnl,
+            cb_halted=cb_halted,
+            cb_reason=cb_reason,
+            active_page="portfolio",
+        )
+
+    @app.get("/strategies", response_class=HTMLResponse)
+    async def strategies_page():
+        """Strategy breakdown page."""
+        strategy_stats = db.get_strategy_stats()
+        return _render(
+            "strategies.html",
+            strategy_stats=strategy_stats,
+            active_page="strategies",
+        )
+
+    @app.get("/calibration", response_class=HTMLResponse)
+    async def calibration_page():
+        """Calibration visualization page."""
+        report = None
+        if calibration_analyzer is not None:
+            try:
+                report = calibration_analyzer.generate_report()
+            except Exception as e:
+                logger.warning(f"Failed to generate calibration report: {e}")
+
+        return _render(
+            "calibration.html",
+            report=report,
+            active_page="calibration",
+        )
+
+    @app.get("/signals", response_class=HTMLResponse)
+    async def signals_page():
+        """Signals browser page."""
+        return _render(
+            "signals.html",
+            active_page="signals",
+        )
+
+    @app.get("/risk", response_class=HTMLResponse)
+    async def risk_page():
+        """Risk management page."""
+        cb_state = db.load_circuit_breaker_state()
+        exposure = 0.0
+        exposure_pct = 0.0
+        position_count = 0
+        if position_manager is not None:
+            exposure = position_manager.get_total_exposure()
+            exposure_pct = position_manager.get_total_exposure_pct()
+            position_count = position_manager.get_position_count()
+
+        cooldowns = db.load_cooldowns()
+
+        return _render(
+            "risk.html",
+            cb_state=cb_state,
+            exposure=exposure,
+            exposure_pct=exposure_pct,
+            position_count=position_count,
+            cooldowns=cooldowns,
+            active_page="risk",
+        )
 
     # ─── JSON API Routes ─────────────────────────
 
     @app.get("/api/stats")
     async def api_stats():
-        """Get database stats."""
         return db.get_stats()
 
     @app.get("/api/positions")
     async def api_positions():
-        """Get all open positions from trade history."""
+        """Get live positions from PositionManager (not raw trades)."""
+        if position_manager is not None:
+            return [
+                {
+                    "market_id": p.market_id,
+                    "market_question": p.market_question,
+                    "direction": p.direction.value,
+                    "size": p.size,
+                    "avg_entry_price": p.avg_entry_price,
+                    "current_price": p.current_price,
+                    "unrealized_pnl": p.unrealized_pnl,
+                    "cost_basis": p.cost_basis,
+                    "total_fees": p.total_fees,
+                    "strategy": p.strategy.value,
+                    "paper": p.paper,
+                }
+                for p in position_manager.get_all_positions()
+            ]
+        # Fallback: raw trades from DB
         conn = db._get_conn()
-        # Get latest trades per market to reconstruct positions
         rows = conn.execute(
             "SELECT market_id, side, price, size, strategy, timestamp "
             "FROM trades ORDER BY timestamp DESC LIMIT 100"
@@ -94,21 +219,35 @@ def create_app(db: Database, metrics: Metrics | None = None) -> Optional[object]
 
     @app.get("/api/trades")
     async def api_trades():
-        """Get recent trades."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return db.get_trades_for_date(today)
 
     @app.get("/api/signals")
     async def api_signals():
-        """Get recent signals."""
         return db.get_recent_signals(limit=50)
+
+    @app.get("/api/strategies")
+    async def api_strategies():
+        """Per-strategy P&L, win rate, and optional Brier score."""
+        stats = db.get_strategy_stats()
+        # Enrich with Brier scores if calibration_tracker available
+        if calibration_tracker is not None:
+            for s in stats:
+                try:
+                    from src.core.models import StrategyName
+                    brier = calibration_tracker.calculate_brier_score(
+                        strategy=StrategyName(s["strategy"])
+                    )
+                    s["brier_score"] = brier
+                except Exception:
+                    s["brier_score"] = None
+        return stats
 
     @app.get("/api/calibration")
     async def api_calibration():
-        """Get calibration records."""
         resolved = db.get_resolved_predictions(days=30)
         if not resolved:
-            return {"records": [], "brier_score": None}
+            return {"records": [], "brier_score": None, "total_resolved": 0}
 
         brier_scores = [
             r["brier_score"] for r in resolved
@@ -122,14 +261,57 @@ def create_app(db: Database, metrics: Metrics | None = None) -> Optional[object]
             "total_resolved": len(resolved),
         }
 
+    @app.get("/api/calibration/chart")
+    async def api_calibration_chart():
+        """Binned predicted-vs-actual for Chart.js."""
+        if calibration_tracker is not None:
+            bins = calibration_tracker.get_calibration_bins()
+            return {"bins": bins}
+        return {"bins": []}
+
+    @app.get("/api/calibration/categories")
+    async def api_calibration_categories():
+        """Per-category Brier scores."""
+        if calibration_tracker is not None:
+            return calibration_tracker.get_accuracy_by_category()
+        return {}
+
+    @app.get("/api/risk")
+    async def api_risk():
+        """Exposure levels, halt status."""
+        result = {
+            "halted": False,
+            "halt_reason": None,
+            "exposure": 0.0,
+            "exposure_pct": 0.0,
+            "position_count": 0,
+        }
+        if circuit_breaker is not None:
+            result["halted"] = circuit_breaker.is_halted()
+            result["halt_reason"] = circuit_breaker.halt_reason
+            result["reduced_sizing"] = circuit_breaker.is_reduced_sizing
+        if position_manager is not None:
+            result["exposure"] = position_manager.get_total_exposure()
+            result["exposure_pct"] = position_manager.get_total_exposure_pct()
+            result["position_count"] = position_manager.get_position_count()
+        return result
+
+    @app.get("/api/pnl/timeseries")
+    async def api_pnl_timeseries():
+        """Daily P&L for line chart."""
+        return db.get_pnl_timeseries(days=30)
+
+    @app.get("/api/whale/activity")
+    async def api_whale_activity():
+        """Recent whale trades."""
+        return db.get_whale_activity(limit=50)
+
     @app.get("/api/portfolio")
     async def api_portfolio():
-        """Get portfolio summary."""
         stats = db.get_stats()
         summary = db.get_portfolio_summary()
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         daily_pnl = db.get_daily_pnl(today)
-
         cb_state = db.load_circuit_breaker_state()
 
         return {
@@ -141,13 +323,49 @@ def create_app(db: Database, metrics: Metrics | None = None) -> Optional[object]
 
     @app.get("/api/health")
     async def api_health():
-        """Return health metrics for monitoring."""
         if metrics is not None:
             return metrics.get_health_status()
-        return {
-            "status": "unknown",
-            "message": "Metrics not initialized",
-        }
+        return {"status": "unknown", "message": "Metrics not initialized"}
+
+    # ─── HTML Partial Routes (for HTMX) ──────────
+
+    @app.get("/partials/signals", response_class=HTMLResponse)
+    async def partial_signals():
+        """HTML fragment of recent signals for HTMX swap."""
+        signals = db.get_recent_signals(limit=20)
+        rows = []
+        for s in signals:
+            acted = "Yes" if s.get("acted_on") else "No"
+            rows.append(
+                f'<tr><td>{html.escape(str(s.get("market_id","")))}</td>'
+                f'<td>{html.escape(str(s.get("strategy","")))}</td>'
+                f'<td>{html.escape(str(s.get("direction","")))}</td>'
+                f'<td>{s.get("edge",0):.1%}</td>'
+                f'<td>{s.get("confidence",0):.0%}</td>'
+                f'<td>{acted}</td></tr>'
+            )
+        return "\n".join(rows) if rows else '<tr><td colspan="6" class="muted">No signals yet</td></tr>'
+
+    @app.get("/partials/positions", response_class=HTMLResponse)
+    async def partial_positions():
+        """HTML fragment of positions for HTMX swap."""
+        if position_manager is None:
+            return '<tr><td colspan="6" class="muted">Position manager not connected</td></tr>'
+        positions = position_manager.get_all_positions()
+        if not positions:
+            return '<tr><td colspan="6" class="muted">No open positions</td></tr>'
+        rows = []
+        for p in positions:
+            pnl_class = "positive" if p.unrealized_pnl >= 0 else "negative"
+            rows.append(
+                f'<tr><td>{html.escape(p.market_id)}</td>'
+                f'<td>{html.escape(p.direction.value)}</td>'
+                f'<td>{int(p.size)}</td>'
+                f'<td>${p.avg_entry_price:.2f}</td>'
+                f'<td>${p.current_price:.2f}</td>'
+                f'<td class="{pnl_class}">${p.unrealized_pnl:.2f}</td></tr>'
+            )
+        return "\n".join(rows)
 
     return app
 
@@ -155,11 +373,22 @@ def create_app(db: Database, metrics: Metrics | None = None) -> Optional[object]
 async def start_dashboard(
     db: Database,
     metrics: Metrics | None = None,
+    position_manager=None,
+    calibration_tracker=None,
+    calibration_analyzer=None,
+    circuit_breaker=None,
     host: str = "0.0.0.0",
     port: int = 8080,
 ):
     """Start the dashboard server as a background task."""
-    app = create_app(db, metrics=metrics)
+    app = create_app(
+        db,
+        metrics=metrics,
+        position_manager=position_manager,
+        calibration_tracker=calibration_tracker,
+        calibration_analyzer=calibration_analyzer,
+        circuit_breaker=circuit_breaker,
+    )
     if app is None:
         logger.info("Dashboard not available (install fastapi + uvicorn)")
         return

@@ -81,3 +81,64 @@ class TestSettingsValidation:
         s = Settings(trading={"bankroll": 100, "kelly_fraction": 0.5})
         assert s.trading.bankroll == 100
         assert s.trading.kelly_fraction == 0.5
+
+
+class TestMinEdgeValidation:
+    def test_negative_min_edge_rejected(self):
+        with pytest.raises(ValueError, match="min_edge"):
+            Settings(trading={"min_edge_ai": -0.05})
+
+    def test_zero_min_edge_accepted(self):
+        s = Settings(trading={"min_edge_ai": 0.0})
+        assert s.trading.min_edge_ai == 0.0
+
+    def test_valid_min_edge_accepted(self):
+        s = Settings(trading={"min_edge_arb": 0.03})
+        assert s.trading.min_edge_arb == 0.03
+
+
+class TestTradingModeValidation:
+    def test_paper_accepted(self):
+        s = Settings(trading={"bankroll": 100, "mode": "paper"})
+        assert s.trading.mode == "paper"
+
+    def test_live_accepted(self):
+        s = Settings(trading={"bankroll": 100, "mode": "live"})
+        assert s.trading.mode == "live"
+
+    def test_invalid_mode_rejected(self):
+        with pytest.raises(ValueError, match="mode"):
+            Settings(trading={"bankroll": 100, "mode": "LIVE"})
+
+    def test_typo_mode_rejected(self):
+        with pytest.raises(ValueError, match="mode"):
+            Settings(trading={"bankroll": 100, "mode": "papers"})
+
+
+class TestExecutionConfig:
+    def test_defaults(self):
+        s = Settings()
+        assert s.execution.stale_order_age_seconds == 1800
+        assert s.execution.order_poll_timeout_seconds == 10
+        assert s.execution.order_poll_delay_seconds == 2.0
+        assert s.execution.max_poll_attempts == 5
+        assert s.execution.cycle_timeout_seconds == 300
+
+    def test_yaml_override(self, tmp_path):
+        yaml_file = tmp_path / "settings.yaml"
+        yaml_file.write_text(
+            "execution:\n"
+            "  stale_order_age_seconds: 900\n"
+            "  cycle_timeout_seconds: 600\n"
+            "  max_poll_attempts: 10\n"
+        )
+        s = load_settings(yaml_file)
+        assert s.execution.stale_order_age_seconds == 900
+        assert s.execution.cycle_timeout_seconds == 600
+        assert s.execution.max_poll_attempts == 10
+        # Defaults preserved for fields not overridden
+        assert s.execution.order_poll_timeout_seconds == 10
+
+    def test_snapshot_retention_days(self):
+        s = Settings()
+        assert s.database.snapshot_retention_days == 30

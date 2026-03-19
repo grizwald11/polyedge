@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS markets (
     slug TEXT DEFAULT '',
     subtitle TEXT DEFAULT '',
     event_ticker TEXT DEFAULT '',
+    result TEXT DEFAULT '',
     first_seen TEXT NOT NULL,
     last_updated TEXT NOT NULL
 );
@@ -120,6 +121,7 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id);
+CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
 
 -- Calibration records
 CREATE TABLE IF NOT EXISTS calibration_records (
@@ -138,6 +140,7 @@ CREATE TABLE IF NOT EXISTS calibration_records (
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_market ON calibration_records(market_id);
 CREATE INDEX IF NOT EXISTS idx_calibration_resolved ON calibration_records(actual_outcome);
+CREATE INDEX IF NOT EXISTS idx_calibration_resolved_at ON calibration_records(resolved_at);
 
 -- Whale wallets (Phase 6)
 CREATE TABLE IF NOT EXISTS whale_wallets (
@@ -219,6 +222,7 @@ class Database:
         if self.wal_mode:
             conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
         return conn
 
@@ -227,8 +231,8 @@ class Database:
         if self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing database connection: {e}")
             self._conn = None
 
     def _init_db(self):
@@ -315,6 +319,19 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_whale_trades_market ON whale_trades(market_id)"
             )
             logger.info("Migration: created whale_trades table")
+
+        # Migration: add result column to markets (for backtest engine)
+        market_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(markets)").fetchall()
+        }
+        if "result" not in market_cols:
+            conn.execute("ALTER TABLE markets ADD COLUMN result TEXT DEFAULT ''")
+            logger.info("Migration: added result column to markets")
+
+        # Migration v5 -> v6: add missing performance indices
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_calibration_resolved_at ON calibration_records(resolved_at)")
         conn.commit()
 
     # ──────────────────────────────────────
@@ -864,6 +881,105 @@ class Database:
     # ──────────────────────────────────────
     # Stats
     # ──────────────────────────────────────
+
+    def get_snapshots_for_market(
+        self,
+        market_id: str,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> list[dict]:
+        """Get price snapshots for a market within a time range.
+
+        Args:
+            market_id: Market ticker.
+            start: ISO start timestamp (inclusive). None = no lower bound.
+            end: ISO end timestamp (inclusive). None = no upper bound.
+
+        Returns:
+            List of snapshot dicts ordered by timestamp.
+        """
+        conn = self._get_conn()
+        query = "SELECT * FROM market_snapshots WHERE market_id = ?"
+        params: list = [market_id]
+        if start:
+            query += " AND timestamp >= ?"
+            params.append(start)
+        if end:
+            query += " AND timestamp <= ?"
+            params.append(end)
+        query += " ORDER BY timestamp ASC"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_pnl_timeseries(self, days: int = 30) -> list[dict]:
+        """Get daily P&L aggregates for charting.
+
+        Returns list of {date, pnl, cumulative_pnl, trade_count} dicts.
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT DATE(timestamp) as date,
+                   COALESCE(SUM(realized_pnl), 0) as pnl,
+                   COUNT(*) as trade_count
+            FROM trades
+            WHERE timestamp >= ?
+            GROUP BY DATE(timestamp)
+            ORDER BY date ASC
+        """, (cutoff,)).fetchall()
+
+        result = []
+        cumulative = 0.0
+        for row in rows:
+            cumulative += row["pnl"]
+            result.append({
+                "date": row["date"],
+                "pnl": row["pnl"],
+                "cumulative_pnl": cumulative,
+                "trade_count": row["trade_count"],
+            })
+        return result
+
+    def get_strategy_stats(self) -> list[dict]:
+        """Get per-strategy lifetime totals.
+
+        Returns list of {strategy, trade_count, total_pnl, winning, losing, win_rate}.
+        """
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT strategy,
+                   COUNT(*) as trade_count,
+                   COALESCE(SUM(realized_pnl), 0) as total_pnl,
+                   SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as winning,
+                   SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) as losing
+            FROM trades
+            GROUP BY strategy
+            ORDER BY total_pnl DESC
+        """).fetchall()
+
+        result = []
+        for row in rows:
+            count = row["trade_count"]
+            winning = row["winning"] or 0
+            result.append({
+                "strategy": row["strategy"],
+                "trade_count": count,
+                "total_pnl": row["total_pnl"],
+                "winning": winning,
+                "losing": row["losing"] or 0,
+                "win_rate": winning / count if count > 0 else 0.0,
+            })
+        return result
+
+    def get_whale_activity(self, limit: int = 50) -> list[dict]:
+        """Get recent whale trades."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM whale_trades ORDER BY detected_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_stats(self) -> dict:
         """Get database stats summary."""

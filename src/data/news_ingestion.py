@@ -149,8 +149,8 @@ class NewsIngestion:
                 import calendar
                 ts = calendar.timegm(published)
                 return datetime.fromtimestamp(ts, tz=timezone.utc)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to parse published timestamp: {e}")
         return None
 
     def _extract_source(self, feed_url: str) -> str:

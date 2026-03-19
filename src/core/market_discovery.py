@@ -171,8 +171,8 @@ def parse_market(raw: dict[str, Any], event_category: str = "") -> Optional[Mark
         if close_time:
             try:
                 end_date = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Failed to parse close_time '{close_time}': {e}")
 
         # Volume — Kalshi uses *_fp fields (contract counts as strings)
         volume_24h = _parse_dollar_str(raw.get("volume_24h_fp") or raw.get("volume_24h"))

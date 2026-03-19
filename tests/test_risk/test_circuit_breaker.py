@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from src.config import Settings
@@ -136,6 +138,31 @@ class TestReset:
         cb.reset_daily()
 
         assert cb.is_halted() is True  # Not a daily halt, shouldn't clear
+
+
+class TestAutoReset:
+    def test_daily_halt_auto_resets_next_day(self, cb):
+        """Daily halt should auto-clear when check() is called on a new UTC day."""
+        cb._halted = True
+        cb._halt_reason = "Daily loss limit hit"
+        cb._halt_time = datetime(2026, 3, 17, 23, 0, 0, tzinfo=timezone.utc)  # Yesterday
+
+        # check() on a new day should auto-reset and proceed to checks
+        # (will re-halt if daily PnL is still bad, but the old halt clears)
+        result = cb.check(bankroll=500.0)
+        # The halt was cleared by auto-reset; re-check may or may not halt
+        # depending on daily PnL, but the old halt flag was cleared
+        assert cb._halt_reason is None or "Daily loss limit" not in (cb._halt_reason or "")
+
+    def test_non_daily_halt_not_auto_reset(self, cb):
+        """Non-daily halts (e.g., consecutive losses) should NOT auto-reset."""
+        cb._halted = True
+        cb._halt_reason = "5 consecutive losing days"
+        cb._halt_time = datetime(2026, 3, 17, 23, 0, 0, tzinfo=timezone.utc)
+
+        result = cb.check(bankroll=500.0)
+        assert result is False
+        assert cb.is_halted() is True
 
 
 class TestPersistence:

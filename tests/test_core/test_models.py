@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from src.core.models import (
     Market, MarketToken, MarketCategory, Signal, StrategyName, Direction,
     Order, Side, OrderType, OrderStatus, CalibrationRecord, ForecastResult,
@@ -163,6 +165,49 @@ class TestForecastResult:
         assert len(sample_forecast.key_factors_for) == 2
         assert sample_forecast.model_used == "claude-sonnet-4-6"
 
+    def test_probability_out_of_range(self):
+        with pytest.raises(ValueError, match="probability"):
+            ForecastResult(probability=1.5, reasoning="test")
+
+    def test_negative_probability_rejected(self):
+        with pytest.raises(ValueError, match="probability"):
+            ForecastResult(probability=-0.1, reasoning="test")
+
+    def test_inverted_ci_bounds_auto_corrected(self):
+        """Regression: inverted CI (low=0.8, high=0.2) previously corrupted ensemble weights.
+
+        ci_width became negative → ci_penalty=0 → Claude got full weight
+        regardless of uncertainty. Now auto-corrected to low=0.8, high=0.8.
+        """
+        f = ForecastResult(
+            probability=0.50,
+            confidence_low=0.80,
+            confidence_high=0.20,
+            reasoning="test",
+        )
+        # Auto-corrected: high should be clamped to at least confidence_low
+        assert f.confidence_high >= f.confidence_low
+
+    def test_ci_bounds_clamped_to_01(self):
+        f = ForecastResult(
+            probability=0.50,
+            confidence_low=-0.5,
+            confidence_high=1.5,
+            reasoning="test",
+        )
+        assert f.confidence_low == 0.0
+        assert f.confidence_high == 1.0
+
+    def test_valid_ci_preserved(self):
+        f = ForecastResult(
+            probability=0.60,
+            confidence_low=0.50,
+            confidence_high=0.70,
+            reasoning="test",
+        )
+        assert f.confidence_low == 0.50
+        assert f.confidence_high == 0.70
+
 
 class TestRiskCheckResult:
     def test_passed(self):
@@ -189,4 +234,84 @@ class TestPositionModel:
             size=100, avg_entry_price=0.40, current_price=0.55,
         )
         assert abs(p.market_value - 55.0) < 0.01
-        assert abs(p.cost_basis - 40.0) < 0.01
+        assert abs(p.cost_basis - 40.0) < 0.01  # No fees → same as before
+
+    def test_cost_basis_includes_fees(self):
+        p = Position(
+            market_id="x", token_id="t", direction=Direction.BUY_YES,
+            size=100, avg_entry_price=0.40, total_fees=1.50,
+        )
+        # cost_basis = size * avg_entry + total_fees = 40.0 + 1.50
+        assert abs(p.cost_basis - 41.50) < 0.01
+
+    def test_total_fees_default_zero(self):
+        p = Position(
+            market_id="x", token_id="t", direction=Direction.BUY_YES,
+            size=10, avg_entry_price=0.50,
+        )
+        assert p.total_fees == 0.0
+
+
+class TestSignalValidation:
+    def test_probability_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="probability_estimate"):
+            Signal(
+                strategy=StrategyName.AI_PROBABILITY,
+                market_id="X", direction=Direction.BUY_YES,
+                edge=0.1, probability_estimate=1.5, market_price=0.5,
+            )
+
+    def test_market_price_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="market_price"):
+            Signal(
+                strategy=StrategyName.AI_PROBABILITY,
+                market_id="X", direction=Direction.BUY_YES,
+                edge=0.1, probability_estimate=0.5, market_price=-0.1,
+            )
+
+    def test_confidence_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="confidence"):
+            Signal(
+                strategy=StrategyName.AI_PROBABILITY,
+                market_id="X", direction=Direction.BUY_YES,
+                edge=0.1, probability_estimate=0.5, market_price=0.5,
+                confidence=2.0,
+            )
+
+    def test_valid_signal_accepted(self):
+        s = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="X", direction=Direction.BUY_YES,
+            edge=0.1, probability_estimate=0.6, market_price=0.5,
+            confidence=0.8,
+        )
+        assert s.probability_estimate == 0.6
+
+
+class TestOrderValidation:
+    def test_negative_price_rejected(self):
+        with pytest.raises(ValueError, match="price"):
+            Order(
+                market_id="X", token_id="t", side=Side.BUY,
+                price=-0.5, size=10,
+            )
+
+    def test_price_above_99_rejected(self):
+        """Kalshi prices are 0.01-0.99. Prices > 0.99 should be rejected."""
+        with pytest.raises(ValueError, match="price"):
+            Order(
+                market_id="X", token_id="t", side=Side.BUY,
+                price=1.50, size=10,
+            )
+
+    def test_negative_size_rejected(self):
+        with pytest.raises(ValueError, match="size"):
+            Order(
+                market_id="X", token_id="t", side=Side.BUY,
+                price=0.5, size=-1,
+            )
+
+    def test_valid_order_accepted(self):
+        o = Order(market_id="X", token_id="t", side=Side.BUY, price=0.5, size=10)
+        assert o.price == 0.5
+        assert o.size == 10

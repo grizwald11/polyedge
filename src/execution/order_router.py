@@ -165,7 +165,12 @@ class OrderRouter:
             if final_status in ("executed", "filled"):
                 order.status = OrderStatus.FILLED
                 order.filled_at = now
-                order.fill_price = order.price
+                # Use actual fill price from API if available; fall back to order price
+                api_fill_price = result.get("avg_price")
+                if api_fill_price is not None:
+                    order.fill_price = api_fill_price / 100.0  # cents to dollars
+                else:
+                    order.fill_price = order.price
             elif final_status == "resting":
                 order.status = OrderStatus.OPEN
                 self._log_order(order)
@@ -234,8 +239,10 @@ class OrderRouter:
         if not kalshi_order_id:
             return status
 
-        for attempt in range(5):
-            await asyncio.sleep(2)
+        max_attempts = self.settings.execution.max_poll_attempts
+        poll_delay = self.settings.execution.order_poll_delay_seconds
+        for attempt in range(max_attempts):
+            await asyncio.sleep(poll_delay)
             try:
                 order_data = await self.kalshi.get_order(kalshi_order_id)
                 if order_data:

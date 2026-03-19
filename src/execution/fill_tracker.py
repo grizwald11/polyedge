@@ -31,9 +31,10 @@ class FillTracker:
     - WebSocket: handle_ws_fill() processes real-time fill notifications
     """
 
-    def __init__(self, kalshi: KalshiClient, db: Database):
+    def __init__(self, kalshi: KalshiClient, db: Database, poll_timeout: int = 10):
         self.kalshi = kalshi
         self.db = db
+        self._poll_timeout = poll_timeout
         self._pending_orders: dict[str, Order] = {}  # order_id -> Order
         self._ws_fills: list[Trade] = []  # Fills received via WebSocket
         # Load previously filled order IDs from database to prevent duplicate
@@ -57,10 +58,12 @@ class FillTracker:
         fills: list[Trade] = []
         resolved: list[str] = []
 
-        for order_id, order in self._pending_orders.items():
+        # Snapshot to avoid RuntimeError if handle_ws_fill() pops an entry
+        # during an await inside this loop.
+        for order_id, order in list(self._pending_orders.items()):
             try:
                 status = await asyncio.wait_for(
-                    self.kalshi.get_order(order_id), timeout=10
+                    self.kalshi.get_order(order_id), timeout=self._poll_timeout
                 )
                 if status is None:
                     continue
@@ -72,6 +75,16 @@ class FillTracker:
                     if trade:
                         fills.append(trade)
                     resolved.append(order_id)
+                elif kalshi_status == "partial":
+                    # Partial fill — record what's filled so far, keep tracking remainder
+                    filled_count = status.get("filled_count", 0)
+                    remaining = status.get("remaining_count", 0)
+                    if filled_count > 0 and order.id not in self._processed_fills:
+                        partial_trade = self._record_partial_fill(order, status)
+                        if partial_trade:
+                            fills.append(partial_trade)
+                    if remaining == 0:
+                        resolved.append(order_id)
                 elif kalshi_status in ("canceled", "cancelled"):
                     self._record_cancellation(order)
                     resolved.append(order_id)
@@ -120,6 +133,57 @@ class FillTracker:
         fills = self._ws_fills[:]
         self._ws_fills.clear()
         return fills
+
+    def _record_partial_fill(self, order: Order, kalshi_data: dict) -> Optional[Trade]:
+        """Record a partial fill. Returns Trade for the filled portion only."""
+        if order.id in self._processed_fills:
+            return None
+
+        filled_count = kalshi_data.get("filled_count", 0)
+        if filled_count <= 0:
+            return None
+
+        now = datetime.now(timezone.utc)
+
+        # Calculate fee on filled portion only
+        price_cents = dollars_to_cents(order.price)
+        if order.order_type == OrderType.GTC:
+            fee_cents = kalshi_maker_fee(filled_count, price_cents)
+        else:
+            fee_cents = kalshi_taker_fee(filled_count, price_cents)
+
+        trade = Trade(
+            order_id=order.id,
+            market_id=order.market_id,
+            token_id=order.token_id,
+            side=order.side,
+            price=order.price,
+            size=float(filled_count),
+            fee=fee_cents / 100.0,
+            realized_pnl=0.0,
+            strategy=order.strategy,
+            paper=False,
+            timestamp=now,
+        )
+
+        # Mark as processed so we don't double-record
+        self._processed_fills.add(order.id)
+
+        # Update order status but do NOT mutate order.size — the original
+        # size is needed for fee calculations and DB consistency. Track
+        # remaining count via the API, not by mutating local state.
+        remaining = kalshi_data.get("remaining_count", 0)
+        order.status = OrderStatus.PARTIAL if remaining > 0 else OrderStatus.FILLED
+
+        self.db.log_trade(trade)
+        self._log_order(order)
+
+        logger.info(
+            f"[PARTIAL FILL] {order.side.value} {filled_count}x "
+            f"{order.token_id} @ ${order.price:.2f} "
+            f"({remaining} remaining)"
+        )
+        return trade
 
     def _record_fill(self, order: Order, kalshi_data: dict) -> Optional[Trade]:
         """Record a detected fill. Returns None if already processed (dedup)."""

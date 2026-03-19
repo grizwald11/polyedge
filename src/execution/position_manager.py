@@ -61,6 +61,7 @@ class PositionManager:
                 avg_entry_price=trade.price,
                 current_price=trade.price,
                 unrealized_pnl=0.0,
+                total_fees=trade.fee,
                 strategy=trade.strategy,
                 paper=trade.paper,
                 opened_at=trade.timestamp,
@@ -79,6 +80,8 @@ class PositionManager:
                 total_cost = existing.avg_entry_price * existing.size + trade.price * trade.size
                 existing.size += trade.size
                 existing.avg_entry_price = total_cost / existing.size if existing.size > 0 else 0
+                # Accumulate fees on buy
+                existing.total_fees += trade.fee
             else:
                 # Reducing position — avg_entry_price stays the same
                 # (it represents the cost basis of remaining contracts)
@@ -89,6 +92,10 @@ class PositionManager:
                         f"for {trade.market_id} — clamping to position size"
                     )
                     sell_size = existing.size
+                # Accumulate all fees (buy + sell). Fees are sunk costs and
+                # should not be reduced when partially closing — they were
+                # already incurred on the initial buy.
+                existing.total_fees += trade.fee
                 existing.size -= sell_size
                 if existing.size <= 0:
                     # Position closed

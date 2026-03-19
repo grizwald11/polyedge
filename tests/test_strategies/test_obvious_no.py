@@ -68,11 +68,15 @@ class TestObviousNoStrategy:
         # Simple return: (1.0 - 0.97) / 0.97 ≈ 3.09%
         assert "return" in signals[0].reasoning.lower()
 
-    def test_signal_edge_is_yes_price(self, strategy):
+    def test_signal_edge_is_probability_based(self, strategy):
+        """Edge should be probability_estimate - no_price, not dollar profit."""
         market = _make_market(yes_price=0.04, days=10)
         signals = strategy.scan_for_opportunities([market])
         assert len(signals) == 1
-        assert abs(signals[0].edge - 0.04) < 0.001
+        # probability_estimate = min(0.99, 1.0 - 0.04*0.5) = 0.98
+        # edge = 0.98 - 0.96 = 0.02
+        assert abs(signals[0].edge - 0.02) < 0.001
+        assert abs(signals[0].probability_estimate - 0.98) < 0.001
 
     def test_rejects_yes_price_too_low(self, strategy):
         # YES at $0.00 — no token to buy NO against
@@ -102,3 +106,32 @@ class TestObviousNoStrategy:
 
         signals = strategy.scan_for_opportunities([m1, m2, m3])
         assert len(signals) == 2
+
+    def test_edge_feeds_kelly_correctly(self, strategy):
+        """Regression: edge must produce correct market_price in Kelly sizer.
+
+        Kelly derives market_price = probability - edge. If edge was dollar
+        profit (~0.03), Kelly got market_price=0.96 instead of 0.97, oversizing
+        by ~50%. With probability-based edge, market_price should match no_price.
+        """
+        market = _make_market(yes_price=0.03, days=15)
+        signals = strategy.scan_for_opportunities([market])
+        assert len(signals) == 1
+        sig = signals[0]
+        # Kelly derives: market_price = probability - edge
+        kelly_market_price = sig.probability_estimate - sig.edge
+        # Should approximately equal the actual no_price (0.97)
+        assert abs(kelly_market_price - 0.97) < 0.005
+
+    def test_confidence_varies_with_yes_price(self, strategy):
+        """Regression: confidence should scale with YES price, not be hardcoded 0.95."""
+        m_low = _make_market(yes_price=0.02, days=10)
+        m_high = _make_market(yes_price=0.05, days=10)
+        m_low.ticker = "LOW"
+        m_high.ticker = "HIGH"
+        signals = strategy.scan_for_opportunities([m_low, m_high])
+        assert len(signals) == 2
+        low_sig = next(s for s in signals if s.market_id == "LOW")
+        high_sig = next(s for s in signals if s.market_id == "HIGH")
+        # YES=0.02 should have higher confidence than YES=0.05
+        assert low_sig.confidence > high_sig.confidence

@@ -71,8 +71,12 @@ class ObviousNoStrategy:
         simple_return = net_profit / no_price
         annualized_return = simple_return * (365.0 / days) if days > 0 else 0
 
-        # Edge = net profit per contract when NO resolves to $1.00
-        edge = net_profit
+        # Edge = probability edge (our estimate - market price), NOT dollar profit.
+        # Kelly sizer uses edge to derive market_price = probability - edge,
+        # so edge must be in probability space for correct sizing.
+        # Our probability estimate: scale confidence by how far YES is from zero
+        probability_estimate = min(0.99, 1.0 - yes_price * 0.5)  # YES=0.01→0.995, YES=0.05→0.975
+        edge = probability_estimate - no_price
 
         if edge < min_edge:
             return None
@@ -81,15 +85,18 @@ class ObviousNoStrategy:
         if annualized_return < 0.20:
             return None
 
+        # Confidence inversely correlated with YES price
+        confidence = min(0.99, max(0.80, 1.0 - yes_price * 2.0))
+
         signal = Signal(
             strategy=StrategyName.OBVIOUS_NO,
             market_id=market.ticker,
             market_question=market.question,
             direction=Direction.BUY_NO,
             edge=edge,
-            probability_estimate=min(0.99, no_price + edge),  # Our estimate of NO probability
+            probability_estimate=probability_estimate,
             market_price=no_price,
-            confidence=0.95,  # High confidence on obvious outcomes
+            confidence=confidence,
             reasoning=(
                 f"YES at ${yes_price:.2f}, NO at ${no_price:.2f}. "
                 f"Fee: ${fee_per_contract:.4f}/contract. "

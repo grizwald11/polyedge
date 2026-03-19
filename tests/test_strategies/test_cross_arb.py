@@ -124,6 +124,89 @@ class TestTypeCMutualExclusivity:
         assert len(type_c) == 0
 
 
+class TestTypeCEdgeScaling:
+    """Tests for Type C single-outcome edge scaling fix."""
+
+    @pytest.mark.asyncio
+    async def test_edge_scaled_proportionally_underpriced(self, mock_graph, mock_forecaster, tmp_db):
+        """Type C underpriced: single_edge < basket_edge for the cheapest outcome."""
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+
+        # YES prices: 0.20 + 0.30 + 0.40 = 0.90 → basket_edge = 0.10
+        markets = [
+            _make_market("CAND-A", 0.20, 0.80, event_ticker="EV1"),
+            _make_market("CAND-B", 0.30, 0.70, event_ticker="EV1"),
+            _make_market("CAND-C", 0.40, 0.60, event_ticker="EV1"),
+        ]
+
+        signals = await strategy.scan_for_opportunities(markets)
+        type_c = [s for s in signals if "Mutual exclusivity" in s.reasoning]
+        assert len(type_c) == 1
+
+        # Cheapest = CAND-A (0.20). single_edge = 0.10 * (0.20 / 0.90) ≈ 0.022
+        basket_edge = 0.10
+        expected_single = basket_edge * (0.20 / 0.90)
+        assert type_c[0].edge == pytest.approx(expected_single, abs=0.001)
+        assert type_c[0].edge < basket_edge  # Must be less than basket edge
+
+    @pytest.mark.asyncio
+    async def test_edge_scaled_proportionally_overpriced(self, mock_graph, mock_forecaster, tmp_db):
+        """Type C overpriced: single_edge < basket_edge for the most expensive outcome."""
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+
+        # YES prices: 0.40 + 0.35 + 0.40 = 1.15 → basket_edge = 0.15
+        markets = [
+            _make_market("CAND-A", 0.40, 0.60, event_ticker="EV2"),
+            _make_market("CAND-B", 0.35, 0.65, event_ticker="EV2"),
+            _make_market("CAND-C", 0.40, 0.60, event_ticker="EV2"),
+        ]
+
+        signals = await strategy.scan_for_opportunities(markets)
+        type_c = [s for s in signals if "Mutual exclusivity" in s.reasoning]
+        assert len(type_c) == 1
+
+        basket_edge = 0.15
+        # Most expensive = CAND-A or CAND-C (0.40). single_edge = 0.15 * (0.40/1.15)
+        expected_single = basket_edge * (0.40 / 1.15)
+        assert type_c[0].edge == pytest.approx(expected_single, abs=0.001)
+        assert type_c[0].edge < basket_edge
+
+    @pytest.mark.asyncio
+    async def test_single_market_in_event_no_signal(self, mock_graph, mock_forecaster, tmp_db):
+        """An event with only 1 market should not generate Type C signals."""
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+
+        markets = [_make_market("CAND-A", 0.30, 0.70, event_ticker="SOLO")]
+        signals = await strategy.scan_for_opportunities(markets)
+        type_c = [s for s in signals if "Mutual exclusivity" in s.reasoning]
+        assert len(type_c) == 0
+
+    @pytest.mark.asyncio
+    async def test_zero_yes_prices_no_crash(self, mock_graph, mock_forecaster, tmp_db):
+        """Markets with yes_price=0 should not cause division by zero."""
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+
+        markets = [
+            _make_market("CAND-A", 0.0, 1.0, event_ticker="ZERO"),
+            _make_market("CAND-B", 0.0, 1.0, event_ticker="ZERO"),
+        ]
+        # Should not crash — may or may not produce signals
+        signals = await strategy.scan_for_opportunities(markets)
+        # No crash is the assertion
+
+    @pytest.mark.asyncio
+    async def test_empty_markets_list(self, mock_graph, mock_forecaster, tmp_db):
+        """Empty markets list should produce no signals."""
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+        signals = await strategy.scan_for_opportunities([])
+        assert signals == []
+
+
 class TestTypeBSubset:
     @pytest.mark.asyncio
     async def test_claude_validation_used(self, mock_forecaster, tmp_db):

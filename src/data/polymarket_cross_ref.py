@@ -71,8 +71,8 @@ class PolymarketCrossRef:
                     import json
                     prices = json.loads(outcome_prices)
                     yes_price = float(prices[0]) if prices else None
-                except (ValueError, IndexError):
-                    pass
+                except (ValueError, IndexError) as e:
+                    logger.debug(f"Failed to parse outcomePrices: {e}")
             elif isinstance(outcome_prices, list) and outcome_prices:
                 yes_price = float(outcome_prices[0])
 

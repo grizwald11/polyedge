@@ -44,6 +44,20 @@ class TradingConfig(BaseModel):
     max_obvious_no_pct: float = 0.10
     max_trades_per_cycle: int = 5  # Max trades per scan cycle to prevent overtrading
 
+    @field_validator("mode")
+    @classmethod
+    def mode_valid(cls, v: str) -> str:
+        if v not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper' or 'live', got '{v}'")
+        return v
+
+    @field_validator("min_edge_ai", "min_edge_arb", "min_edge_obvious_no")
+    @classmethod
+    def min_edge_non_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"min_edge must be >= 0, got {v}")
+        return v
+
     @field_validator("bankroll")
     @classmethod
     def bankroll_positive(cls, v: float) -> float:
@@ -102,6 +116,14 @@ class WhaleConfig(BaseModel):
     poll_interval_seconds: int = 600
 
 
+class ExecutionConfig(BaseModel):
+    stale_order_age_seconds: int = 1800  # Cancel orders resting > 30 min
+    order_poll_timeout_seconds: int = 10  # Timeout for each order status check
+    order_poll_delay_seconds: float = 2.0  # Delay between order status polls
+    max_poll_attempts: int = 5  # Max order status poll attempts
+    cycle_timeout_seconds: int = 300  # Hard timeout per scan-trade cycle
+
+
 class AlertsConfig(BaseModel):
     enabled: bool = True
     imessage_enabled: bool = False
@@ -114,6 +136,7 @@ class AlertsConfig(BaseModel):
 class DatabaseConfig(BaseModel):
     path: str = "data/markets.db"
     wal_mode: bool = True
+    snapshot_retention_days: int = 30  # Cleanup snapshots older than this
 
 
 class LoggingConfig(BaseModel):
@@ -130,6 +153,7 @@ class Settings(BaseModel):
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     whales: WhaleConfig = Field(default_factory=WhaleConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

@@ -57,8 +57,9 @@ class TestCorrelatedExposure:
         pr = PortfolioRisk(pm, tmp_db)
 
         # Both are in EVENT-1, so correlated exposure for MKT-A includes MKT-B
+        # cost_basis includes fees: (3.0+0.02) + (4.0+0.02) = 7.04
         exposure = pr.get_correlated_exposure("MKT-A")
-        assert exposure == pytest.approx(7.0)  # 3.0 + 4.0
+        assert exposure == pytest.approx(7.04)  # 3.02 + 4.02
 
     def test_different_events_not_correlated(self, tmp_db):
         m1 = _make_market("MKT-A", event_ticker="EVENT-1")
@@ -73,7 +74,7 @@ class TestCorrelatedExposure:
         pr = PortfolioRisk(pm, tmp_db)
 
         exposure = pr.get_correlated_exposure("MKT-A")
-        assert exposure == pytest.approx(3.0)  # Only MKT-A
+        assert exposure == pytest.approx(3.02)  # Only MKT-A (3.0 + 0.02 fee)
 
     def test_no_event_ticker_zero(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
@@ -124,5 +125,5 @@ class TestEventExposure:
 
         pr = PortfolioRisk(pm, tmp_db)
 
-        assert pr.get_event_exposure("EVENT-1") == pytest.approx(7.0)
+        assert pr.get_event_exposure("EVENT-1") == pytest.approx(7.04)  # 3.02 + 4.02
         assert pr.get_event_exposure("EVENT-2") == pytest.approx(0.0)

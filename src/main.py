@@ -110,7 +110,9 @@ async def scan_and_trade(
 
     # Cancel stale open orders (resting > 30 min with no fill)
     try:
-        stale_cancelled = await order_router.cancel_stale_orders(max_age_seconds=1800)
+        stale_cancelled = await order_router.cancel_stale_orders(
+            max_age_seconds=settings.execution.stale_order_age_seconds
+        )
         if stale_cancelled:
             logger.info(f"Cancelled {stale_cancelled} stale open orders")
     except Exception as e:
@@ -125,8 +127,8 @@ async def scan_and_trade(
                 await alert_manager.send_circuit_breaker_alert(
                     circuit_breaker.halt_reason or "Unknown"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to send circuit breaker alert: {e}")
         return
 
     # Scan and filter markets
@@ -192,8 +194,8 @@ async def scan_and_trade(
                         strategy=position.strategy.value,
                         edge=0.0,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to send exit trade alert for {position.market_id}: {e}")
 
     # Index markets in graph (if available)
     if market_graph is not None:
@@ -203,9 +205,19 @@ async def scan_and_trade(
             logger.warning(f"Market graph indexing failed: {e}")
 
     # Generate signals from all strategies
-    ai_signals = await ai_strategy.scan_for_opportunities(markets[:30])
-    no_signals = no_strategy.scan_for_opportunities(markets)
-    all_signals = ai_signals + no_signals
+    all_signals: list = []
+
+    try:
+        ai_signals = await ai_strategy.scan_for_opportunities(markets[:30])
+        all_signals.extend(ai_signals)
+    except Exception as e:
+        logger.error(f"AI probability strategy failed: {e}")
+
+    try:
+        no_signals = no_strategy.scan_for_opportunities(markets)
+        all_signals.extend(no_signals)
+    except Exception as e:
+        logger.error(f"Obvious NO strategy failed: {e}")
 
     if news_strategy is not None:
         try:
@@ -335,8 +347,8 @@ async def scan_and_trade(
                         strategy=signal.strategy.value,
                         edge=signal.edge,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to send trade alert for {signal.market_id}: {e}")
 
             trades_executed += 1
             acted_markets.add(signal.market_id)
@@ -422,7 +434,9 @@ async def run_trading_loop(
 
                 # Daily maintenance: clean up old snapshots to prevent DB bloat
                 try:
-                    scanner.db.cleanup_old_snapshots(max_age_days=30)
+                    scanner.db.cleanup_old_snapshots(
+                        max_age_days=settings.database.snapshot_retention_days
+                    )
                 except Exception as e:
                     logger.warning(f"Snapshot cleanup failed: {e}")
 
@@ -455,7 +469,7 @@ async def run_trading_loop(
                 circuit_breaker, order_builder, order_router, position_manager,
                 calibration, resolution_tracker, calibration_analyzer,
                 fill_tracker, alert_manager, metrics, settings, cycle_count,
-            ), timeout=300)  # 5-minute hard timeout per cycle
+            ), timeout=settings.execution.cycle_timeout_seconds)
             stats = scanner.db.get_stats()
             logger.info(
                 f"DB stats: {stats['active_markets']} markets, "
@@ -569,7 +583,7 @@ async def main():
     order_builder = OrderBuilder(settings)
     order_router = OrderRouter(settings, kalshi, db)
     position_manager = PositionManager(db, settings.trading.bankroll)
-    fill_tracker = FillTracker(kalshi, db)
+    fill_tracker = FillTracker(kalshi, db, poll_timeout=settings.execution.order_poll_timeout_seconds)
 
     try:
         portfolio_risk = PortfolioRisk(position_manager, db)
@@ -655,7 +669,14 @@ async def main():
     dashboard_task = None
     try:
         from src.dashboard.server import start_dashboard
-        dashboard_task = asyncio.create_task(start_dashboard(db, metrics=metrics))
+        dashboard_task = asyncio.create_task(start_dashboard(
+            db,
+            metrics=metrics,
+            position_manager=position_manager,
+            calibration_tracker=calibration,
+            calibration_analyzer=calibration_analyzer,
+            circuit_breaker=circuit_breaker,
+        ))
         logger.info("Dashboard starting at http://0.0.0.0:8080")
     except ImportError:
         logger.info("Dashboard disabled (install fastapi + uvicorn)")
@@ -689,15 +710,19 @@ async def main():
             ws_task.cancel()
             try:
                 await ws_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                logger.debug(f"WebSocket task cleanup error: {e}")
 
         if dashboard_task is not None:
             dashboard_task.cancel()
             try:
                 await dashboard_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                logger.debug(f"Dashboard task cleanup error: {e}")
 
         try:
             await discovery.close()

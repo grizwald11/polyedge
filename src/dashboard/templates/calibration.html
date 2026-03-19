@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}PolyEdge — Calibration{% endblock %}
+
+{% block content %}
+<h1>Calibration</h1>
+<p class="subtitle">Predicted probability vs actual outcomes</p>
+
+{% if report %}
+<div class="cards">
+    <div class="card">
+        <div class="card-label">Overall Brier Score</div>
+        <div class="card-value">{{ "%.3f"|format(report.overall_brier) if report.overall_brier is not none else "N/A" }}</div>
+        <div class="card-detail">Lower = better (0 = perfect, 0.25 = random)</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Win Rate</div>
+        <div class="card-value">{{ "%.1f"|format(report.overall_win_rate * 100) if report.overall_win_rate is not none else "N/A" }}%</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Resolved</div>
+        <div class="card-value">{{ report.total_resolved }}</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Unresolved</div>
+        <div class="card-value">{{ report.total_unresolved }}</div>
+    </div>
+</div>
+
+<section class="section">
+    <h2>Calibration Chart</h2>
+    <div class="chart-container">
+        <canvas id="calChart"></canvas>
+    </div>
+</section>
+
+{% if report.category_stats %}
+<section class="section">
+    <h2>Performance by Category</h2>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Category</th>
+                <th>Brier Score</th>
+                <th>Predictions</th>
+                <th>Avg Predicted</th>
+                <th>Avg Actual</th>
+                <th>Bias</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in report.category_stats %}
+            <tr>
+                <td>
+                    {{ c.category }}
+                    {% if report.best_category == c.category %}<span class="badge badge-green">Best</span>{% endif %}
+                    {% if report.worst_category == c.category %}<span class="badge badge-red">Worst</span>{% endif %}
+                </td>
+                <td>{{ "%.3f"|format(c.brier_score) }}</td>
+                <td>{{ c.count }}</td>
+                <td>{{ "%.1f"|format(c.avg_predicted * 100) }}%</td>
+                <td>{{ "%.1f"|format(c.avg_actual * 100) }}%</td>
+                <td class="{% if c.bias > 0 %}positive{% else %}negative{% endif %}">
+                    {{ "%+.1f"|format(c.bias * 100) }}%
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endif %}
+
+{% else %}
+<div class="card"><div class="card-label muted">No calibration data available. Run some trading cycles first.</div></div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+fetch('/api/calibration/chart')
+    .then(r => r.json())
+    .then(data => {
+        const bins = data.bins || [];
+        if (!bins.length) return;
+        const ctx = document.getElementById('calChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'scatter',
+            data: {
+                datasets: [
+                    {
+                        label: 'Predictions',
+                        data: bins.map(b => ({x: b.predicted_avg || b.bin_center || 0, y: b.actual_avg || b.actual_rate || 0})),
+                        backgroundColor: '#6366f1',
+                        pointRadius: 6,
+                    },
+                    {
+                        label: 'Perfect Calibration',
+                        data: [{x:0,y:0},{x:0.5,y:0.5},{x:1,y:1}],
+                        borderColor: '#6b7280',
+                        borderDash: [5,5],
+                        pointRadius: 0,
+                        showLine: true,
+                        fill: false,
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { labels: { color: '#e1e4ed' } } },
+                scales: {
+                    x: { title: { display: true, text: 'Predicted', color: '#6b7280' }, min: 0, max: 1, ticks: { color: '#6b7280' }, grid: { color: '#2a2d3a' } },
+                    y: { title: { display: true, text: 'Actual', color: '#6b7280' }, min: 0, max: 1, ticks: { color: '#6b7280' }, grid: { color: '#2a2d3a' } }
+                }
+            }
+        });
+    });
+</script>
+{% endblock %}

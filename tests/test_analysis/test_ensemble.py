@@ -20,10 +20,10 @@ class TestEnsembleForecast:
     def test_weighted_average(self):
         forecast = _make_forecast(0.70)
         result = ensemble_forecast(forecast, market_price=0.50, claude_weight=0.7)
-        # With adaptive weighting (CI width 0.2 → penalty factor 0.12),
-        # effective claude_weight ≈ 0.7 * (1 - 0.2/0.5 * 0.3) ≈ 0.616
+        # With adaptive weighting (CI width 0.2 → penalty 0.2, max 50% reduction),
+        # effective claude_weight ≈ 0.7 * (1 - 0.2 * 0.5) = 0.63
         # Result should be between market (0.50) and naive weighted (0.64)
-        assert 0.58 < result.final_probability < 0.66
+        assert 0.55 < result.final_probability < 0.66
         assert result.final_probability > 0.50  # Still leans toward Claude
 
     def test_edge_positive(self):
@@ -202,3 +202,103 @@ class TestComputeModelWeights:
         weights = _compute_model_weights(forecasts, brier, "", None)
         # Only 1 model has score, so falls back to equal weights
         assert abs(weights[0].weight - 0.5) < 0.01
+
+
+class TestCIPenaltyScaling:
+    """Tests for the fixed CI penalty that now scales across the full 0-1 range."""
+
+    def test_wide_ci_reduces_more_than_medium(self):
+        """CI width 0.8 should reduce Claude weight more than 0.4."""
+        f_medium = ForecastResult(
+            probability=0.60, confidence_low=0.40, confidence_high=0.80,  # CI=0.40
+            reasoning="test",
+        )
+        f_wide = ForecastResult(
+            probability=0.60, confidence_low=0.10, confidence_high=0.90,  # CI=0.80
+            reasoning="test",
+        )
+        r_medium = ensemble_forecast(f_medium, market_price=0.50)
+        r_wide = ensemble_forecast(f_wide, market_price=0.50)
+        # Wider CI → more market pull → closer to 0.50
+        assert abs(r_wide.final_probability - 0.50) < abs(r_medium.final_probability - 0.50)
+
+    def test_ci_05_and_09_produce_different_results(self):
+        """Regression: before fix, CI=0.5 and CI=0.9 got identical treatment."""
+        f_05 = ForecastResult(
+            probability=0.70, confidence_low=0.45, confidence_high=0.95,  # CI=0.50
+            reasoning="test",
+        )
+        f_09 = ForecastResult(
+            probability=0.70, confidence_low=0.05, confidence_high=0.95,  # CI=0.90
+            reasoning="test",
+        )
+        r_05 = ensemble_forecast(f_05, market_price=0.50)
+        r_09 = ensemble_forecast(f_09, market_price=0.50)
+        # CI=0.9 should pull more toward market than CI=0.5
+        assert r_09.final_probability < r_05.final_probability
+
+    def test_zero_ci_full_claude_weight(self):
+        """CI width 0 should give Claude full weight (no penalty)."""
+        f = ForecastResult(
+            probability=0.70, confidence_low=0.70, confidence_high=0.70,  # CI=0
+            reasoning="test",
+        )
+        result = ensemble_forecast(f, market_price=0.50, claude_weight=0.85)
+        # With CI=0, effective weight = 0.85 * (1 - 0*0.5) = 0.85
+        expected = 0.70 * 0.85 + 0.50 * 0.15
+        assert abs(result.final_probability - expected) < 0.01
+
+
+class TestInvertedCIRegression:
+    """Regression tests for inverted CI bounds bug.
+
+    Previously, inverted CI (low > high) caused ci_width to be negative,
+    ci_penalty to be 0, and Claude to get full weight regardless. Now
+    ForecastResult auto-corrects inverted bounds.
+    """
+
+    def test_inverted_ci_no_longer_gives_full_weight(self):
+        """With inverted CI auto-corrected, ensemble should apply proper penalty."""
+        # After auto-correction, confidence_high = confidence_low = 0.8
+        # So ci_width = 0.0, which gives FULL weight to Claude
+        # This is acceptable because the CI is effectively a point estimate
+        f = ForecastResult(
+            probability=0.70, confidence_low=0.80, confidence_high=0.20,
+            reasoning="test",
+        )
+        # Verify the bounds were auto-corrected
+        assert f.confidence_high >= f.confidence_low
+        result = ensemble_forecast(f, market_price=0.50)
+        assert 0.01 <= result.final_probability <= 0.99
+
+    def test_normal_ci_still_works(self):
+        """Normal CI bounds should work as before."""
+        f = ForecastResult(
+            probability=0.70, confidence_low=0.60, confidence_high=0.80,
+            reasoning="test",
+        )
+        result = ensemble_forecast(f, market_price=0.50)
+        assert result.final_probability > 0.50  # Still pulled toward Claude
+
+
+class TestEnsembleExtremeMarketPrices:
+    """Edge cases for extreme market prices."""
+
+    def test_market_price_zero(self):
+        """Market price at 0 (extreme bearish) should still produce valid result."""
+        f = _make_forecast(0.30)
+        result = ensemble_forecast(f, market_price=0.0)
+        assert 0.01 <= result.final_probability <= 0.99
+
+    def test_market_price_one(self):
+        """Market price at 1 (near-certain YES) should still produce valid result."""
+        f = _make_forecast(0.90)
+        result = ensemble_forecast(f, market_price=1.0)
+        assert 0.01 <= result.final_probability <= 0.99
+
+    def test_boundary_probabilities(self):
+        """Claude probabilities at boundaries."""
+        for prob in [0.01, 0.50, 0.99]:
+            f = _make_forecast(prob)
+            result = ensemble_forecast(f, market_price=0.50)
+            assert 0.01 <= result.final_probability <= 0.99

@@ -35,13 +35,17 @@ class KalshiClient:
         self.private_key_path = private_key_path
         self._client: Optional[httpx.AsyncClient] = None
         self._private_key = None
+        self._key_load_attempted: bool = False
 
     def _load_private_key(self):
         """Load the RSA private key for API signing."""
         if self._private_key is not None:
             return self._private_key
+        if self._key_load_attempted:
+            return None
         if not self.private_key_path:
             return None
+        self._key_load_attempted = True
         try:
             from cryptography.hazmat.primitives.serialization import load_pem_private_key
             with open(self.private_key_path, "rb") as f:

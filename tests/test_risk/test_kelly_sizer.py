@@ -223,6 +223,35 @@ class TestCalibrationMultiplier:
         assert reduced >= 1  # Still at least 1
 
 
+class TestExtremePriceBoundaries:
+    """Kelly sizing at extreme price boundaries."""
+
+    def test_very_low_price_001(self, sizer):
+        """Very cheap contracts (price ~0.01) should still produce valid sizing."""
+        contracts = sizer.calculate_position_size(
+            edge=0.05, probability=0.06, bankroll=500.0,
+        )
+        assert contracts >= 0
+        assert isinstance(contracts, int)
+
+    def test_very_high_price_099(self, sizer):
+        """Very expensive contracts (price ~0.99) should be capped."""
+        contracts = sizer.calculate_position_size(
+            edge=0.005, probability=0.995, bankroll=500.0,
+            order_price=0.99,
+        )
+        if contracts > 0:
+            cost = contracts * 0.99
+            assert cost <= 500.0 * 0.05 + 0.01
+
+    def test_price_at_boundary_001(self, sizer):
+        """Market price at 0.01 boundary."""
+        contracts = sizer.calculate_position_size(
+            edge=0.04, probability=0.05, bankroll=500.0,
+        )
+        assert contracts >= 0
+
+
 class TestFeeUnit:
     def test_fee_unit_is_dollars(self, sizer):
         """25 contracts at $0.50 should NOT be reduced — fee is only ~1 cent."""

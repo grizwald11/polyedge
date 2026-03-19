@@ -122,14 +122,16 @@ class TestPortfolioMetrics:
         pm.update_from_trade(_make_trade(market_id="MKT-A", token_id="MKT-A_yes", price=0.30, size=10))
         pm.update_from_trade(_make_trade(market_id="MKT-B", token_id="MKT-B_yes", price=0.50, size=5))
 
-        # cost_basis = avg_entry * size
-        assert pm.get_total_exposure() == pytest.approx(5.50)  # 3.0 + 2.5
+        # cost_basis = avg_entry * size + total_fees
+        # Each trade has fee=0.02, so 3.0 + 0.02 + 2.5 + 0.02 = 5.54
+        assert pm.get_total_exposure() == pytest.approx(5.54)  # 3.0+0.02 + 2.5+0.02
 
     def test_exposure_pct(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
         pm.update_from_trade(_make_trade(price=0.50, size=100))
 
-        assert pm.get_total_exposure_pct() == pytest.approx(0.10)  # 50/500
+        # cost_basis = 100*0.50 + 0.02 fee = 50.02, pct = 50.02/500
+        assert pm.get_total_exposure_pct() == pytest.approx(0.10004)  # (50+0.02)/500
 
     def test_strategy_exposure(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
@@ -142,8 +144,8 @@ class TestPortfolioMetrics:
             strategy=StrategyName.OBVIOUS_NO, price=0.95, size=10
         ))
 
-        assert pm.get_strategy_exposure(StrategyName.AI_PROBABILITY) == pytest.approx(3.0)
-        assert pm.get_strategy_exposure(StrategyName.OBVIOUS_NO) == pytest.approx(9.5)
+        assert pm.get_strategy_exposure(StrategyName.AI_PROBABILITY) == pytest.approx(3.02)  # 3.0 + 0.02 fee
+        assert pm.get_strategy_exposure(StrategyName.OBVIOUS_NO) == pytest.approx(9.52)  # 9.5 + 0.02 fee
 
     def test_has_position(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
@@ -228,6 +230,66 @@ class TestPortfolioMetrics:
         pm.update_price("B", 0.45, 0.55)  # -0.5
 
         assert pm.get_total_unrealized_pnl() == pytest.approx(0.50)
+
+
+class TestFeeTracking:
+    """Tests for fee propagation in positions."""
+
+    def test_new_position_includes_fee(self, tmp_db):
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        trade = _make_trade(price=0.50, size=10)  # fee=0.02
+        pos = pm.update_from_trade(trade)
+        assert pos.total_fees == 0.02
+
+    def test_buy_accumulates_fees(self, tmp_db):
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade(price=0.50, size=10))  # fee=0.02
+        pos = pm.update_from_trade(_make_trade(price=0.60, size=5))  # fee=0.02
+        assert pos.total_fees == pytest.approx(0.04)
+
+    def test_partial_sell_accumulates_fees(self, tmp_db):
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade(side=Side.BUY, price=0.50, size=10))  # fee=0.02
+        # Sell half: fees are sunk costs — buy fee stays, sell fee added
+        pos = pm.update_from_trade(_make_trade(side=Side.SELL, price=0.60, size=5))
+        # original buy fee=0.02 + sell fee=0.02 = 0.04
+        assert pos.total_fees == pytest.approx(0.04)
+
+    def test_cost_basis_includes_fees(self, tmp_db):
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        trade = _make_trade(price=0.40, size=10)  # fee=0.02
+        pos = pm.update_from_trade(trade)
+        # cost_basis = size * avg_entry + total_fees = 10*0.40 + 0.02 = 4.02
+        assert pos.cost_basis == pytest.approx(4.02)
+
+
+class TestEdgeCases:
+    """Edge case tests for position manager."""
+
+    def test_zero_size_trade(self, tmp_db):
+        """A trade with size=0 should create a position with size 0."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        trade = _make_trade(size=0.0)
+        pos = pm.update_from_trade(trade)
+        assert pos.size == 0.0
+
+    def test_double_close(self, tmp_db):
+        """Closing an already-closed position should not crash."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade(side=Side.BUY, size=10))
+        pm.update_from_trade(_make_trade(side=Side.SELL, size=10))
+        assert not pm.has_position("FED-RATE-CUT-MAY26")
+
+        # Second close — position no longer exists
+        pos = pm.update_from_trade(_make_trade(side=Side.SELL, size=5))
+        # Should create a new position (the sell opens a short-like entry)
+        assert pos is not None
+
+    def test_update_price_unknown_market(self, tmp_db):
+        """Updating price for a market we don't hold should be a no-op."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_price("NONEXISTENT", 0.50, 0.50)
+        assert pm.get_position_count() == 0
 
 
 class TestPositionSync:

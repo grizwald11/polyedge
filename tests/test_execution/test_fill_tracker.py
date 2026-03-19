@@ -199,6 +199,82 @@ class TestFillTracker:
         assert len(fills) == 0  # Should be deduplicated
 
     @pytest.mark.asyncio
+    async def test_partial_fill_recorded(self, mock_kalshi, tmp_db):
+        """Partial fills should record trade for filled portion and keep tracking."""
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "partial",
+            "filled_count": 6,
+            "remaining_count": 4,
+        })
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()  # size=10
+        tracker.track(order)
+
+        fills = await tracker.check_fills()
+
+        assert len(fills) == 1
+        assert fills[0].size == 6  # Only the filled portion
+        assert tracker.pending_count == 1  # Still tracking remainder
+
+    @pytest.mark.asyncio
+    async def test_partial_fill_fully_done_resolves(self, mock_kalshi, tmp_db):
+        """Partial fill with remaining_count=0 should resolve the order."""
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "order_id": "kalshi-123",
+            "status": "partial",
+            "filled_count": 10,
+            "remaining_count": 0,
+        })
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        tracker.track(_make_order())
+
+        fills = await tracker.check_fills()
+
+        assert len(fills) == 1
+        assert tracker.pending_count == 0  # Resolved since remaining=0
+
+    @pytest.mark.asyncio
+    async def test_ws_fill_during_poll_no_crash(self, mock_kalshi, tmp_db):
+        """handle_ws_fill() popping an order during check_fills() iteration must not crash."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order1 = _make_order()
+        order2 = Order(
+            id="PE-fill-ws",
+            market_id="MKT-B",
+            token_id="MKT-B_yes",
+            side=Side.BUY,
+            price=0.50,
+            size=5,
+            cost=2.50,
+            order_type=OrderType.GTC,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+        )
+        tracker.track(order1)
+        tracker.track(order2)
+
+        # Simulate a WS fill arriving for order2 during the API poll for order1.
+        # In asyncio this happens at the await in check_fills.
+        ws_fill_processed = False
+
+        async def mock_get_order(order_id):
+            nonlocal ws_fill_processed
+            if not ws_fill_processed:
+                ws_fill_processed = True
+                # Simulate WS fill popping order2 while we're mid-iteration
+                fill_update = type("FillUpdate", (), {"order_id": "PE-fill-ws"})()
+                await tracker.handle_ws_fill(fill_update)
+            return {"order_id": order_id, "status": "resting"}
+
+        mock_kalshi.get_order = mock_get_order
+
+        # Should not raise RuntimeError: dictionary changed size during iteration
+        fills = await tracker.check_fills()
+        assert isinstance(fills, list)
+
+    @pytest.mark.asyncio
     async def test_duplicate_fill_deduplicated(self, mock_kalshi, tmp_db):
         """If the same order fill is detected twice (e.g. REST + WebSocket),
         it should only be recorded once."""

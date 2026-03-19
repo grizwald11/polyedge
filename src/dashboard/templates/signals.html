@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}PolyEdge — Signals{% endblock %}
+
+{% block content %}
+<h1>Signals</h1>
+<p class="subtitle">All generated trading signals</p>
+
+<div class="filter-bar">
+    <button class="filter-btn active" onclick="filterSignals('all')">All</button>
+    <button class="filter-btn" onclick="filterSignals('acted')">Acted On</button>
+    <button class="filter-btn" onclick="filterSignals('skipped')">Skipped</button>
+</div>
+
+<table class="data-table" id="signals-table">
+    <thead>
+        <tr>
+            <th>Market</th>
+            <th>Strategy</th>
+            <th>Direction</th>
+            <th>Edge</th>
+            <th>Confidence</th>
+            <th>Acted</th>
+        </tr>
+    </thead>
+    <tbody hx-get="/partials/signals" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <tr><td colspan="6" class="muted">Loading...</td></tr>
+    </tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filterSignals(filter) {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+
+    const rows = document.querySelectorAll('#signals-table tbody tr');
+    rows.forEach(row => {
+        if (filter === 'all') { row.style.display = ''; return; }
+        const acted = row.cells[5]?.textContent?.trim();
+        if (filter === 'acted' && acted === 'Yes') row.style.display = '';
+        else if (filter === 'skipped' && acted === 'No') row.style.display = '';
+        else row.style.display = 'none';
+    });
+}
+</script>
+{% endblock %}

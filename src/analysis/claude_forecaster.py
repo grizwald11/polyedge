@@ -338,8 +338,8 @@ class ClaudeForecaster:
         try:
             data = json.loads(text)
             return self._build_forecast(data)
-        except (json.JSONDecodeError, ValueError):
-            pass
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.debug(f"JSON direct parse failed, trying fallbacks: {e}")
 
         # Strategy 2: Extract from markdown code blocks
         code_block_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
@@ -347,8 +347,8 @@ class ClaudeForecaster:
             try:
                 data = json.loads(code_block_match.group(1).strip())
                 return self._build_forecast(data)
-            except (json.JSONDecodeError, ValueError):
-                pass
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.debug(f"JSON code block parse failed: {e}")
 
         # Strategy 3: Find first { and last } and try to parse
         first_brace = text.find("{")
@@ -357,8 +357,8 @@ class ClaudeForecaster:
             try:
                 data = json.loads(text[first_brace:last_brace + 1])
                 return self._build_forecast(data)
-            except (json.JSONDecodeError, ValueError):
-                pass
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.debug(f"JSON brace extraction parse failed: {e}")
 
         # Strategy 4: Try to extract probability from prose as last resort
         # Match various formats: "probability": 0.65, probability: 0.7, probability = 0.50, 65%

@@ -194,8 +194,8 @@ class KalshiWebSocket:
         if self._ws is not None:
             try:
                 await self._ws.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"WebSocket close error: {e}")
             self._ws = None
 
     @property

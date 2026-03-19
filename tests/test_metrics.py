@@ -73,3 +73,27 @@ class TestMetrics:
         assert m._is_healthy() is False
         status = m.get_health_status()
         assert status["status"] == "degraded"
+
+    def test_daily_reset_clears_counters(self):
+        m = Metrics()
+        m.record_cycle(100, trades=5, signals=10, positions=2)
+        m.record_error("test", "err")
+        assert m.trades_today == 5
+        assert m.errors_today == 1
+
+        # Simulate crossing midnight
+        m._daily_reset_date = "2025-01-01"
+        m.record_cycle(100, trades=1, signals=2, positions=0)
+        assert m.trades_today == 1  # Reset then added 1
+        assert m.errors_today == 0  # Reset
+
+    def test_error_message_truncated_in_log(self):
+        """Long error messages should not crash."""
+        m = Metrics()
+        m.record_error("test", "x" * 500)
+        assert m.errors_today == 1
+
+    def test_uptime_positive(self):
+        m = Metrics()
+        status = m.get_health_status()
+        assert status["uptime_seconds"] >= 0
