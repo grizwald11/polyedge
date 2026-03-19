@@ -71,6 +71,30 @@ class TestTypeAIntraMarket:
         assert len(type_a) == 0
 
 
+class TestTypeAKellyConsistency:
+    """Regression: Type A signals must satisfy Kelly's market_price = probability - edge."""
+
+    @pytest.mark.asyncio
+    async def test_probability_estimate_consistent_with_kelly(self, mock_graph, mock_forecaster, tmp_db):
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+
+        # YES=0.45, NO=0.50 → sum=0.95, edge=0.05
+        market = _make_market("MKT-K", 0.45, 0.50)
+        signals = await strategy.scan_for_opportunities([market])
+
+        type_a = [s for s in signals if "Intra-market" in s.reasoning]
+        assert len(type_a) == 1
+        sig = type_a[0]
+
+        # Kelly derives: market_price = probability_estimate - edge
+        kelly_market_price = sig.probability_estimate - sig.edge
+        assert abs(kelly_market_price - sig.market_price) < 0.005, (
+            f"Kelly mismatch: {sig.probability_estimate} - {sig.edge} = "
+            f"{kelly_market_price} != {sig.market_price}"
+        )
+
+
 class TestTypeCMutualExclusivity:
     @pytest.mark.asyncio
     async def test_detects_underpriced_event(self, mock_graph, mock_forecaster, tmp_db):
