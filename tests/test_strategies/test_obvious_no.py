@@ -14,7 +14,9 @@ def strategy() -> ObviousNoStrategy:
     return ObviousNoStrategy(Settings())
 
 
-def _make_market(yes_price: float, days: float, volume: float = 50000) -> Market:
+def _make_market(
+    yes_price: float, days: float, volume: float = 50000, liquidity: float = 50000,
+) -> Market:
     return Market(
         ticker="TEST-OBVIOUS",
         question="Will an absurd thing happen?",
@@ -25,6 +27,7 @@ def _make_market(yes_price: float, days: float, volume: float = 50000) -> Market
         ],
         end_date=datetime.now(timezone.utc) + timedelta(days=days),
         volume_24h=volume,
+        liquidity=liquidity,
         active=True,
     )
 
@@ -122,6 +125,27 @@ class TestObviousNoStrategy:
         kelly_market_price = sig.probability_estimate - sig.edge
         # Should approximately equal the actual no_price (0.97)
         assert abs(kelly_market_price - 0.97) < 0.005
+
+    def test_low_liquidity_slippage_deducted(self, strategy):
+        """Low liquidity markets should have slippage deducted from return."""
+        # Same market, different liquidity
+        deep = _make_market(yes_price=0.03, days=15, liquidity=50000)
+        thin = _make_market(yes_price=0.03, days=15, liquidity=5000)
+        deep.ticker = "DEEP"
+        thin.ticker = "THIN"
+
+        signals_deep = strategy.scan_for_opportunities([deep])
+        signals_thin = strategy.scan_for_opportunities([thin])
+
+        if signals_deep and signals_thin:
+            # Thin market should show lower return due to slippage deduction
+            deep_return = float(
+                signals_deep[0].reasoning.split("Net return: ")[1].split(",")[0].rstrip("%")
+            )
+            thin_return = float(
+                signals_thin[0].reasoning.split("Net return: ")[1].split(",")[0].rstrip("%")
+            )
+            assert thin_return < deep_return
 
     def test_confidence_varies_with_yes_price(self, strategy):
         """Regression: confidence should scale with YES price, not be hardcoded 0.95."""

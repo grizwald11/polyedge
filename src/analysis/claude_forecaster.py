@@ -121,12 +121,15 @@ class ClaudeForecaster:
         start_time = time.monotonic()
         try:
             client = self._get_client()
-            response = await client.messages.create(
-                model=model,
-                max_tokens=self.settings.claude.max_tokens,
-                temperature=temperature,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model=model,
+                    max_tokens=self.settings.claude.max_tokens,
+                    temperature=temperature,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                timeout=60,  # Hard timeout — don't block cycle for >60s
             )
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
@@ -146,6 +149,17 @@ class ClaudeForecaster:
             )
             return forecast
 
+        except asyncio.TimeoutError:
+            logger.warning("Claude API call timed out after 60s")
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0, market.yes_price - 0.20),
+                confidence_high=min(1, market.yes_price + 0.20),
+                reasoning="API call timed out after 60s",
+                model_used=model,
+                latency_ms=int((time.monotonic() - start_time) * 1000),
+                parse_failed=True,
+            )
         except anthropic.RateLimitError:
             logger.warning("Claude API rate limited, returning market price as fallback")
             return ForecastResult(
@@ -155,7 +169,7 @@ class ClaudeForecaster:
                 reasoning="Rate limited — using market price as fallback",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
-                parse_failed=True,  # Not a real assessment — don't trade on this
+                parse_failed=True,
             )
         except Exception as e:
             logger.error(f"Claude assessment failed: {e}")
@@ -166,7 +180,7 @@ class ClaudeForecaster:
                 reasoning=f"Assessment failed: {e}",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
-                parse_failed=True,  # Not a real assessment — don't trade on this
+                parse_failed=True,
             )
 
     async def assess_market_with_prompt(
@@ -190,12 +204,15 @@ class ClaudeForecaster:
 
         try:
             client = self._get_client()
-            response = await client.messages.create(
-                model=model,
-                max_tokens=self.settings.claude.max_tokens,
-                temperature=self.settings.claude.temperature,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": custom_prompt}],
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model=model,
+                    max_tokens=self.settings.claude.max_tokens,
+                    temperature=self.settings.claude.temperature,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": custom_prompt}],
+                ),
+                timeout=60,
             )
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
@@ -262,12 +279,15 @@ class ClaudeForecaster:
         async def _call_at_temp(temp: float) -> ForecastResult:
             client = self._get_client()
             start = time.monotonic()
-            response = await client.messages.create(
-                model=model,
-                max_tokens=self.settings.claude.max_tokens,
-                temperature=temp,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model=model,
+                    max_tokens=self.settings.claude.max_tokens,
+                    temperature=temp,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                timeout=60,
             )
             latency_ms = int((time.monotonic() - start) * 1000)
             raw_text = response.content[0].text

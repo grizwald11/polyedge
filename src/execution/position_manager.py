@@ -261,34 +261,23 @@ class PositionManager:
         zero or negative if the edge has evaporated.
         """
         if position.direction in (Direction.BUY_YES, Direction.SELL_NO):
-            # We're long YES — we entered expecting the price to rise toward 1.0.
-            # Remaining edge = how much room there is between current price and 1.0,
-            # relative to what existed when we entered.
-            # If price moved UP past entry, edge is consumed (less upside left).
-            # If price moved DOWN below entry, edge expanded but we're losing.
             current = market.yes_price
-            entry = position.avg_entry_price
-            if current <= 0 or entry <= 0:
-                return 0.0
-            # Edge at entry: (1 - entry) / entry
-            # Edge now: (1 - current) / current
-            # Remaining = current edge as fraction of entry edge
-            entry_edge = (1.0 - entry) / entry
-            current_edge = (1.0 - current) / current
-            if entry_edge <= 0:
-                return 0.0
-            return max(0.0, current_edge / entry_edge - 0.5)  # <50% of original edge = exit
         else:
-            # We're long NO
             current = market.no_price
-            entry = position.avg_entry_price
-            if current <= 0 or entry <= 0:
-                return 0.0
-            entry_edge = (1.0 - entry) / entry
-            current_edge = (1.0 - current) / current
-            if entry_edge <= 0:
-                return 0.0
-            return max(0.0, current_edge / entry_edge - 0.5)
+        entry = position.avg_entry_price
+        if current <= 0 or entry <= 0:
+            return 0.0
+        # Edge at entry: (1 - entry) / entry
+        # Edge now: (1 - current) / current
+        # Remaining = current edge as fraction of entry edge
+        entry_edge = (1.0 - entry) / entry
+        current_edge = (1.0 - current) / current
+        if entry_edge <= 0:
+            return 0.0
+        # Smooth exit curve: ratio squared creates gradual decline instead of
+        # a hard cliff. Values below ~0.35 of original edge trigger exit.
+        ratio = max(0.0, min(1.0, current_edge / entry_edge))
+        return ratio * ratio  # 0.6 ratio → 0.36 (exit), 0.7 ratio → 0.49 (hold)
 
     async def sync_with_kalshi(self, kalshi, auto_correct: bool = True) -> int:
         """Reconcile local positions against Kalshi API positions.

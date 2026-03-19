@@ -115,8 +115,10 @@ class WhaleTrackerStrategy:
         if edge < self.min_edge:
             return None
 
-        # Weight by timing: early entries get higher confidence
-        confidence = self._timing_weight(consensus.earliest_entry) * consensus.consensus_pct
+        # Weight by timing and consensus: average (not multiply) to avoid
+        # compressing confidence into tiny values (e.g. 0.7 * 0.8 = 0.56 vs avg 0.75)
+        timing = self._timing_weight(consensus.earliest_entry)
+        confidence = (timing + consensus.consensus_pct) / 2.0
 
         return Signal(
             strategy=StrategyName.WHALE_TRACKER,

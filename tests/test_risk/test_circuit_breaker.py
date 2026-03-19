@@ -142,17 +142,37 @@ class TestReset:
 
 class TestAutoReset:
     def test_daily_halt_auto_resets_next_day(self, cb):
-        """Daily halt should auto-clear when check() is called on a new UTC day."""
+        """Daily halt should auto-clear when check() is called on a new UTC day
+        and at least 6 hours have passed since the halt."""
         cb._halted = True
         cb._halt_reason = "Daily loss limit hit"
-        cb._halt_time = datetime(2026, 3, 17, 23, 0, 0, tzinfo=timezone.utc)  # Yesterday
+        # Halt at 5pm yesterday — >6 hours ago and a new day
+        cb._halt_time = datetime(2026, 3, 17, 17, 0, 0, tzinfo=timezone.utc)
 
         # check() on a new day should auto-reset and proceed to checks
-        # (will re-halt if daily PnL is still bad, but the old halt clears)
         result = cb.check(bankroll=500.0)
-        # The halt was cleared by auto-reset; re-check may or may not halt
-        # depending on daily PnL, but the old halt flag was cleared
         assert cb._halt_reason is None or "Daily loss limit" not in (cb._halt_reason or "")
+
+    def test_daily_halt_not_reset_if_too_recent(self, cb):
+        """Daily halt should NOT reset if <6 hours have passed, even on a new UTC day.
+        This prevents edge cases where a halt at 23:55 UTC resets at 00:01 UTC."""
+        from unittest.mock import patch
+
+        cb._halted = True
+        cb._halt_reason = "Daily loss limit hit"
+        # Halt at 23:55 UTC on March 17
+        cb._halt_time = datetime(2026, 3, 17, 23, 55, 0, tzinfo=timezone.utc)
+
+        # It's now 00:05 UTC on March 18 — new day but only 10 minutes later
+        fake_now = datetime(2026, 3, 18, 0, 5, 0, tzinfo=timezone.utc)
+        with patch("src.risk.circuit_breaker.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = cb.check(bankroll=500.0)
+
+        assert result is False
+        assert cb.is_halted() is True
 
     def test_non_daily_halt_not_auto_reset(self, cb):
         """Non-daily halts (e.g., consecutive losses) should NOT auto-reset."""

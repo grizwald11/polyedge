@@ -207,6 +207,77 @@ class TestTypeCEdgeScaling:
         assert signals == []
 
 
+class TestTypeCProbabilityEstimate:
+    """Regression: Type C BUY_NO probability_estimate must include edge."""
+
+    @pytest.mark.asyncio
+    async def test_buy_no_probability_includes_edge(self, mock_graph, mock_forecaster, tmp_db):
+        """For overpriced events (BUY_NO), probability_estimate should be
+        no_price + single_edge, not just no_price. Otherwise edge = prob - market = 0."""
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+
+        # 3 candidates, YES sum = 1.15 > 1.00, basket_edge = 0.15
+        markets = [
+            _make_market("CAND-A", 0.40, 0.60, event_ticker="OVR"),
+            _make_market("CAND-B", 0.35, 0.65, event_ticker="OVR"),
+            _make_market("CAND-C", 0.40, 0.60, event_ticker="OVR"),
+        ]
+
+        signals = await strategy.scan_for_opportunities(markets)
+        type_c = [s for s in signals if "Mutual exclusivity" in s.reasoning]
+        assert len(type_c) == 1
+        sig = type_c[0]
+
+        # probability_estimate - market_price should equal edge (within float tolerance)
+        assert sig.probability_estimate - sig.market_price == pytest.approx(sig.edge, abs=0.001)
+        # probability_estimate should be > market_price (not equal)
+        assert sig.probability_estimate > sig.market_price
+
+    @pytest.mark.asyncio
+    async def test_buy_no_kelly_derives_correct_market_price(self, mock_graph, mock_forecaster, tmp_db):
+        """Kelly sizer derives market_price = probability - edge. For BUY_NO
+        Type C, this should equal the actual NO price."""
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+
+        markets = [
+            _make_market("X1", 0.45, 0.55, event_ticker="KLY"),
+            _make_market("X2", 0.35, 0.65, event_ticker="KLY"),
+            _make_market("X3", 0.30, 0.70, event_ticker="KLY"),
+        ]  # sum = 1.10, basket_edge = 0.10
+
+        signals = await strategy.scan_for_opportunities(markets)
+        type_c = [s for s in signals if "Mutual exclusivity" in s.reasoning]
+        assert len(type_c) == 1
+        sig = type_c[0]
+
+        kelly_market_price = sig.probability_estimate - sig.edge
+        assert abs(kelly_market_price - sig.market_price) < 0.005
+
+
+class TestCacheExpiry:
+    """Regression: cache expiry must return None on parse errors."""
+
+    def test_invalid_timestamp_returns_none(self, mock_graph, mock_forecaster, tmp_db):
+        """If validated_at is unparseable, return None (don't fall through to stale data)."""
+        import json
+        settings = Settings()
+        strategy = CrossArbStrategy(mock_graph, mock_forecaster, settings, tmp_db)
+
+        # Insert a cache entry with invalid timestamp
+        conn = tmp_db._get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO arb_relationships "
+            "(market_a, market_b, relationship_data, validated_at) VALUES (?, ?, ?, ?)",
+            ("MKT-A", "MKT-B", json.dumps({"arbitrage_exists": True}), "not-a-date"),
+        )
+        conn.commit()
+
+        result = strategy._get_cached_relationship("MKT-A", "MKT-B")
+        assert result is None  # Should return None, not stale data
+
+
 class TestTypeBSubset:
     @pytest.mark.asyncio
     async def test_claude_validation_used(self, mock_forecaster, tmp_db):

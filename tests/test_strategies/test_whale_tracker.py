@@ -134,6 +134,38 @@ class TestWhaleTrackerStrategy:
         weight = strategy._timing_weight(entry_time)
         assert weight == 0.3
 
+    def test_confidence_uses_average_not_multiplication(self, tmp_db):
+        """Regression: confidence = (timing + consensus) / 2, not timing * consensus.
+        Multiplication produces tiny values (0.7 * 0.8 = 0.56 vs avg 0.75)."""
+        settings = Settings()
+        monitor = WhaleMonitor(settings, tmp_db)
+
+        for i in range(5):
+            monitor._basket.append(WhaleWallet(address=f"whale-{i}"))
+
+        now = datetime.now(timezone.utc)
+        # 4/5 whales agree (80% consensus), entry 18h ago (timing weight = 0.7)
+        for i in range(4):
+            monitor.update_positions(f"whale-{i}", {
+                "FED-RATE": WhalePosition(
+                    wallet=f"whale-{i}",
+                    market_id="FED-RATE",
+                    direction=Direction.BUY_YES,
+                    entry_price=0.50,
+                    detected_at=now - timedelta(hours=18),
+                ),
+            })
+
+        strategy = WhaleTrackerStrategy(monitor, settings, tmp_db)
+        markets = [_make_market(yes_price=0.34)]
+        signals = strategy.scan_for_opportunities(markets)
+
+        assert len(signals) == 1
+        # timing_weight(18h) = 0.7, consensus = 0.8
+        # Average: (0.7 + 0.8) / 2 = 0.75
+        # Multiplication would give: 0.7 * 0.8 = 0.56
+        assert signals[0].confidence == pytest.approx(0.75, abs=0.01)
+
     def test_avg_entry_uses_direction_specific_prices(self, tmp_db):
         """Regression: avg_entry_price must only include whales going in the
         consensus direction, not all whales (which would contaminate the price)."""

@@ -252,6 +252,18 @@ class TestExtremePriceBoundaries:
         assert contracts >= 0
 
 
+class TestNegativeMarketPrice:
+    """Regression: edge > probability should produce 0 contracts (negative market_price)."""
+
+    def test_edge_much_larger_than_probability(self, sizer):
+        """When edge >> probability, derived market_price is very negative."""
+        assert sizer.calculate_position_size(edge=0.90, probability=0.10, bankroll=500.0) == 0
+
+    def test_edge_barely_exceeds_probability(self, sizer):
+        """Edge = probability + epsilon → market_price ≈ 0."""
+        assert sizer.calculate_position_size(edge=0.501, probability=0.50, bankroll=500.0) == 0
+
+
 class TestFeeUnit:
     def test_fee_unit_is_dollars(self, sizer):
         """25 contracts at $0.50 should NOT be reduced — fee is only ~1 cent."""

@@ -223,3 +223,18 @@ class TestClaudeForecaster:
 
         forecaster.news_researcher.get_context.assert_not_awaited()
         assert result.probability == 0.42
+
+    @pytest.mark.asyncio
+    async def test_timeout_sets_parse_failed(self, forecaster, sample_market):
+        """Claude API timeout should return parse_failed=True, not block."""
+        import asyncio
+        mock_client = AsyncMock()
+        # Simulate a hang that exceeds the 60s timeout
+        mock_client.messages.create = AsyncMock(
+            side_effect=asyncio.TimeoutError()
+        )
+        forecaster._client = mock_client
+
+        result = await forecaster.assess_market(sample_market)
+        assert result.parse_failed is True
+        assert "timed out" in result.reasoning.lower()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -371,3 +372,86 @@ class TestFillTracker:
         assert fills3[0].size == 3  # delta: 10 - 7
 
         assert fills1[0].size + fills2[0].size + fills3[0].size == order.size
+
+    @pytest.mark.asyncio
+    async def test_concurrent_polling(self, mock_kalshi, tmp_db):
+        """Multiple orders should be polled concurrently, not sequentially."""
+        import time
+
+        call_times = []
+
+        async def slow_get_order(order_id):
+            call_times.append(time.monotonic())
+            await asyncio.sleep(0.05)  # 50ms per call
+            return {"order_id": order_id, "status": "resting"}
+
+        mock_kalshi.get_order = slow_get_order
+        tracker = FillTracker(mock_kalshi, tmp_db)
+
+        # Track 5 orders
+        for i in range(5):
+            order = Order(
+                id=f"PE-concurrent-{i}",
+                market_id=f"MKT-{i}",
+                token_id=f"MKT-{i}_yes",
+                side=Side.BUY,
+                price=0.50,
+                size=5,
+                cost=2.50,
+                order_type=OrderType.GTC,
+                status=OrderStatus.OPEN,
+                strategy=StrategyName.AI_PROBABILITY,
+                paper=False,
+            )
+            tracker.track(order)
+
+        start = time.monotonic()
+        await tracker.check_fills()
+        elapsed = time.monotonic() - start
+
+        # If sequential: ~250ms (5 × 50ms). If concurrent: ~50ms.
+        # Allow generous margin but should be well under sequential time.
+        assert elapsed < 0.2, f"Polling took {elapsed:.3f}s — not concurrent?"
+        assert len(call_times) == 5
+
+    @pytest.mark.asyncio
+    async def test_timeout_doesnt_block_others(self, mock_kalshi, tmp_db):
+        """A timeout on one order shouldn't prevent other orders from being polled."""
+        import asyncio as aio
+
+        call_count = 0
+
+        async def mixed_get_order(order_id):
+            nonlocal call_count
+            call_count += 1
+            if "slow" in order_id:
+                await aio.sleep(20)  # Will timeout
+            return {"order_id": order_id, "status": "executed"}
+
+        mock_kalshi.get_order = mixed_get_order
+        tracker = FillTracker(mock_kalshi, tmp_db, poll_timeout=1)
+
+        slow_order = Order(
+            id="PE-slow-order",
+            market_id="MKT-SLOW",
+            token_id="MKT-SLOW_yes",
+            side=Side.BUY, price=0.50, size=5, cost=2.50,
+            order_type=OrderType.GTC, status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY, paper=False,
+        )
+        fast_order = Order(
+            id="PE-fast-order",
+            market_id="MKT-FAST",
+            token_id="MKT-FAST_yes",
+            side=Side.BUY, price=0.50, size=5, cost=2.50,
+            order_type=OrderType.GTC, status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY, paper=False,
+        )
+        tracker.track(slow_order)
+        tracker.track(fast_order)
+
+        fills = await tracker.check_fills()
+
+        # Fast order should have been filled despite slow order timing out
+        assert len(fills) == 1
+        assert fills[0].market_id == "MKT-FAST"

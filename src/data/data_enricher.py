@@ -99,15 +99,13 @@ class DataEnricher:
             except Exception:
                 pass  # _safe_fetch already handles exceptions
 
-        # Cancel any still-pending tasks
+        # Cancel any still-pending tasks and await them to ensure cleanup
         if pending:
-            pending_names = []
             for task in pending:
                 task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+            # Gather with return_exceptions to suppress CancelledError and
+            # ensure underlying HTTP connections are properly released.
+            await asyncio.gather(*pending, return_exceptions=True)
             logger.warning(
                 f"Data enrichment: {len(pending)} sources timed out after 30s, "
                 f"{len(done)} completed"

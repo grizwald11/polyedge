@@ -46,6 +46,21 @@ class OrderRouter:
         self.kalshi = kalshi
         self.db = db
         self._session_confirmed = False  # Gate 3: first-trade confirmation
+        self._log_gate_status()
+
+    def _log_gate_status(self):
+        """Log live trading gate status at startup for visibility."""
+        mode = self.settings.trading.mode
+        live_enabled = self.settings.live_enabled
+        if mode == "live" and not live_enabled:
+            logger.warning(
+                "Live mode configured but POLYEDGE_LIVE_ENABLED env var is not set — "
+                "live trades will be rejected until the env var is set to 'true'"
+            )
+        elif mode == "live" and live_enabled:
+            logger.warning("LIVE TRADING ENABLED — all gates passed at startup")
+        else:
+            logger.info(f"Trading mode: {mode} (live gates not required)")
 
     async def route_order(self, order: Order) -> OrderResult:
         """Route an order based on current trading mode.

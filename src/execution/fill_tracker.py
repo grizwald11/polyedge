@@ -52,50 +52,68 @@ class FillTracker:
         logger.debug(f"Tracking order {order.id} for fills")
 
     async def check_fills(self) -> list[Trade]:
-        """Poll Kalshi for status of all pending orders.
+        """Poll Kalshi for status of all pending orders concurrently.
 
         Returns list of newly detected trades (fills).
         """
         if not self._pending_orders:
             return []
 
-        fills: list[Trade] = []
-        resolved: list[str] = []
-
         # Snapshot to avoid RuntimeError if handle_ws_fill() pops an entry
         # during an await inside this loop.
-        for order_id, order in list(self._pending_orders.items()):
+        order_snapshot = list(self._pending_orders.items())
+
+        # Poll all orders concurrently instead of sequentially
+        async def _poll_one(order_id: str, order: Order):
             try:
                 status = await asyncio.wait_for(
                     self.kalshi.get_order(order_id), timeout=self._poll_timeout
                 )
-                if status is None:
-                    continue
-
-                kalshi_status = status.get("status", "").lower()
-
-                if kalshi_status == "executed":
-                    trade = self._record_fill(order, status)
-                    if trade:
-                        fills.append(trade)
-                    resolved.append(order_id)
-                elif kalshi_status == "partial":
-                    # Partial fill — record what's filled so far, keep tracking remainder
-                    filled_count = status.get("filled_count", 0)
-                    remaining = status.get("remaining_count", 0)
-                    if filled_count > 0 and order.id not in self._processed_fills:
-                        partial_trade = self._record_partial_fill(order, status)
-                        if partial_trade:
-                            fills.append(partial_trade)
-                    if remaining == 0:
-                        resolved.append(order_id)
-                elif kalshi_status in ("canceled", "cancelled"):
-                    self._record_cancellation(order)
-                    resolved.append(order_id)
-                # "resting" means still open — keep tracking
-
+                return (order_id, order, status)
+            except asyncio.TimeoutError:
+                logger.warning(f"Order poll timed out for {order_id}")
+                return (order_id, order, None)
             except Exception as e:
                 logger.error(f"Fill check failed for {order_id}: {e}")
+                return (order_id, order, None)
+
+        poll_results = await asyncio.gather(
+            *[_poll_one(oid, o) for oid, o in order_snapshot],
+            return_exceptions=True,
+        )
+
+        fills: list[Trade] = []
+        resolved: list[str] = []
+
+        for result in poll_results:
+            if isinstance(result, Exception):
+                logger.error(f"Unexpected poll error: {result}")
+                continue
+
+            order_id, order, status = result
+            if status is None:
+                continue
+
+            kalshi_status = status.get("status", "").lower()
+
+            if kalshi_status == "executed":
+                trade = self._record_fill(order, status)
+                if trade:
+                    fills.append(trade)
+                resolved.append(order_id)
+            elif kalshi_status == "partial":
+                filled_count = status.get("filled_count", 0)
+                remaining = status.get("remaining_count", 0)
+                if filled_count > 0 and order.id not in self._processed_fills:
+                    partial_trade = self._record_partial_fill(order, status)
+                    if partial_trade:
+                        fills.append(partial_trade)
+                if remaining == 0:
+                    resolved.append(order_id)
+            elif kalshi_status in ("canceled", "cancelled"):
+                self._record_cancellation(order)
+                resolved.append(order_id)
+            # "resting" means still open — keep tracking
 
         for oid in resolved:
             self._pending_orders.pop(oid, None)

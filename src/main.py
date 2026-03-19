@@ -327,14 +327,17 @@ async def scan_and_trade(
             # Convert to YES probability for calibration (Brier expects YES=1, NO=0)
             if signal.direction in (Direction.BUY_NO, Direction.SELL_NO):
                 cal_probability = 1.0 - signal.probability_estimate
+                # market_price must also be YES price for calibration consistency
+                cal_market_price = 1.0 - signal.market_price
             else:
                 cal_probability = signal.probability_estimate
+                cal_market_price = signal.market_price
 
             calibration.log_prediction(
                 market_id=signal.market_id,
                 market_question=signal.market_question,
                 predicted_probability=cal_probability,
-                market_price=signal.market_price,
+                market_price=cal_market_price,
                 strategy=signal.strategy,
             )
 
