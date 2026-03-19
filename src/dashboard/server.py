@@ -98,12 +98,23 @@ def create_app(
                     "avg_entry": p.avg_entry_price,
                     "current": p.current_price,
                     "pnl": p.unrealized_pnl,
+                    "roi_pct": ((p.current_price - p.avg_entry_price) / p.avg_entry_price * 100) if p.avg_entry_price > 0 else 0.0,
+                    "cost_basis": p.cost_basis,
                     "strategy": p.strategy.value,
                 }
                 for p in position_manager.get_all_positions()
             ]
             exposure = position_manager.get_total_exposure()
             unrealized_pnl = position_manager.get_total_unrealized_pnl()
+        else:
+            # Fallback: compute from DB when position_manager is unavailable
+            positions = db.get_positions_with_pnl()
+            exposure = sum(p["cost_basis"] for p in positions)
+            unrealized_pnl = sum(p["unrealized_pnl"] for p in positions)
+            # Normalize keys for template compatibility
+            for p in positions:
+                p["current"] = p["current_price"]
+                p["pnl"] = p["unrealized_pnl"]
 
         cb_halted = False
         cb_reason = None
@@ -209,13 +220,8 @@ def create_app(
                 }
                 for p in position_manager.get_all_positions()
             ]
-        # Fallback: raw trades from DB
-        conn = db._get_conn()
-        rows = conn.execute(
-            "SELECT market_id, side, price, size, strategy, timestamp "
-            "FROM trades ORDER BY timestamp DESC LIMIT 100"
-        ).fetchall()
-        return [dict(row) for row in rows]
+        # Fallback: compute positions with P&L from DB
+        return db.get_positions_with_pnl()
 
     @app.get("/api/trades")
     async def api_trades():
@@ -314,10 +320,25 @@ def create_app(
         daily_pnl = db.get_daily_pnl(today)
         cb_state = db.load_circuit_breaker_state()
 
+        # Unrealized P&L from position_manager or DB fallback
+        if position_manager is not None:
+            unrealized = position_manager.get_total_unrealized_pnl()
+            open_positions = position_manager.get_position_count()
+            exposure = position_manager.get_total_exposure()
+        else:
+            db_positions = db.get_positions_with_pnl()
+            unrealized = sum(p["unrealized_pnl"] for p in db_positions)
+            open_positions = len(db_positions)
+            exposure = sum(p["cost_basis"] for p in db_positions)
+
         return {
             **stats,
             **summary,
             "daily_pnl": daily_pnl,
+            "unrealized_pnl": round(unrealized, 2),
+            "total_pnl_incl_unrealized": round(summary.get("total_pnl", 0) + unrealized, 2),
+            "open_positions": open_positions,
+            "exposure": round(exposure, 2),
             "circuit_breaker": cb_state,
         }
 
@@ -349,21 +370,41 @@ def create_app(
     @app.get("/partials/positions", response_class=HTMLResponse)
     async def partial_positions():
         """HTML fragment of positions for HTMX swap."""
-        if position_manager is None:
-            return '<tr><td colspan="6" class="muted">Position manager not connected</td></tr>'
-        positions = position_manager.get_all_positions()
-        if not positions:
-            return '<tr><td colspan="6" class="muted">No open positions</td></tr>'
+        pos_list = []
+        if position_manager is not None:
+            for p in position_manager.get_all_positions():
+                entry = p.avg_entry_price
+                roi = ((p.current_price - entry) / entry * 100) if entry > 0 else 0.0
+                pos_list.append({
+                    "market_id": p.market_id, "direction": p.direction.value,
+                    "size": int(p.size), "avg_entry": entry,
+                    "current": p.current_price, "pnl": p.unrealized_pnl,
+                    "cost_basis": p.cost_basis, "roi_pct": roi,
+                    "strategy": p.strategy.value,
+                })
+        else:
+            pos_list = db.get_positions_with_pnl()
+            for p in pos_list:
+                p["current"] = p["current_price"]
+                p["pnl"] = p["unrealized_pnl"]
+
+        if not pos_list:
+            return '<tr><td colspan="9" class="muted">No open positions</td></tr>'
         rows = []
-        for p in positions:
-            pnl_class = "positive" if p.unrealized_pnl >= 0 else "negative"
+        for p in pos_list:
+            pnl_class = "positive" if p["pnl"] >= 0 else "negative"
+            roi_class = "positive" if p.get("roi_pct", 0) >= 0 else "negative"
+            cost = p.get("cost_basis", p["avg_entry"] * p["size"])
             rows.append(
-                f'<tr><td>{html.escape(p.market_id)}</td>'
-                f'<td>{html.escape(p.direction.value)}</td>'
-                f'<td>{int(p.size)}</td>'
-                f'<td>${p.avg_entry_price:.2f}</td>'
-                f'<td>${p.current_price:.2f}</td>'
-                f'<td class="{pnl_class}">${p.unrealized_pnl:.2f}</td></tr>'
+                f'<tr><td>{html.escape(str(p["market_id"])[:30])}</td>'
+                f'<td>{html.escape(str(p["direction"]))}</td>'
+                f'<td>{int(p["size"])}</td>'
+                f'<td>${p["avg_entry"]:.2f}</td>'
+                f'<td>${p["current"]:.2f}</td>'
+                f'<td>${cost:.2f}</td>'
+                f'<td class="{pnl_class}">${p["pnl"]:.2f}</td>'
+                f'<td class="{roi_class}">{p.get("roi_pct", 0):.1f}%</td>'
+                f'<td>{html.escape(str(p.get("strategy", "")))}</td></tr>'
             )
         return "\n".join(rows)
 

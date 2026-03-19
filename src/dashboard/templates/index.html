@@ -58,27 +58,33 @@
         <thead>
             <tr>
                 <th>Market</th>
-                <th>Direction</th>
+                <th>Dir</th>
                 <th>Size</th>
                 <th>Entry</th>
                 <th>Current</th>
+                <th>Cost</th>
                 <th>P&amp;L</th>
+                <th>ROI</th>
+                <th>Strategy</th>
             </tr>
         </thead>
         <tbody hx-get="/partials/positions" hx-trigger="every 15s" hx-swap="innerHTML">
             {% if positions %}
                 {% for p in positions %}
                 <tr>
-                    <td>{{ p.market_id }}</td>
+                    <td title="{{ p.market_question|default(p.market_id) }}">{{ p.market_id[:30] }}</td>
                     <td>{{ p.direction }}</td>
                     <td>{{ p.size|int }}</td>
                     <td>${{ "%.2f"|format(p.avg_entry) }}</td>
                     <td>${{ "%.2f"|format(p.current) }}</td>
+                    <td>${{ "%.2f"|format(p.cost_basis|default(p.avg_entry * p.size|int)) }}</td>
                     <td class="{% if p.pnl >= 0 %}positive{% else %}negative{% endif %}">${{ "%.2f"|format(p.pnl) }}</td>
+                    <td class="{% if p.roi_pct|default(0) >= 0 %}positive{% else %}negative{% endif %}">{{ "%.1f"|format(p.roi_pct|default(0)) }}%</td>
+                    <td>{{ p.strategy }}</td>
                 </tr>
                 {% endfor %}
             {% else %}
-                <tr><td colspan="6" class="muted">No open positions</td></tr>
+                <tr><td colspan="9" class="muted">No open positions</td></tr>
             {% endif %}
         </tbody>
     </table>

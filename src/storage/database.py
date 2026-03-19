@@ -640,6 +640,85 @@ class Database:
             "winning_trades": wins["cnt"] if wins else 0,
         }
 
+    def get_positions_with_pnl(self) -> list[dict]:
+        """Compute open positions with unrealized P&L from trades + latest snapshots.
+
+        Aggregates BUY/SELL trades per market to find net positions, then joins
+        with the latest market snapshot to compute current price and unrealized P&L.
+        Works without a running PositionManager.
+        """
+        conn = self._get_conn()
+        rows = conn.execute("""
+            WITH net_positions AS (
+                SELECT
+                    market_id,
+                    SUM(CASE WHEN side='BUY' THEN size ELSE -size END) as net_size,
+                    SUM(CASE WHEN side='BUY' THEN price * size ELSE 0 END) /
+                        NULLIF(SUM(CASE WHEN side='BUY' THEN size ELSE 0 END), 0) as avg_entry,
+                    SUM(CASE WHEN side='BUY' THEN price * size ELSE 0 END) as total_cost,
+                    SUM(CASE WHEN side='BUY' THEN fee ELSE 0 END) as total_fees,
+                    MAX(strategy) as strategy,
+                    -- Determine direction from the first BUY trade's token_id
+                    MAX(CASE WHEN side='BUY' THEN token_id ELSE NULL END) as token_id
+                FROM trades
+                GROUP BY market_id
+                HAVING net_size > 0
+            ),
+            latest_snap AS (
+                SELECT market_id, yes_price, no_price,
+                       ROW_NUMBER() OVER (PARTITION BY market_id ORDER BY timestamp DESC) as rn
+                FROM market_snapshots
+            )
+            SELECT
+                np.market_id,
+                np.net_size as size,
+                np.avg_entry,
+                np.total_cost,
+                np.total_fees,
+                np.strategy,
+                np.token_id,
+                COALESCE(ls.yes_price, 0) as yes_price,
+                COALESCE(ls.no_price, 0) as no_price,
+                m.question as market_question
+            FROM net_positions np
+            LEFT JOIN latest_snap ls ON np.market_id = ls.market_id AND ls.rn = 1
+            LEFT JOIN markets m ON np.market_id = m.ticker
+            ORDER BY np.total_cost DESC
+        """).fetchall()
+
+        positions = []
+        for row in rows:
+            r = dict(row)
+            # Determine if YES or NO position from token_id
+            token_id = r.get("token_id") or ""
+            is_no = "no" in token_id.lower()
+            current_price = r["no_price"] if is_no else r["yes_price"]
+            direction = "BUY_NO" if is_no else "BUY_YES"
+
+            # Unrealized P&L: (current_price - avg_entry) * size for YES
+            # For NO positions: same formula since avg_entry is the NO price paid
+            unrealized_pnl = (current_price - r["avg_entry"]) * r["size"] if current_price > 0 else 0.0
+
+            # Return on investment percentage
+            cost_basis = r["total_cost"] + r["total_fees"]
+            roi_pct = (unrealized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+
+            positions.append({
+                "market_id": r["market_id"],
+                "market_question": r.get("market_question") or r["market_id"],
+                "direction": direction,
+                "size": int(r["size"]),
+                "avg_entry": round(r["avg_entry"], 4) if r["avg_entry"] else 0.0,
+                "current_price": round(current_price, 4),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "cost_basis": round(cost_basis, 2),
+                "total_fees": round(r["total_fees"], 2),
+                "roi_pct": round(roi_pct, 1),
+                "strategy": r["strategy"],
+            })
+
+        return positions
+
     def get_daily_pnl(self, date_str: str | None = None) -> float:
         """Get total realized P&L for a given day.
 
