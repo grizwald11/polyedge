@@ -245,6 +245,38 @@ class KalshiClient:
             logger.error(f"Failed to get orderbook for {ticker}: {e}")
             return None
 
+    async def get_market_history(self, ticker: str, limit: int = 1000) -> list[dict]:
+        """Fetch trade history for a market. Returns list of trade dicts."""
+        all_trades: list[dict] = []
+        cursor: Optional[str] = None
+
+        try:
+            while len(all_trades) < limit:
+                params: dict[str, Any] = {
+                    "limit": min(100, limit - len(all_trades)),
+                    "ticker": ticker,
+                }
+                if cursor:
+                    params["cursor"] = cursor
+
+                data = await self._request("GET", f"/markets/trades", params=params)
+                if not data:
+                    break
+
+                trades = data.get("trades", [])
+                if not trades:
+                    break
+
+                all_trades.extend(trades)
+                cursor = data.get("cursor")
+                if not cursor:
+                    break
+
+        except Exception as e:
+            logger.error(f"Failed to get trade history for {ticker}: {e}")
+
+        return all_trades
+
     # ──────────────────────────────────────
     # Account Data (auth required)
     # ──────────────────────────────────────

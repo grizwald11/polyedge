@@ -95,7 +95,7 @@ class MockForecaster:
         self._load_cache()
 
     def _load_cache(self):
-        """Load cached predictions from calibration_records."""
+        """Load cached predictions from calibration_records and outcomes from markets."""
         conn = self.db._get_conn()
         rows = conn.execute(
             "SELECT market_id, predicted_probability, actual_outcome "
@@ -105,6 +105,19 @@ class MockForecaster:
             self._cache[row["market_id"]] = row["predicted_probability"]
             if row["actual_outcome"] is not None:
                 self._outcomes[row["market_id"]] = bool(row["actual_outcome"])
+
+        # Also load outcomes from settled markets (for synthetic forecasts)
+        market_rows = conn.execute(
+            "SELECT ticker, result FROM markets WHERE result != '' AND result IS NOT NULL"
+        ).fetchall()
+        for row in market_rows:
+            ticker = row["ticker"]
+            if ticker not in self._outcomes:
+                result = row["result"].lower()
+                if result in ("yes", "1", "true"):
+                    self._outcomes[ticker] = True
+                elif result in ("no", "0", "false"):
+                    self._outcomes[ticker] = False
 
     def get_forecast(self, market_id: str, yes_price: float) -> Optional[ForecastResult]:
         """Get a forecast for a market.
@@ -274,6 +287,13 @@ class BacktestEngine:
         if not all_snapshots:
             return []
 
+        # Build end_date lookup for resolving positions mid-replay
+        end_dates: dict[str, str] = {}
+        for ticker, mdata in market_lookup.items():
+            ed = mdata.get("end_date", "")
+            if ed:
+                end_dates[ticker] = ed
+
         # Process snapshots chronologically
         trades: list[BacktestTrade] = []
         edges_predicted: list[float] = []
@@ -285,6 +305,23 @@ class BacktestEngine:
             yes_price = snap["yes_price"]
             no_price = snap["no_price"]
             timestamp = snap["timestamp"]
+
+            # Resolve any positions whose end_date has passed
+            resolved_ids = []
+            for pos_id in list(portfolio.positions.keys()):
+                if pos_id in end_dates and timestamp >= end_dates[pos_id]:
+                    if pos_id in outcomes:
+                        pnl = portfolio.resolve_position(pos_id, outcomes[pos_id])
+                        resolved_ids.append(pos_id)
+                        for t in trades:
+                            if t.market_id == pos_id and not t.resolved:
+                                t.pnl = pnl
+                                t.resolved = True
+                                t.outcome = outcomes[pos_id]
+                                if t.price > 0 and t.size > 0:
+                                    edges_realized.append(pnl / (t.size * t.price))
+                                equity_curve.append(equity_curve[-1] + pnl)
+                                break
 
             if market_id not in market_lookup:
                 continue

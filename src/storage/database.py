@@ -347,8 +347,8 @@ class Database:
                 ticker, question, description, category, tags, tokens,
                 end_date, volume_24h, volume_total, liquidity, spread,
                 active, closed, resolution_source, slug, subtitle, event_ticker,
-                first_seen, last_updated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                result, first_seen, last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker) DO UPDATE SET
                 question=excluded.question,
                 description=excluded.description,
@@ -363,6 +363,7 @@ class Database:
                 active=excluded.active,
                 closed=excluded.closed,
                 resolution_source=excluded.resolution_source,
+                result=excluded.result,
                 last_updated=excluded.last_updated
         """, (
             market.ticker,
@@ -382,6 +383,7 @@ class Database:
             market.slug,
             market.subtitle,
             market.event_ticker,
+            market.result,
             now,
             now,
         ))
@@ -399,8 +401,8 @@ class Database:
                     ticker, question, description, category, tags, tokens,
                     end_date, volume_24h, volume_total, liquidity, spread,
                     active, closed, resolution_source, slug, subtitle, event_ticker,
-                    first_seen, last_updated
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    result, first_seen, last_updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ticker) DO UPDATE SET
                     question=excluded.question,
                     description=excluded.description,
@@ -415,6 +417,7 @@ class Database:
                     active=excluded.active,
                     closed=excluded.closed,
                     resolution_source=excluded.resolution_source,
+                    result=excluded.result,
                     last_updated=excluded.last_updated
             """, (
                 market.ticker,
@@ -434,6 +437,7 @@ class Database:
                 market.slug,
                 market.subtitle,
                 market.event_ticker,
+                market.result,
                 now,
                 now,
             ))
