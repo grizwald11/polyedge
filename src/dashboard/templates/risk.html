@@ -3,8 +3,10 @@
 {% block title %}PolyEdge — Risk Management{% endblock %}
 
 {% block content %}
-<h1>Risk Management</h1>
-<p class="subtitle">Circuit breaker, exposure, and cooldowns</p>
+<div class="page-header">
+    <h1>Risk Management</h1>
+    <p class="subtitle">Circuit breaker, exposure, and cooldowns</p>
+</div>
 
 {% if cb_state and cb_state.halted %}
 <div class="status-banner status-danger">
@@ -13,11 +15,11 @@
 </div>
 {% elif cb_state and cb_state.reduced_sizing %}
 <div class="status-banner status-warning">
-    Reduced Sizing Active ({{ cb_state.consecutive_losing_days }} consecutive losing days)
+    Reduced Sizing Active ({{ cb_state.consecutive_losing_days }} consecutive losing days) — using quarter-Kelly
 </div>
 {% else %}
 <div class="status-banner status-ok">
-    All Systems Normal
+    All Systems Normal — Full Kelly Active
 </div>
 {% endif %}
 
@@ -29,34 +31,115 @@
     <div class="card">
         <div class="card-label">Total Exposure</div>
         <div class="card-value">${{ "%.2f"|format(exposure) }}</div>
-    </div>
-    <div class="card">
-        <div class="card-label">Exposure %</div>
-        <div class="card-value">{{ "%.1f"|format(exposure_pct * 100) }}%</div>
         <div class="progress-bar-container">
             <div class="progress-bar {% if exposure_pct > 0.35 %}progress-danger{% elif exposure_pct > 0.25 %}progress-warning{% endif %}" style="width: {{ (exposure_pct * 100)|int }}%"></div>
         </div>
-        <div class="card-detail">Limit: 40%</div>
+        <div class="card-detail">{{ "%.1f"|format(exposure_pct * 100) }}% of bankroll (limit: 40%)</div>
     </div>
     <div class="card">
         <div class="card-label">Consecutive Losing Days</div>
-        <div class="card-value">{{ cb_state.consecutive_losing_days if cb_state else 0 }}</div>
+        <div class="card-value {% if (cb_state.consecutive_losing_days if cb_state else 0) >= 3 %}negative{% endif %}">
+            {{ cb_state.consecutive_losing_days if cb_state else 0 }}
+        </div>
+        <div class="card-detail">
+            3 days = reduced sizing, 5 days = halt
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-label">Daily Loss Limit</div>
+        <div class="card-value">10%</div>
+        <div class="card-detail">Trading halts if daily loss exceeds limit</div>
     </div>
 </div>
+
+<section class="section">
+    <h2>Risk Limits</h2>
+    <div class="table-wrapper">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Limit</th>
+                    <th>Current</th>
+                    <th>Maximum</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Total Exposure</td>
+                    <td>{{ "%.1f"|format(exposure_pct * 100) }}%</td>
+                    <td>40%</td>
+                    <td>
+                        {% if exposure_pct > 0.40 %}<span class="badge badge-red">EXCEEDED</span>
+                        {% elif exposure_pct > 0.35 %}<span class="badge badge-red">HIGH</span>
+                        {% elif exposure_pct > 0.25 %}<span class="badge" style="background:rgba(245,158,11,0.2);color:#f59e0b">ELEVATED</span>
+                        {% else %}<span class="badge badge-green">OK</span>{% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <td>Max Position Size</td>
+                    <td>—</td>
+                    <td>5% per position</td>
+                    <td><span class="badge badge-green">ENFORCED</span></td>
+                </tr>
+                <tr>
+                    <td>Correlated Exposure</td>
+                    <td>—</td>
+                    <td>20%</td>
+                    <td><span class="badge badge-green">ENFORCED</span></td>
+                </tr>
+                <tr>
+                    <td>Daily Loss Limit</td>
+                    <td>{{ "%.1f"|format(daily_loss_pct|default(0) * 100) }}%</td>
+                    <td>10%</td>
+                    <td>
+                        {% if daily_loss_pct|default(0) > 0.10 %}<span class="badge badge-red">BREACHED</span>
+                        {% elif daily_loss_pct|default(0) > 0.07 %}<span class="badge" style="background:rgba(245,158,11,0.2);color:#f59e0b">WARNING</span>
+                        {% else %}<span class="badge badge-green">OK</span>{% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="section">
+    <h2>Exit Rules</h2>
+    <div class="strat-grid">
+        <div class="card">
+            <div class="card-label">Stop Loss</div>
+            <div class="card-detail">Exit when position loses 50%+ of cost basis</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Trailing Stop</div>
+            <div class="card-detail">Activate at 20% gain, trail at 50% of peak P&L</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Take Profit</div>
+            <div class="card-detail">Exit when 80% of max theoretical gain is captured</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Time Exit</div>
+            <div class="card-detail">Close after 30 days if still open</div>
+        </div>
+    </div>
+</section>
 
 {% if cooldowns %}
 <section class="section">
     <h2>Active Cooldowns</h2>
-    <table class="data-table">
-        <thead>
-            <tr><th>Market</th><th>Exit Time</th></tr>
-        </thead>
-        <tbody>
-            {% for market_id, exit_time in cooldowns.items() %}
-            <tr><td>{{ market_id }}</td><td>{{ exit_time }}</td></tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="table-wrapper">
+        <table class="data-table">
+            <thead>
+                <tr><th>Market</th><th>Exit Time</th></tr>
+            </thead>
+            <tbody>
+                {% for market_id, exit_time in cooldowns.items() %}
+                <tr><td>{{ market_id }}</td><td>{{ exit_time }}</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </section>
 {% endif %}
 {% endblock %}

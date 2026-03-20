@@ -3,46 +3,111 @@
 {% block title %}PolyEdge — Signals{% endblock %}
 
 {% block content %}
-<h1>Signals</h1>
-<p class="subtitle">All generated trading signals</p>
-
-<div class="filter-bar">
-    <button class="filter-btn active" onclick="filterSignals('all')">All</button>
-    <button class="filter-btn" onclick="filterSignals('acted')">Acted On</button>
-    <button class="filter-btn" onclick="filterSignals('skipped')">Skipped</button>
+<div class="page-header">
+    <h1>Signals</h1>
+    <p class="subtitle">All generated trading signals</p>
 </div>
 
-<table class="data-table" id="signals-table">
-    <thead>
-        <tr>
-            <th>Market</th>
-            <th>Strategy</th>
-            <th>Direction</th>
-            <th>Edge</th>
-            <th>Confidence</th>
-            <th>Acted</th>
-        </tr>
-    </thead>
-    <tbody hx-get="/partials/signals" hx-trigger="load, every 30s" hx-swap="innerHTML">
-        <tr><td colspan="6" class="muted">Loading...</td></tr>
-    </tbody>
-</table>
+<div class="filter-bar">
+    <button class="filter-btn active" onclick="filterSignals('all', this)">All</button>
+    <button class="filter-btn" onclick="filterSignals('acted', this)">Acted On</button>
+    <button class="filter-btn" onclick="filterSignals('skipped', this)">Skipped</button>
+    <button class="filter-btn" onclick="filterSignals('ai_probability', this)">AI Prob</button>
+    <button class="filter-btn" onclick="filterSignals('cross_arb', this)">Cross-Arb</button>
+    <button class="filter-btn" onclick="filterSignals('obvious_no', this)">Obvious NO</button>
+</div>
+
+<div class="table-wrapper">
+    <table class="data-table" id="signals-table">
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>Market</th>
+                <th>Strategy</th>
+                <th>Direction</th>
+                <th>Edge</th>
+                <th>Confidence</th>
+                <th>Acted</th>
+                <th>Reasoning</th>
+            </tr>
+        </thead>
+        <tbody id="signals-body">
+            <tr><td colspan="8" class="muted">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="pagination" id="pagination">
+    <button class="filter-btn" id="load-more" onclick="loadMore()">Load more</button>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function filterSignals(filter) {
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    event.target.classList.add('active');
+let allSignals = [];
+let displayCount = 50;
 
-    const rows = document.querySelectorAll('#signals-table tbody tr');
-    rows.forEach(row => {
-        if (filter === 'all') { row.style.display = ''; return; }
-        const acted = row.cells[5]?.textContent?.trim();
-        if (filter === 'acted' && acted === 'Yes') row.style.display = '';
-        else if (filter === 'skipped' && acted === 'No') row.style.display = '';
-        else row.style.display = 'none';
-    });
+function loadSignals() {
+    fetch('/api/signals')
+        .then(r => r.json())
+        .then(data => {
+            allSignals = data;
+            renderSignals();
+        });
 }
+
+function renderSignals(filter) {
+    filter = filter || 'all';
+    const tbody = document.getElementById('signals-body');
+    let filtered = allSignals;
+
+    if (filter === 'acted') filtered = allSignals.filter(s => s.acted_on);
+    else if (filter === 'skipped') filtered = allSignals.filter(s => !s.acted_on);
+    else if (['ai_probability', 'cross_arb', 'obvious_no', 'whale_tracker'].includes(filter))
+        filtered = allSignals.filter(s => s.strategy === filter);
+
+    if (!filtered.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="muted">No signals match filter</td></tr>';
+        return;
+    }
+
+    const rows = filtered.slice(0, displayCount).map(s => {
+        const ts = s.timestamp ? new Date(s.timestamp).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+        const acted = s.acted_on ? '<span class="badge badge-green">Yes</span>' : '<span class="badge">No</span>';
+        const dirClass = s.direction && s.direction.includes('YES') ? 'badge-green' : 'badge-red';
+        const reasoning = (s.reasoning || '').substring(0, 60);
+        const mktId = (s.market_id || '').substring(0, 25);
+        return `<tr>
+            <td class="muted-text">${ts}</td>
+            <td title="${s.market_question || s.market_id}">${mktId}</td>
+            <td><span class="badge">${s.strategy || ''}</span></td>
+            <td><span class="badge ${dirClass}">${s.direction || ''}</span></td>
+            <td>${(s.edge * 100).toFixed(1)}%</td>
+            <td>${(s.confidence * 100).toFixed(0)}%</td>
+            <td>${acted}</td>
+            <td class="muted-text" title="${s.reasoning || ''}">${reasoning}</td>
+        </tr>`;
+    });
+
+    tbody.innerHTML = rows.join('');
+    document.getElementById('load-more').style.display = filtered.length > displayCount ? '' : 'none';
+}
+
+function filterSignals(filter, btn) {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    displayCount = 50;
+    renderSignals(filter);
+}
+
+function loadMore() {
+    displayCount += 50;
+    const activeFilter = document.querySelector('.filter-btn.active');
+    const filter = activeFilter ? activeFilter.textContent.trim().toLowerCase().replace(' ', '_') : 'all';
+    renderSignals(filter === 'acted_on' ? 'acted' : filter);
+}
+
+loadSignals();
+setInterval(loadSignals, 30000);
 </script>
 {% endblock %}

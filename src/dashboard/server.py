@@ -184,6 +184,13 @@ def create_app(
 
         cooldowns = db.load_cooldowns()
 
+        # Calculate daily loss as percentage of bankroll
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        daily_pnl = db.get_daily_pnl(today)
+        summary = db.get_portfolio_summary()
+        bankroll = summary.get("bankroll", 500)
+        daily_loss_pct = abs(min(0, daily_pnl)) / bankroll if bankroll > 0 else 0
+
         return _render(
             "risk.html",
             cb_state=cb_state,
@@ -191,6 +198,7 @@ def create_app(
             exposure_pct=exposure_pct,
             position_count=position_count,
             cooldowns=cooldowns,
+            daily_loss_pct=daily_loss_pct,
             active_page="risk",
         )
 

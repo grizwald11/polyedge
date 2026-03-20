@@ -10,7 +10,10 @@
 </head>
 <body>
     <nav class="navbar">
-        <div class="nav-brand">PolyEdge</div>
+        <div class="nav-left">
+            <div class="nav-brand">PolyEdge</div>
+            <span class="mode-badge" id="mode-badge">PAPER</span>
+        </div>
         <div class="nav-links">
             <a href="/" class="nav-link {% if active_page == 'portfolio' %}active{% endif %}">Portfolio</a>
             <a href="/strategies" class="nav-link {% if active_page == 'strategies' %}active{% endif %}">Strategies</a>
@@ -18,20 +21,60 @@
             <a href="/signals" class="nav-link {% if active_page == 'signals' %}active{% endif %}">Signals</a>
             <a href="/risk" class="nav-link {% if active_page == 'risk' %}active{% endif %}">Risk</a>
         </div>
+        <div class="nav-right">
+            <span class="health-dot" id="health-dot" title="Bot status"></span>
+            <span id="clock"></span>
+        </div>
     </nav>
     <main class="container">
         {% block content %}{% endblock %}
     </main>
     <footer class="footer">
         <span>PolyEdge Trading System</span>
-        <span id="clock"></span>
+        <span id="footer-stats"></span>
+        <span id="clock-footer"></span>
     </footer>
     <script>
         function updateClock() {
-            document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+            const now = new Date();
+            const time = now.toLocaleTimeString();
+            const utc = now.toLocaleTimeString('en-US', {timeZone:'UTC', hour:'2-digit', minute:'2-digit'});
+            document.getElementById('clock').textContent = time;
+            document.getElementById('clock-footer').textContent = utc + ' UTC';
         }
         setInterval(updateClock, 1000);
         updateClock();
+
+        // Health check polling
+        function checkHealth() {
+            fetch('/api/health')
+                .then(r => r.json())
+                .then(d => {
+                    const dot = document.getElementById('health-dot');
+                    dot.className = 'health-dot ' + (d.status === 'healthy' ? 'health-ok' : 'health-warn');
+                    dot.title = d.status || 'unknown';
+                })
+                .catch(() => {
+                    document.getElementById('health-dot').className = 'health-dot health-err';
+                });
+        }
+        setInterval(checkHealth, 30000);
+        checkHealth();
+
+        // Footer stats
+        function updateFooterStats() {
+            fetch('/api/portfolio')
+                .then(r => r.json())
+                .then(d => {
+                    const pnl = d.total_pnl_incl_unrealized || 0;
+                    const cls = pnl >= 0 ? 'positive' : 'negative';
+                    document.getElementById('footer-stats').innerHTML =
+                        `<span class="${cls}">P&L: $${pnl.toFixed(2)}</span> &middot; ${d.open_positions || 0} positions &middot; $${(d.exposure || 0).toFixed(0)} deployed`;
+                })
+                .catch(() => {});
+        }
+        setInterval(updateFooterStats, 15000);
+        updateFooterStats();
     </script>
     {% block scripts %}{% endblock %}
 </body>

@@ -19,6 +19,7 @@ body {
     line-height: 1.6;
 }
 
+/* Navbar */
 .navbar {
     display: flex;
     align-items: center;
@@ -26,7 +27,13 @@ body {
     padding: 0.75rem 1.5rem;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
 }
+
+.nav-left { display: flex; align-items: center; gap: 0.75rem; }
+.nav-right { display: flex; align-items: center; gap: 0.75rem; font-size: 0.85rem; color: var(--muted); }
 
 .nav-brand {
     font-weight: 700;
@@ -34,30 +41,70 @@ body {
     color: var(--accent);
 }
 
-.nav-links { display: flex; gap: 1rem; }
+.mode-badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    background: rgba(245,158,11,0.2);
+    color: var(--warning);
+    border: 1px solid rgba(245,158,11,0.3);
+}
+
+.health-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    background: var(--muted);
+}
+.health-ok { background: var(--positive); box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+.health-warn { background: var(--warning); box-shadow: 0 0 6px rgba(245,158,11,0.5); }
+.health-err { background: var(--negative); box-shadow: 0 0 6px rgba(239,68,68,0.5); }
+
+.nav-links { display: flex; gap: 0.5rem; }
 
 .nav-link {
     color: var(--muted);
     text-decoration: none;
     font-size: 0.9rem;
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    transition: color 0.2s;
+    padding: 0.35rem 0.65rem;
+    border-radius: 6px;
+    transition: all 0.2s;
 }
 .nav-link.active { color: var(--text); background: rgba(99,102,241,0.15); }
 .nav-link:hover { color: var(--text); }
 
+/* Container & Layout */
 .container {
-    max-width: 1100px;
+    max-width: 1200px;
     margin: 0 auto;
     padding: 1.5rem;
     padding-bottom: 4rem;
 }
 
+.page-header { margin-bottom: 1.5rem; }
+
 h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
 h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
 
-.subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
+.subtitle { color: var(--muted); font-size: 0.85rem; }
+
+.section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+}
+.section-header h2 { margin-bottom: 0; }
+
+.link-subtle {
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 0.85rem;
+}
+.link-subtle:hover { text-decoration: underline; }
 
 /* Status banners */
 .status-banner {
@@ -86,7 +133,7 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
 /* Cards */
 .cards {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 1rem;
     margin-bottom: 2rem;
 }
@@ -104,6 +151,13 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
 .card-value.negative { color: var(--negative); }
 .card-detail { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
 
+/* Strategy grid */
+.strat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1rem;
+}
+
 /* Chart container */
 .chart-container {
     background: var(--surface);
@@ -112,10 +166,32 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
     padding: 1rem;
     margin-bottom: 1.5rem;
     min-height: 250px;
+    position: relative;
 }
+.chart-empty {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+/* Empty state */
+.empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--muted);
+}
+.empty-icon { font-size: 3rem; margin-bottom: 1rem; }
+.empty-state h3 { color: var(--text); margin-bottom: 0.5rem; }
+.empty-state p { max-width: 500px; margin: 0 auto 0.5rem; }
 
 /* Section */
 .section { margin-bottom: 2rem; }
+
+/* Table wrapper for horizontal scroll on mobile */
+.table-wrapper { overflow-x: auto; }
 
 /* Data tables */
 .data-table {
@@ -128,6 +204,7 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
     text-align: left;
     padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--border);
+    white-space: nowrap;
 }
 
 .data-table th {
@@ -136,11 +213,15 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
     font-size: 0.8rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
 }
 
 .data-table tr:hover td { background: var(--surface); }
 
 .muted { color: var(--muted); text-align: center; }
+.muted-text { color: var(--muted); font-size: 0.85rem; }
 .positive { color: var(--positive); }
 .negative { color: var(--negative); }
 
@@ -153,6 +234,7 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
     font-weight: 600;
     background: rgba(99,102,241,0.2);
     color: var(--accent);
+    white-space: nowrap;
 }
 .badge-green { background: rgba(34,197,94,0.2); color: var(--positive); }
 .badge-red { background: rgba(239,68,68,0.2); color: var(--negative); }
@@ -162,6 +244,7 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
     display: flex;
     gap: 0.5rem;
     margin-bottom: 1rem;
+    flex-wrap: wrap;
 }
 .filter-btn {
     background: var(--surface);
@@ -177,6 +260,13 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
     color: var(--text);
     border-color: var(--accent);
     background: rgba(99,102,241,0.15);
+}
+
+/* Pagination */
+.pagination {
+    display: flex;
+    justify-content: center;
+    margin-top: 1rem;
 }
 
 /* Progress bars */
@@ -209,4 +299,13 @@ h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: var(--muted); }
     bottom: 0;
     width: 100%;
     background: var(--bg);
+    z-index: 100;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .navbar { flex-wrap: wrap; gap: 0.5rem; }
+    .nav-links { overflow-x: auto; width: 100%; }
+    .cards { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+    .container { padding: 1rem; }
 }

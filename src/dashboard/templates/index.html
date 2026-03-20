@@ -3,8 +3,10 @@
 {% block title %}PolyEdge — Portfolio Overview{% endblock %}
 
 {% block content %}
-<h1>Portfolio Overview</h1>
-<p class="subtitle">{{ today }} UTC</p>
+<div class="page-header">
+    <h1>Portfolio Overview</h1>
+    <p class="subtitle">{{ today }} UTC</p>
+</div>
 
 {% if cb_halted %}
 <div class="status-banner status-danger">
@@ -14,9 +16,18 @@
 
 <div class="cards">
     <div class="card">
-        <div class="card-label">Total P&amp;L</div>
-        <div class="card-value {% if summary.total_pnl is defined and summary.total_pnl >= 0 %}positive{% else %}negative{% endif %}">
-            ${{ "%.2f"|format(summary.total_pnl|default(0)) }}
+        <div class="card-label">Bankroll</div>
+        <div class="card-value">${{ "%.2f"|format(summary.bankroll|default(500)) }}</div>
+        <div class="card-detail">Paper trading mode</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Total P&amp;L (incl. unrealized)</div>
+        <div class="card-value {% if (summary.total_pnl|default(0) + unrealized_pnl) >= 0 %}positive{% else %}negative{% endif %}">
+            ${{ "%.2f"|format(summary.total_pnl|default(0) + unrealized_pnl) }}
+        </div>
+        <div class="card-detail">
+            Realized: ${{ "%.2f"|format(summary.total_pnl|default(0)) }} &middot;
+            Unrealized: <span class="{% if unrealized_pnl >= 0 %}positive{% else %}negative{% endif %}">${{ "%.2f"|format(unrealized_pnl) }}</span>
         </div>
     </div>
     <div class="card">
@@ -26,22 +37,22 @@
         </div>
     </div>
     <div class="card">
+        <div class="card-label">Exposure</div>
+        <div class="card-value">${{ "%.2f"|format(exposure|default(0)) }}</div>
+        <div class="progress-bar-container">
+            {% set exp_pct = (exposure|default(0) / summary.bankroll|default(500) * 100) if summary.bankroll|default(500) > 0 else 0 %}
+            <div class="progress-bar {% if exp_pct > 35 %}progress-danger{% elif exp_pct > 25 %}progress-warning{% endif %}" style="width: {{ exp_pct|int }}%"></div>
+        </div>
+        <div class="card-detail">{{ "%.1f"|format(exp_pct) }}% of bankroll (limit: 40%)</div>
+    </div>
+    <div class="card">
         <div class="card-label">Open Positions</div>
         <div class="card-value">{{ positions|length }}</div>
     </div>
     <div class="card">
-        <div class="card-label">Total Exposure</div>
-        <div class="card-value">${{ "%.2f"|format(exposure|default(0)) }}</div>
-    </div>
-    <div class="card">
-        <div class="card-label">Unrealized P&amp;L</div>
-        <div class="card-value {% if unrealized_pnl >= 0 %}positive{% else %}negative{% endif %}">
-            ${{ "%.2f"|format(unrealized_pnl|default(0)) }}
-        </div>
-    </div>
-    <div class="card">
         <div class="card-label">Total Trades</div>
         <div class="card-value">{{ stats.total_trades|default(0) }}</div>
+        <div class="card-detail">{{ stats.total_signals|default(0) }} signals generated</div>
     </div>
 </div>
 
@@ -49,64 +60,75 @@
     <h2>P&amp;L Chart</h2>
     <div class="chart-container">
         <canvas id="pnlChart"></canvas>
+        <div id="pnl-chart-empty" class="chart-empty" style="display:none">No P&L data yet — trades need to resolve</div>
     </div>
 </section>
 
 <section class="section">
-    <h2>Open Positions</h2>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Market</th>
-                <th>Dir</th>
-                <th>Size</th>
-                <th>Entry</th>
-                <th>Current</th>
-                <th>Cost</th>
-                <th>P&amp;L</th>
-                <th>ROI</th>
-                <th>Strategy</th>
-            </tr>
-        </thead>
-        <tbody hx-get="/partials/positions" hx-trigger="every 15s" hx-swap="innerHTML">
-            {% if positions %}
-                {% for p in positions %}
+    <div class="section-header">
+        <h2>Open Positions</h2>
+        <span class="badge">{{ positions|length }} open</span>
+    </div>
+    <div class="table-wrapper">
+        <table class="data-table">
+            <thead>
                 <tr>
-                    <td title="{{ p.market_question|default(p.market_id) }}">{{ p.market_id[:30] }}</td>
-                    <td>{{ p.direction }}</td>
-                    <td>{{ p.size|int }}</td>
-                    <td>${{ "%.2f"|format(p.avg_entry) }}</td>
-                    <td>${{ "%.2f"|format(p.current) }}</td>
-                    <td>${{ "%.2f"|format(p.cost_basis|default(p.avg_entry * p.size|int)) }}</td>
-                    <td class="{% if p.pnl >= 0 %}positive{% else %}negative{% endif %}">${{ "%.2f"|format(p.pnl) }}</td>
-                    <td class="{% if p.roi_pct|default(0) >= 0 %}positive{% else %}negative{% endif %}">{{ "%.1f"|format(p.roi_pct|default(0)) }}%</td>
-                    <td>{{ p.strategy }}</td>
+                    <th>Market</th>
+                    <th>Dir</th>
+                    <th>Size</th>
+                    <th>Entry</th>
+                    <th>Current</th>
+                    <th>Cost</th>
+                    <th>P&amp;L</th>
+                    <th>ROI</th>
+                    <th>Strategy</th>
                 </tr>
-                {% endfor %}
-            {% else %}
-                <tr><td colspan="9" class="muted">No open positions</td></tr>
-            {% endif %}
-        </tbody>
-    </table>
+            </thead>
+            <tbody hx-get="/partials/positions" hx-trigger="every 15s" hx-swap="innerHTML">
+                {% if positions %}
+                    {% for p in positions %}
+                    <tr>
+                        <td title="{{ p.market_question|default(p.market_id) }}">{{ p.market_id[:30] }}</td>
+                        <td><span class="badge {% if 'YES' in p.direction %}badge-green{% else %}badge-red{% endif %}">{{ p.direction }}</span></td>
+                        <td>{{ p.size|int }}</td>
+                        <td>${{ "%.2f"|format(p.avg_entry) }}</td>
+                        <td>${{ "%.2f"|format(p.current) }}</td>
+                        <td>${{ "%.2f"|format(p.cost_basis|default(p.avg_entry * p.size|int)) }}</td>
+                        <td class="{% if p.pnl >= 0 %}positive{% else %}negative{% endif %}">${{ "%.2f"|format(p.pnl) }}</td>
+                        <td class="{% if p.roi_pct|default(0) >= 0 %}positive{% else %}negative{% endif %}">{{ "%.1f"|format(p.roi_pct|default(0)) }}%</td>
+                        <td><span class="badge">{{ p.strategy }}</span></td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr><td colspan="9" class="muted">No open positions</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
 </section>
 
 <section class="section">
-    <h2>Recent Signals</h2>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Market</th>
-                <th>Strategy</th>
-                <th>Direction</th>
-                <th>Edge</th>
-                <th>Confidence</th>
-                <th>Acted</th>
-            </tr>
-        </thead>
-        <tbody hx-get="/partials/signals" hx-trigger="every 30s" hx-swap="innerHTML">
-            <tr><td colspan="6" class="muted">Loading...</td></tr>
-        </tbody>
-    </table>
+    <div class="section-header">
+        <h2>Recent Signals</h2>
+        <a href="/signals" class="link-subtle">View all</a>
+    </div>
+    <div class="table-wrapper">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Market</th>
+                    <th>Strategy</th>
+                    <th>Direction</th>
+                    <th>Edge</th>
+                    <th>Confidence</th>
+                    <th>Acted</th>
+                </tr>
+            </thead>
+            <tbody hx-get="/partials/signals" hx-trigger="every 30s" hx-swap="innerHTML">
+                <tr><td colspan="6" class="muted">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
 </section>
 {% endblock %}
 
@@ -115,7 +137,10 @@
 fetch('/api/pnl/timeseries')
     .then(r => r.json())
     .then(data => {
-        if (!data.length) return;
+        if (!data.length || data.every(d => d.pnl === 0 && d.cumulative_pnl === 0)) {
+            document.getElementById('pnl-chart-empty').style.display = 'block';
+            return;
+        }
         const ctx = document.getElementById('pnlChart').getContext('2d');
         new Chart(ctx, {
             type: 'line',
@@ -128,6 +153,7 @@ fetch('/api/pnl/timeseries')
                     backgroundColor: 'rgba(99,102,241,0.1)',
                     fill: true,
                     tension: 0.3,
+                    pointRadius: 3,
                 }, {
                     label: 'Daily P&L',
                     data: data.map(d => d.pnl),
@@ -135,11 +161,16 @@ fetch('/api/pnl/timeseries')
                     backgroundColor: 'rgba(34,197,94,0.1)',
                     fill: false,
                     tension: 0.3,
+                    pointRadius: 3,
                 }]
             },
             options: {
                 responsive: true,
-                plugins: { legend: { labels: { color: '#e1e4ed' } } },
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { labels: { color: '#e1e4ed' } },
+                    tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toFixed(2) } }
+                },
                 scales: {
                     x: { ticks: { color: '#6b7280' }, grid: { color: '#2a2d3a' } },
                     y: { ticks: { color: '#6b7280', callback: v => '$' + v.toFixed(2) }, grid: { color: '#2a2d3a' } }

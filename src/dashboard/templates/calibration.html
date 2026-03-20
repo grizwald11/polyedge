@@ -3,10 +3,12 @@
 {% block title %}PolyEdge — Calibration{% endblock %}
 
 {% block content %}
-<h1>Calibration</h1>
-<p class="subtitle">Predicted probability vs actual outcomes</p>
+<div class="page-header">
+    <h1>Calibration</h1>
+    <p class="subtitle">Predicted probability vs actual outcomes</p>
+</div>
 
-{% if report %}
+{% if report and report.total_resolved > 0 %}
 <div class="cards">
     <div class="card">
         <div class="card-label">Overall Brier Score</div>
@@ -15,7 +17,10 @@
     </div>
     <div class="card">
         <div class="card-label">Win Rate</div>
-        <div class="card-value">{{ "%.1f"|format(report.overall_win_rate * 100) if report.overall_win_rate is not none else "N/A" }}%</div>
+        <div class="card-value {% if report.overall_win_rate and report.overall_win_rate >= 0.55 %}positive{% endif %}">
+            {{ "%.1f"|format(report.overall_win_rate * 100) if report.overall_win_rate is not none else "N/A" }}%
+        </div>
+        <div class="card-detail">Target: 55-70%</div>
     </div>
     <div class="card">
         <div class="card-label">Resolved</div>
@@ -24,6 +29,7 @@
     <div class="card">
         <div class="card-label">Unresolved</div>
         <div class="card-value">{{ report.total_unresolved }}</div>
+        <div class="card-detail">Need 50+ resolved for Phase 3 exit</div>
     </div>
 </div>
 
@@ -37,45 +43,87 @@
 {% if report.category_stats %}
 <section class="section">
     <h2>Performance by Category</h2>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Category</th>
-                <th>Brier Score</th>
-                <th>Predictions</th>
-                <th>Avg Predicted</th>
-                <th>Avg Actual</th>
-                <th>Bias</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for c in report.category_stats %}
-            <tr>
-                <td>
-                    {{ c.category }}
-                    {% if report.best_category == c.category %}<span class="badge badge-green">Best</span>{% endif %}
-                    {% if report.worst_category == c.category %}<span class="badge badge-red">Worst</span>{% endif %}
-                </td>
-                <td>{{ "%.3f"|format(c.brier_score) }}</td>
-                <td>{{ c.count }}</td>
-                <td>{{ "%.1f"|format(c.avg_predicted * 100) }}%</td>
-                <td>{{ "%.1f"|format(c.avg_actual * 100) }}%</td>
-                <td class="{% if c.bias > 0 %}positive{% else %}negative{% endif %}">
-                    {{ "%+.1f"|format(c.bias * 100) }}%
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="table-wrapper">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Category</th>
+                    <th>Brier Score</th>
+                    <th>Predictions</th>
+                    <th>Avg Predicted</th>
+                    <th>Avg Actual</th>
+                    <th>Bias</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for c in report.category_stats %}
+                <tr>
+                    <td>
+                        {{ c.category }}
+                        {% if report.best_category == c.category %}<span class="badge badge-green">Best</span>{% endif %}
+                        {% if report.worst_category == c.category %}<span class="badge badge-red">Worst</span>{% endif %}
+                    </td>
+                    <td>{{ "%.3f"|format(c.brier_score) }}</td>
+                    <td>{{ c.count }}</td>
+                    <td>{{ "%.1f"|format(c.avg_predicted * 100) }}%</td>
+                    <td>{{ "%.1f"|format(c.avg_actual * 100) }}%</td>
+                    <td class="{% if c.bias > 0 %}positive{% else %}negative{% endif %}">
+                        {{ "%+.1f"|format(c.bias * 100) }}%
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </section>
 {% endif %}
 
+{% elif report %}
+{# Report exists but no resolved predictions yet #}
+<div class="empty-state">
+    <div class="empty-icon">&#x1f4ca;</div>
+    <h3>Waiting for Predictions to Resolve</h3>
+    <p>{{ report.total_unresolved }} predictions are pending resolution.</p>
+    <p class="muted-text">Calibration data will appear here once markets start resolving. This typically takes a few days to a few weeks depending on market end dates.</p>
+</div>
+
+<section class="section">
+    <h2>Phase 3 Exit Criteria</h2>
+    <div class="table-wrapper">
+        <table class="data-table">
+            <thead><tr><th>Criteria</th><th>Target</th><th>Current</th><th>Status</th></tr></thead>
+            <tbody>
+                <tr>
+                    <td>Resolved predictions</td><td>50+</td>
+                    <td>{{ report.total_resolved }}</td>
+                    <td>{% if report.total_resolved >= 50 %}<span class="badge badge-green">PASS</span>{% else %}<span class="badge">PENDING</span>{% endif %}</td>
+                </tr>
+                <tr>
+                    <td>Brier score</td><td>&lt; 0.20</td>
+                    <td>{{ "%.3f"|format(report.overall_brier) if report.overall_brier is not none else "—" }}</td>
+                    <td>{% if report.overall_brier is not none and report.overall_brier < 0.20 %}<span class="badge badge-green">PASS</span>{% else %}<span class="badge">PENDING</span>{% endif %}</td>
+                </tr>
+                <tr>
+                    <td>Win rate</td><td>55-70%</td>
+                    <td>{{ "%.1f"|format(report.overall_win_rate * 100) if report.overall_win_rate is not none else "—" }}%</td>
+                    <td>{% if report.overall_win_rate is not none and report.overall_win_rate >= 0.55 %}<span class="badge badge-green">PASS</span>{% else %}<span class="badge">PENDING</span>{% endif %}</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
 {% else %}
-<div class="card"><div class="card-label muted">No calibration data available. Run some trading cycles first.</div></div>
+<div class="empty-state">
+    <div class="empty-icon">&#x1f50d;</div>
+    <h3>No Calibration Data</h3>
+    <p>Run some trading cycles to generate predictions. The calibration system will track predicted probabilities against actual outcomes.</p>
+</div>
 {% endif %}
 {% endblock %}
 
 {% block scripts %}
+{% if report and report.total_resolved > 0 %}
 <script>
 fetch('/api/calibration/chart')
     .then(r => r.json())
@@ -89,13 +137,17 @@ fetch('/api/calibration/chart')
                 datasets: [
                     {
                         label: 'Predictions',
-                        data: bins.map(b => ({x: b.predicted_avg || b.bin_center || 0, y: b.actual_avg || b.actual_rate || 0})),
+                        data: bins.map(b => ({
+                            x: b.predicted_avg || b.bin_center || 0,
+                            y: b.actual_avg || b.actual_rate || 0
+                        })),
                         backgroundColor: '#6366f1',
-                        pointRadius: 6,
+                        pointRadius: 8,
+                        pointHoverRadius: 10,
                     },
                     {
                         label: 'Perfect Calibration',
-                        data: [{x:0,y:0},{x:0.5,y:0.5},{x:1,y:1}],
+                        data: [{x:0,y:0},{x:0.25,y:0.25},{x:0.5,y:0.5},{x:0.75,y:0.75},{x:1,y:1}],
                         borderColor: '#6b7280',
                         borderDash: [5,5],
                         pointRadius: 0,
@@ -106,13 +158,24 @@ fetch('/api/calibration/chart')
             },
             options: {
                 responsive: true,
-                plugins: { legend: { labels: { color: '#e1e4ed' } } },
+                plugins: {
+                    legend: { labels: { color: '#e1e4ed' } },
+                    tooltip: {
+                        callbacks: {
+                            label: ctx => {
+                                if (ctx.datasetIndex === 1) return '';
+                                return `Predicted: ${(ctx.parsed.x*100).toFixed(0)}%, Actual: ${(ctx.parsed.y*100).toFixed(0)}%`;
+                            }
+                        }
+                    }
+                },
                 scales: {
-                    x: { title: { display: true, text: 'Predicted', color: '#6b7280' }, min: 0, max: 1, ticks: { color: '#6b7280' }, grid: { color: '#2a2d3a' } },
-                    y: { title: { display: true, text: 'Actual', color: '#6b7280' }, min: 0, max: 1, ticks: { color: '#6b7280' }, grid: { color: '#2a2d3a' } }
+                    x: { title: { display: true, text: 'Predicted Probability', color: '#6b7280' }, min: 0, max: 1, ticks: { color: '#6b7280', callback: v => (v*100)+'%' }, grid: { color: '#2a2d3a' } },
+                    y: { title: { display: true, text: 'Actual Resolution Rate', color: '#6b7280' }, min: 0, max: 1, ticks: { color: '#6b7280', callback: v => (v*100)+'%' }, grid: { color: '#2a2d3a' } }
                 }
             }
         });
     });
 </script>
+{% endif %}
 {% endblock %}
