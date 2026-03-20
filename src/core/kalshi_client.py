@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 import time
 from typing import Any, Optional
 
@@ -92,6 +93,7 @@ class KalshiClient:
                 base_url=self.host,
                 timeout=30.0,
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
+                verify=ssl.create_default_context(),
             )
         return self._client
 

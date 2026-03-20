@@ -15,6 +15,7 @@ import asyncio
 import base64
 import json
 import logging
+import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Optional
@@ -158,10 +159,14 @@ class KalshiWebSocket:
         while self._running:
             try:
                 headers = self._auth_headers()
+                # Explicit SSL context avoids Python 3.12 segfault in
+                # asyncio TLS on macOS ARM64 (null-deref in ssl.read).
+                ssl_ctx = ssl.create_default_context()
                 async with websockets.connect(
                     self.host,
                     additional_headers=headers,
                     ping_interval=None,  # Kalshi sends its own pings
+                    ssl=ssl_ctx,
                 ) as ws:
                     self._ws = ws
                     backoff = INITIAL_BACKOFF
