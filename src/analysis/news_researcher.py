@@ -25,15 +25,19 @@ MAX_CONTEXT_CHARS = 3200  # ~800 tokens
 MAX_RELEVANT_RESULTS = 5
 DEDUP_SIMILARITY_THRESHOLD = 0.7
 
-# Check if duckduckgo_search is available
+# Check if ddgs (or legacy duckduckgo_search) is available
 try:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        from duckduckgo_search import DDGS
+    from ddgs import DDGS
     DDG_AVAILABLE = True
 except ImportError:
-    DDG_AVAILABLE = False
-    logger.info("duckduckgo-search not installed — DDG search disabled")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            from duckduckgo_search import DDGS
+        DDG_AVAILABLE = True
+    except ImportError:
+        DDG_AVAILABLE = False
+        logger.info("ddgs not installed — DDG search disabled")
 
 
 @dataclass
@@ -62,6 +66,7 @@ class NewsResearcher:
         self.serper_api_key = serper_api_key
         # searxng_url kept for backward compatibility
         self.searxng_url = searxng_url
+        self._serper_disabled = False  # Set True after credit/auth failures
 
     def generate_queries(self, market_question: str) -> list[str]:
         """Generate 2-3 targeted search queries from a market question.
@@ -104,8 +109,8 @@ class NewsResearcher:
             if results:
                 return results
 
-        # Fall back to Serper if configured
-        if self.serper_api_key:
+        # Fall back to Serper if configured and not disabled
+        if self.serper_api_key and not self._serper_disabled:
             return await self._search_serper(query)
 
         return []
@@ -171,6 +176,13 @@ class NewsResearcher:
                 )
                 response.raise_for_status()
                 data = response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (400, 401, 403):
+                logger.warning(f"Serper API disabled for this session (credits/auth): {e.response.status_code}")
+                self._serper_disabled = True
+            else:
+                logger.warning(f"Serper search failed for '{query}': {e}")
+            return []
         except httpx.HTTPError as e:
             logger.warning(f"Serper search failed for '{query}': {e}")
             return []

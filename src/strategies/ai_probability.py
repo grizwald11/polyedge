@@ -66,32 +66,50 @@ class AIProbabilityStrategy:
         except Exception as e:
             logger.error(f"Failed to load calibration adjustments: {e}")
 
-    async def _get_metaculus_forecast(self, market: Market) -> Optional[ForecastResult]:
-        """Extract Metaculus community prediction as a ForecastResult.
+    async def _get_community_forecast(self, market: Market) -> Optional[ForecastResult]:
+        """Get community forecast from Manifold Markets or Metaculus.
 
-        Returns None if no matching Metaculus question found or data enricher
-        is unavailable.
+        Tries Manifold first (free, no auth), falls back to Metaculus.
+        Returns None if no matching question found.
         """
         if not self.data_enricher:
             return None
+
+        # Try Manifold Markets first (free, always available)
+        try:
+            match = await self.data_enricher.manifold.get_best_match(market.question)
+            if match is not None:
+                prob = match["community_prediction"]
+                bettors = match.get("forecasters_count", 0)
+                ci_half = max(0.05, 0.20 - min(bettors, 100) * 0.001)
+                return ForecastResult(
+                    probability=prob,
+                    confidence_low=max(0.0, prob - ci_half),
+                    confidence_high=min(1.0, prob + ci_half),
+                    reasoning=f"Manifold Markets: {prob:.0%} ({bettors} bettors)",
+                    model_used="manifold_community",
+                )
+        except Exception as e:
+            logger.debug(f"Manifold forecast unavailable for {market.ticker}: {e}")
+
+        # Fall back to Metaculus
         try:
             match = await self.data_enricher.metaculus.get_best_match(market.question)
-            if match is None:
-                return None
-            prob = match["community_prediction"]
-            forecasters = match.get("forecasters_count", 0)
-            # Wider CI for fewer forecasters
-            ci_half = max(0.05, 0.20 - min(forecasters, 100) * 0.001)
-            return ForecastResult(
-                probability=prob,
-                confidence_low=max(0.0, prob - ci_half),
-                confidence_high=min(1.0, prob + ci_half),
-                reasoning=f"Metaculus community: {prob:.0%} ({forecasters} forecasters)",
-                model_used="metaculus_community",
-            )
+            if match is not None:
+                prob = match["community_prediction"]
+                forecasters = match.get("forecasters_count", 0)
+                ci_half = max(0.05, 0.20 - min(forecasters, 100) * 0.001)
+                return ForecastResult(
+                    probability=prob,
+                    confidence_low=max(0.0, prob - ci_half),
+                    confidence_high=min(1.0, prob + ci_half),
+                    reasoning=f"Metaculus community: {prob:.0%} ({forecasters} forecasters)",
+                    model_used="metaculus_community",
+                )
         except Exception as e:
             logger.debug(f"Metaculus forecast unavailable for {market.ticker}: {e}")
-            return None
+
+        return None
 
     def _build_base_rate_context(self, category_value: str) -> str:
         """Build base rate context string from calibration history."""
@@ -241,13 +259,13 @@ class AIProbabilityStrategy:
             )
             return None
 
-        # Try to get Metaculus community forecast as a second model
-        metaculus_forecast = await self._get_metaculus_forecast(market)
+        # Try to get community forecast (Manifold or Metaculus) as a second model
+        community_forecast = await self._get_community_forecast(market)
 
-        if metaculus_forecast is not None:
-            # Multi-model ensemble: Claude + Metaculus + market price
+        if community_forecast is not None:
+            # Multi-model ensemble: Claude + community forecast + market price
             ensemble = multi_model_ensemble(
-                forecasts=[forecast, metaculus_forecast],
+                forecasts=[forecast, community_forecast],
                 market_price=market.yes_price,
                 market_weight=1.0 - self.settings.claude.ensemble_weight,
             )

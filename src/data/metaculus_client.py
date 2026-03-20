@@ -26,8 +26,10 @@ MIN_SIMILARITY_THRESHOLD = 0.4
 class MetaculusClient:
     """Fetches community forecasts from the Metaculus API."""
 
-    def __init__(self, ttl_seconds: int = 1800):
+    def __init__(self, ttl_seconds: int = 1800, api_token: str | None = None):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
+        self._api_token = api_token
+        self._disabled = False  # Set True after persistent auth failures
 
     async def search_questions(self, query: str) -> list[dict]:
         """Search Metaculus for open forecast questions matching a query.
@@ -35,10 +37,20 @@ class MetaculusClient:
         Returns list of question dicts with 'title', 'community_prediction',
         'forecasters_count', and 'url' keys.
         """
+        if self._disabled:
+            return []
+
         cache_key = f"metaculus_search_{query[:80]}"
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
+
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        }
+        if self._api_token:
+            headers["Authorization"] = f"Token {self._api_token}"
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -50,12 +62,17 @@ class MetaculusClient:
                         "type": "forecast",
                         "limit": 5,
                     },
-                    headers={
-                        "User-Agent": "PolyEdge/1.0",
-                    },
+                    headers=headers,
                 )
                 response.raise_for_status()
                 data = response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                logger.warning("Metaculus API requires authentication — disabling for this session")
+                self._disabled = True
+            else:
+                logger.warning(f"Metaculus API request failed: {e}")
+            return []
         except httpx.HTTPError as e:
             logger.warning(f"Metaculus API request failed: {e}")
             return []
@@ -63,19 +80,12 @@ class MetaculusClient:
         results = []
         questions = data.get("results", [])
         for q in questions:
-            prediction = q.get("community_prediction")
-            # community_prediction can be a dict with 'full' key or a float
-            if isinstance(prediction, dict):
-                pred_value = prediction.get("full", {}).get("q2")
-            elif isinstance(prediction, (int, float)):
-                pred_value = prediction
-            else:
-                pred_value = None
+            pred_value = self._extract_prediction(q)
 
             if pred_value is None:
                 continue
 
-            forecasters = q.get("number_of_forecasters", 0)
+            forecasters = q.get("nr_forecasters", q.get("number_of_forecasters", 0))
             results.append({
                 "title": q.get("title", ""),
                 "community_prediction": float(pred_value),
@@ -84,8 +94,46 @@ class MetaculusClient:
                 "id": q.get("id"),
             })
 
+        # If API returned questions but none had predictions, the API
+        # is likely hiding prediction data — disable to avoid noise
+        if questions and not results:
+            logger.info("Metaculus API returned questions but no predictions — disabling for this session")
+            self._disabled = True
+
         self._cache.set(cache_key, results)
         return results
+
+    @staticmethod
+    def _extract_prediction(q: dict) -> float | None:
+        """Extract community prediction from a question dict.
+
+        Handles multiple API response formats:
+        - Legacy: q["community_prediction"] as float or dict
+        - New: q["question"]["aggregations"]["recency_weighted"]["latest"]["centers"]
+        """
+        # Legacy format
+        prediction = q.get("community_prediction")
+        if isinstance(prediction, dict):
+            val = prediction.get("full", {}).get("q2")
+            if val is not None:
+                return float(val)
+        elif isinstance(prediction, (int, float)):
+            return float(prediction)
+
+        # New API format: nested under question.aggregations
+        qobj = q.get("question", {})
+        agg = qobj.get("aggregations", {}).get("recency_weighted", {})
+        latest = agg.get("latest")
+        if latest:
+            # Binary questions: centers is a list with one element (the probability)
+            centers = latest.get("centers")
+            if centers and isinstance(centers, list) and len(centers) > 0:
+                return float(centers[0])
+            means = latest.get("means")
+            if means and isinstance(means, list) and len(means) > 0:
+                return float(means[0])
+
+        return None
 
     def _calculate_similarity(self, market_question: str, metaculus_title: str) -> float:
         """Calculate keyword overlap similarity between two questions."""

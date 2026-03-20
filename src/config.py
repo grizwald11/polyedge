@@ -166,6 +166,7 @@ class Settings(BaseModel):
     serper_api_key: Optional[str] = None
     searxng_url: Optional[str] = None
     fred_api_key: Optional[str] = None
+    metaculus_api_token: Optional[str] = None
     live_enabled: bool = False
 
 
@@ -195,6 +196,7 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     settings.serper_api_key = os.environ.get("SERPER_API_KEY") or None
     settings.searxng_url = os.environ.get("SEARXNG_URL") or None
     settings.fred_api_key = os.environ.get("FRED_API_KEY") or None
+    settings.metaculus_api_token = os.environ.get("METACULUS_API_TOKEN") or None
     settings.live_enabled = os.environ.get("POLYEDGE_LIVE_ENABLED", "false").lower() == "true"
 
     return settings

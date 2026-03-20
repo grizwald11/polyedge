@@ -23,6 +23,7 @@ from src.core.models import Market, MarketCategory
 from src.data.fred_client import FREDClient
 from src.data.cleveland_fed import ClevelandFedNowcast
 from src.data.fedwatch import FedWatchClient
+from src.data.manifold_client import ManifoldClient
 from src.data.metaculus_client import MetaculusClient
 from src.data.polymarket_cross_ref import PolymarketCrossRef
 
@@ -43,7 +44,8 @@ class DataEnricher:
         self.fred = FREDClient(api_key=settings.fred_api_key)
         self.cleveland_fed = ClevelandFedNowcast()
         self.fedwatch = FedWatchClient()
-        self.metaculus = MetaculusClient()
+        self.metaculus = MetaculusClient(api_token=settings.metaculus_api_token)
+        self.manifold = ManifoldClient()
         self.polymarket = PolymarketCrossRef()
 
     async def get_context(self, market: Market) -> str:
@@ -78,6 +80,7 @@ class DataEnricher:
             tasks["fedwatch"] = self.fedwatch.get_context()
 
         # Community forecasts and cross-platform — all categories
+        tasks["manifold"] = self.manifold.get_context(market.question)
         tasks["metaculus"] = self.metaculus.get_context(market.question)
         tasks["polymarket"] = self.polymarket.get_context(
             market.question, market.yes_price
@@ -127,6 +130,8 @@ class DataEnricher:
             sections.append(results["fedwatch"])
 
         # 3. Community forecasts
+        if results.get("manifold"):
+            sections.append(results["manifold"])
         if results.get("metaculus"):
             sections.append(results["metaculus"])
 

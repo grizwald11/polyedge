@@ -193,40 +193,40 @@ class TestAIProbabilityStrategy:
         assert len(signals) == 1
 
 
-class TestMetaculusEnsemble:
-    """Tests for Metaculus integration in the multi-model ensemble."""
+class TestCommunityEnsemble:
+    """Tests for community forecast (Manifold/Metaculus) in the multi-model ensemble."""
 
     @pytest.mark.asyncio
-    async def test_uses_multi_model_when_metaculus_available(self, strategy, sample_market):
-        """Should use multi_model_ensemble when Metaculus match found."""
+    async def test_uses_multi_model_when_community_available(self, strategy, sample_market):
+        """Should use multi_model_ensemble when Manifold match found."""
         strategy.forecaster.assess_market = AsyncMock(
             return_value=_make_forecast(0.55)
         )
-        # Mock data enricher with Metaculus
         mock_enricher = MagicMock()
         mock_enricher.get_context = AsyncMock(return_value="news context")
-        mock_enricher.metaculus.get_best_match = AsyncMock(return_value={
+        mock_enricher.manifold.get_best_match = AsyncMock(return_value={
             "community_prediction": 0.60,
             "forecasters_count": 50,
             "title": "Similar question",
             "similarity": 0.5,
         })
+        mock_enricher.metaculus.get_best_match = AsyncMock(return_value=None)
         strategy.data_enricher = mock_enricher
 
         signals = await strategy.scan_for_opportunities([sample_market])
 
         assert len(signals) == 1
-        # Metaculus agrees with Claude (both > market), should still generate signal
         assert signals[0].direction == Direction.BUY_YES
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_single_model_without_metaculus(self, strategy, sample_market):
-        """Should use single-model ensemble when no Metaculus match."""
+    async def test_falls_back_to_single_model_without_community(self, strategy, sample_market):
+        """Should use single-model ensemble when no community match."""
         strategy.forecaster.assess_market = AsyncMock(
             return_value=_make_forecast(0.55)
         )
         mock_enricher = MagicMock()
         mock_enricher.get_context = AsyncMock(return_value="news context")
+        mock_enricher.manifold.get_best_match = AsyncMock(return_value=None)
         mock_enricher.metaculus.get_best_match = AsyncMock(return_value=None)
         strategy.data_enricher = mock_enricher
 
@@ -235,13 +235,16 @@ class TestMetaculusEnsemble:
         assert len(signals) == 1
 
     @pytest.mark.asyncio
-    async def test_metaculus_error_falls_back_gracefully(self, strategy, sample_market):
-        """Metaculus API failure should not prevent signal generation."""
+    async def test_community_error_falls_back_gracefully(self, strategy, sample_market):
+        """Community API failure should not prevent signal generation."""
         strategy.forecaster.assess_market = AsyncMock(
             return_value=_make_forecast(0.55)
         )
         mock_enricher = MagicMock()
         mock_enricher.get_context = AsyncMock(return_value="news context")
+        mock_enricher.manifold.get_best_match = AsyncMock(
+            side_effect=Exception("API timeout")
+        )
         mock_enricher.metaculus.get_best_match = AsyncMock(
             side_effect=Exception("API timeout")
         )
