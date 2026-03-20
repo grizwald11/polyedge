@@ -298,6 +298,7 @@ class Position(BaseModel):
     paper: bool = True
     opened_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    peak_pnl: float = 0.0  # Highest unrealized P&L seen (for trailing stop)
 
     @property
     def market_value(self) -> float:

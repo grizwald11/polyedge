@@ -64,12 +64,15 @@ class ObviousNoStrategy:
         if no_price <= 0 or no_price >= 1.0:
             return None
 
-        # Subtract Kalshi maker fee and estimated slippage from return calculation
-        # Fee formula: 0.0175 * price * (1 - price) per contract
-        fee_per_contract = 0.0175 * no_price * (1.0 - no_price)
-        # Slippage estimate: 1 cent on low-liquidity markets, 0 on deep books
-        slippage = 0.01 if market.liquidity < 10000 else 0.0
-        net_profit = 1.0 - no_price - fee_per_contract - slippage
+        # Event/political markets on Kalshi are fee-free for maker orders.
+        # Only apply fees for fee-enabled categories (crypto, sports).
+        fee_per_contract = 0.0
+        category = getattr(market, "category", None)
+        fee_categories = {"Crypto Prices", "Sports", "NCAAB", "Serie A"}
+        if category and str(category) in fee_categories:
+            fee_per_contract = 0.0175 * no_price * (1.0 - no_price)
+
+        net_profit = 1.0 - no_price - fee_per_contract
         if net_profit <= 0:
             return None
         simple_return = net_profit / no_price
@@ -103,10 +106,10 @@ class ObviousNoStrategy:
             confidence=confidence,
             reasoning=(
                 f"YES at ${yes_price:.2f}, NO at ${no_price:.2f}. "
-                f"Fee: ${fee_per_contract:.4f}/contract. "
                 f"Net return: {simple_return:.1%}, "
                 f"Annualized: {annualized_return:.0%}. "
                 f"Resolves in {days:.0f} days."
+                + (f" Fee: ${fee_per_contract:.4f}/contract." if fee_per_contract > 0 else "")
             ),
         )
 

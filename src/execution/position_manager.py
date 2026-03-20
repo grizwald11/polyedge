@@ -18,6 +18,9 @@ from src.storage.database import Database
 DEFAULT_STOP_LOSS_PCT = 0.50       # Exit if unrealized loss > 50% of cost basis
 DEFAULT_MAX_HOLD_DAYS = 30         # Exit if held > 30 days
 DEFAULT_EDGE_GONE_THRESHOLD = 0.01 # Exit if remaining edge < 1%
+DEFAULT_TRAILING_STOP_ACTIVATE = 0.20  # Activate trailing stop after 20% gain
+DEFAULT_TRAILING_STOP_DISTANCE = 0.50  # Trail 50% of peak gain (e.g., peak +30% → exit at +15%)
+DEFAULT_TAKE_PROFIT_PCT = 0.80     # Take profit at 80% of max theoretical gain
 
 if __name__ != "__main__":
     from typing import TYPE_CHECKING
@@ -136,6 +139,9 @@ class PositionManager:
             position.unrealized_pnl = (position.current_price - position.avg_entry_price) * position.size
         else:
             position.unrealized_pnl = (position.avg_entry_price - position.current_price) * position.size
+        # Track peak P&L for trailing stop
+        if position.unrealized_pnl > position.peak_pnl:
+            position.peak_pnl = position.unrealized_pnl
         position.last_updated = datetime.now(timezone.utc)
 
     def get_position(self, market_id: str) -> Optional[Position]:
@@ -185,10 +191,12 @@ class PositionManager:
     ) -> tuple[bool, str]:
         """Determine if a position should be exited.
 
-        Checks three conditions:
+        Checks five conditions:
         1. Stop-loss: unrealized loss exceeds threshold of cost basis
-        2. Time-based: position held longer than max_hold_days
-        3. Edge-gone: market price moved past our entry (edge evaporated)
+        2. Trailing stop: gain dropped significantly from peak
+        3. Take-profit: captured most of max theoretical gain
+        4. Time-based: position held longer than max_hold_days
+        5. Edge-gone: market price moved past our entry (edge evaporated)
 
         Args:
             position: The position to evaluate
@@ -210,7 +218,28 @@ class PositionManager:
             if loss_pct >= stop_loss_pct:
                 return True, f"stop_loss: {loss_pct:.0%} loss exceeds {stop_loss_pct:.0%} threshold"
 
-        # 2. Time-based exit
+        # 2. Trailing stop: if we've had a significant gain and it's pulling back
+        if position.peak_pnl > 0 and cost_basis > 0:
+            peak_gain_pct = position.peak_pnl / cost_basis
+            if peak_gain_pct >= DEFAULT_TRAILING_STOP_ACTIVATE:
+                # Trail at 50% of peak — e.g., peak +40% → exit if drops below +20%
+                trail_floor = position.peak_pnl * DEFAULT_TRAILING_STOP_DISTANCE
+                if position.unrealized_pnl < trail_floor:
+                    return True, (
+                        f"trailing_stop: current P&L ${position.unrealized_pnl:.2f} "
+                        f"dropped below trail floor ${trail_floor:.2f} "
+                        f"(peak ${position.peak_pnl:.2f})"
+                    )
+
+        # 3. Take-profit: capture gains when near max theoretical payout
+        max_gain = (1.0 - position.avg_entry_price) * position.size  # Max possible gain
+        if max_gain > 0 and position.unrealized_pnl >= max_gain * DEFAULT_TAKE_PROFIT_PCT:
+            return True, (
+                f"take_profit: captured {position.unrealized_pnl / max_gain:.0%} of max gain "
+                f"(${position.unrealized_pnl:.2f} / ${max_gain:.2f})"
+            )
+
+        # 4. Time-based exit
         now = datetime.now(timezone.utc)
         hold_time = now - position.opened_at
         if hold_time.total_seconds() / 86400 > max_hold_days:
@@ -222,7 +251,7 @@ class PositionManager:
             if days_left is not None and days_left < 1 and position.unrealized_pnl < 0:
                 return True, f"expiry_exit: market closes in {days_left:.1f} days, position underwater"
 
-        # 3. Edge-gone check
+        # 5. Edge-gone check
         if market is not None:
             remaining_edge = self._calculate_remaining_edge(position, market)
             if remaining_edge < edge_gone_threshold:

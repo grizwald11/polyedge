@@ -141,12 +141,12 @@ class TestEdgeGone:
     def test_exit_when_edge_evaporated(self, tmp_db):
         pm = PositionManager(tmp_db)
         # Bought YES at 0.34, now price is 0.995 — virtually no upside left
-        # remaining = (1.0 - 0.995) / 0.995 = 0.005 < 1% threshold
+        # Take-profit fires first (99% of max gain captured), edge_gone also applies
         pos = _make_position(entry_price=0.34, current_price=0.995)
         market = _make_market(yes_price=0.995, no_price=0.005)
         should, reason = pm.should_exit(pos, market)
         assert should is True
-        assert "edge_gone" in reason
+        assert "edge_gone" in reason or "take_profit" in reason
 
     def test_no_exit_when_edge_remains(self, tmp_db):
         pm = PositionManager(tmp_db)
@@ -190,4 +190,4 @@ class TestGetExitCandidates:
         }
         candidates = pm.get_exit_candidates(markets)
         assert len(candidates) == 1
-        assert "edge_gone" in candidates[0][1]
+        assert "edge_gone" in candidates[0][1] or "take_profit" in candidates[0][1]

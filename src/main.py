@@ -210,6 +210,8 @@ async def scan_and_trade(
         result = await order_router.route_order(exit_order)
         if result is not None and result.success and result.trade:
             position_manager.update_from_trade(result.trade)
+            # Record cooldown to prevent immediate re-entry
+            risk_engine.record_exit(position.market_id)
             logger.info(f"[EXIT] {position.market_id} — {exit_reason}")
             if settings.alerts.alert_on_trade:
                 try:

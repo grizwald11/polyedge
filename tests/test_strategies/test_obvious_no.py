@@ -138,14 +138,15 @@ class TestObviousNoStrategy:
         signals_thin = strategy.scan_for_opportunities([thin])
 
         if signals_deep and signals_thin:
-            # Thin market should show lower return due to slippage deduction
+            # Event markets are fee-free, so liquidity depth doesn't affect returns
+            # (slippage deduction removed for fee-free markets)
             deep_return = float(
                 signals_deep[0].reasoning.split("Net return: ")[1].split(",")[0].rstrip("%")
             )
             thin_return = float(
                 signals_thin[0].reasoning.split("Net return: ")[1].split(",")[0].rstrip("%")
             )
-            assert thin_return < deep_return
+            assert thin_return == deep_return
 
     def test_confidence_varies_with_yes_price(self, strategy):
         """Regression: confidence should scale with YES price, not be hardcoded 0.95."""

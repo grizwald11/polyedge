@@ -145,21 +145,27 @@ class AIProbabilityStrategy:
         max_assessments = self.settings.claude.max_assessments_per_cycle
         min_edge = self.settings.trading.min_edge_ai
 
-        # Determine which markets get cross-checked (top N by volume)
         cross_check_enabled = self.settings.claude.cross_check_enabled
-        cross_check_top_n = self.settings.claude.cross_check_top_n
-        cross_check_tickers: set[str] = set()
-        if cross_check_enabled:
-            sorted_by_vol = sorted(markets[:max_assessments], key=lambda m: m.volume_24h, reverse=True)
-            cross_check_tickers = {m.ticker for m in sorted_by_vol[:cross_check_top_n]}
 
         for market in markets[:max_assessments]:
             try:
-                use_cross_check = market.ticker in cross_check_tickers
+                # First pass: assess without cross-check to find edge
                 signal = await self._assess_single_market(
-                    market, news_context, min_edge, use_cross_check=use_cross_check
+                    market, news_context, min_edge, use_cross_check=False
                 )
-                if signal:
+                if signal and cross_check_enabled:
+                    # Only cross-check markets where we found actionable edge.
+                    # This cuts Claude API calls ~40-50% vs cross-checking everything.
+                    validated_signal = await self._assess_single_market(
+                        market, news_context, min_edge, use_cross_check=True
+                    )
+                    if validated_signal:
+                        signals.append(validated_signal)
+                    else:
+                        logger.info(
+                            f"Cross-check rejected signal for {market.ticker}"
+                        )
+                elif signal:
                     signals.append(signal)
             except Exception as e:
                 logger.error(f"Failed to assess {market.ticker}: {e}")
@@ -186,7 +192,7 @@ class AIProbabilityStrategy:
                     predicted_at = datetime.fromisoformat(latest["predicted_at"])
                     age = datetime.now(timezone.utc) - predicted_at
                     price_move = abs(market.yes_price - latest["market_price_at_prediction"])
-                    if age < timedelta(days=7) and price_move < 0.10:
+                    if age < timedelta(hours=48) and price_move < 0.10:
                         logger.debug(
                             f"Skipping {market.ticker}: recent prediction "
                             f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f})"

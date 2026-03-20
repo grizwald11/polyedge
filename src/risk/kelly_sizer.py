@@ -27,7 +27,11 @@ class KellySizer:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.fee_rate = 0.0175 if settings.trading.prefer_maker else 0.07
+        # Event/political markets on Kalshi are fee-free. Only apply fees
+        # for fee-enabled categories (crypto, sports). Default to 0 since
+        # our target categories are all fee-free.
+        self.fee_rate = 0.0
+        self._fee_rate_if_enabled = 0.0175 if settings.trading.prefer_maker else 0.07
         self._calibration_multiplier: float = 1.0
 
     def calculate_position_size(

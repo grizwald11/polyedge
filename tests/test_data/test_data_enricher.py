@@ -42,6 +42,7 @@ class TestCategoryRouting:
             patch.object(enricher.cleveland_fed, "get_context", new_callable=AsyncMock, return_value="CLEV") as clev_mock,
             patch.object(enricher.fedwatch, "get_context", new_callable=AsyncMock, return_value="FEDW") as fedw_mock,
             patch.object(enricher.metaculus, "get_context", new_callable=AsyncMock, return_value="META") as meta_mock,
+            patch.object(enricher.manifold, "get_context", new_callable=AsyncMock, return_value="MANI"),
             patch.object(enricher.polymarket, "get_context", new_callable=AsyncMock, return_value="POLY") as poly_mock,
         ):
             context = await enricher.get_context(market)
@@ -69,6 +70,7 @@ class TestCategoryRouting:
             patch.object(enricher.cleveland_fed, "get_context", new_callable=AsyncMock, return_value="CLEV") as clev_mock,
             patch.object(enricher.fedwatch, "get_context", new_callable=AsyncMock, return_value="FEDW") as fedw_mock,
             patch.object(enricher.metaculus, "get_context", new_callable=AsyncMock, return_value="META"),
+            patch.object(enricher.manifold, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.polymarket, "get_context", new_callable=AsyncMock, return_value="POLY"),
         ):
             context = await enricher.get_context(market)
@@ -99,6 +101,7 @@ class TestCategoryRouting:
             patch.object(enricher.cleveland_fed, "get_context", new_callable=AsyncMock, return_value="CLEV") as clev_mock,
             patch.object(enricher.fedwatch, "get_context", new_callable=AsyncMock, return_value="FEDW") as fedw_mock,
             patch.object(enricher.metaculus, "get_context", new_callable=AsyncMock, return_value="META"),
+            patch.object(enricher.manifold, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.polymarket, "get_context", new_callable=AsyncMock, return_value="POLY"),
         ):
             context = await enricher.get_context(market)
@@ -122,6 +125,7 @@ class TestGracefulDegradation:
             patch.object(enricher.cleveland_fed, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.fedwatch, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.metaculus, "get_context", new_callable=AsyncMock, return_value=""),
+            patch.object(enricher.manifold, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.polymarket, "get_context", new_callable=AsyncMock, return_value=""),
         ):
             context = await enricher.get_context(market)
@@ -141,6 +145,7 @@ class TestGracefulDegradation:
             patch.object(enricher.cleveland_fed, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.fedwatch, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.metaculus, "get_context", new_callable=AsyncMock, return_value=""),
+            patch.object(enricher.manifold, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.polymarket, "get_context", new_callable=AsyncMock, return_value=""),
         ):
             context = await enricher.get_context(market)
@@ -166,6 +171,7 @@ class TestTruncation:
             patch.object(enricher.cleveland_fed, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.fedwatch, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.metaculus, "get_context", new_callable=AsyncMock, return_value="META"),
+            patch.object(enricher.manifold, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.polymarket, "get_context", new_callable=AsyncMock, return_value="POLY"),
         ):
             context = await enricher.get_context(market)
@@ -187,6 +193,7 @@ class TestSectionOrdering:
             patch.object(enricher.cleveland_fed, "get_context", new_callable=AsyncMock, return_value="CLEV_BLOCK"),
             patch.object(enricher.fedwatch, "get_context", new_callable=AsyncMock, return_value="FEDW_BLOCK"),
             patch.object(enricher.metaculus, "get_context", new_callable=AsyncMock, return_value="META_BLOCK"),
+            patch.object(enricher.manifold, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.polymarket, "get_context", new_callable=AsyncMock, return_value="POLY_BLOCK"),
         ):
             context = await enricher.get_context(market)
