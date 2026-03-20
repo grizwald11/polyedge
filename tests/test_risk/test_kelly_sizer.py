@@ -285,3 +285,46 @@ class TestFeeUnit:
             cost = contracts * 0.50
             # Fee in dollars should be tiny relative to cost
             assert fee_dollars < 0.10, f"Fee ${fee_dollars:.2f} is too high (should be ~cents)"
+
+
+class TestKellyBankrollBoundaries:
+    """Edge cases for bankroll extremes."""
+
+    def test_tiny_bankroll(self, sizer):
+        """Very small bankroll ($1) — should still produce valid sizing."""
+        contracts = sizer.calculate_position_size(
+            edge=0.10, probability=0.60, bankroll=1.0,
+            order_price=0.10,
+        )
+        assert contracts >= 0
+        # Cost should never exceed bankroll
+        assert contracts * 0.10 <= 1.0
+
+    def test_large_bankroll(self, sizer):
+        """Large bankroll ($100K) — position cap should still apply."""
+        contracts = sizer.calculate_position_size(
+            edge=0.10, probability=0.60, bankroll=100000.0,
+            order_price=0.50,
+        )
+        assert contracts > 0
+        # Max position = 5% of $100K = $5000, at $0.50/contract = 10000 max
+        assert contracts * 0.50 <= 5000.0
+
+    def test_probability_near_zero_with_edge(self, sizer):
+        """Probability near 0 but positive edge — very small or 0 position."""
+        contracts = sizer.calculate_position_size(
+            edge=0.02, probability=0.03, bankroll=500.0,
+            order_price=0.01,
+        )
+        assert contracts >= 0
+
+    def test_probability_near_one_with_edge(self, sizer):
+        """Probability near 1.0 with tiny edge."""
+        contracts = sizer.calculate_position_size(
+            edge=0.01, probability=0.99, bankroll=500.0,
+            order_price=0.98,
+        )
+        assert contracts >= 0
+        # At $0.98/contract, very few should be bought
+        if contracts > 0:
+            assert contracts * 0.98 <= 25.0  # 5% of 500

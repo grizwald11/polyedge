@@ -330,3 +330,65 @@ class TestTypeBSubset:
 
         # Should call Claude for validation
         mock_forecaster.assess_market_with_prompt.assert_called()
+
+
+class TestTypeCAdditionalEdgeCases:
+    """Additional Type C edge cases beyond the basic suite."""
+
+    def _make_strategy(self, mock_graph, mock_forecaster, tmp_db):
+        return CrossArbStrategy(mock_graph, mock_forecaster, Settings(), tmp_db)
+
+    def test_all_prices_zero(self, mock_graph, mock_forecaster, tmp_db):
+        """All markets in event have 0 YES price — no crash."""
+        strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
+        markets = [
+            _make_market("Z1", yes_price=0.00),
+            _make_market("Z2", yes_price=0.00),
+            _make_market("Z3", yes_price=0.00),
+        ]
+        for m in markets:
+            m.event_ticker = "ZERO-EVENT"
+        signals = strategy._check_mutual_exclusivity(markets, "ZERO-EVENT")
+        # Sum = 0 < 1 − min_edge → underpriced, edge calc shouldn't crash
+        for s in signals:
+            assert s.edge >= 0
+
+    def test_large_event_basket(self, mock_graph, mock_forecaster, tmp_db):
+        """Event with many outcomes (10+) — should still work correctly."""
+        strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
+        markets = []
+        for i in range(10):
+            m = _make_market(f"BIG-{i}", yes_price=0.08)
+            m.event_ticker = "BIG-EVENT"
+            markets.append(m)
+        # Sum = 10 * 0.08 = 0.80 < 1.0 − 0.02 = 0.98 → underpriced
+        signals = strategy._check_mutual_exclusivity(markets, "BIG-EVENT")
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.BUY_YES
+        # Edge should be scaled down for single outcome
+        assert signals[0].edge < 0.20  # Not full basket edge of 0.20
+
+    def test_duplicate_markets_no_double_count(self, mock_graph, mock_forecaster, tmp_db):
+        """Duplicate tickers shouldn't cause issues."""
+        strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
+        m1 = _make_market("DUP-A", yes_price=0.40)
+        m2 = _make_market("DUP-B", yes_price=0.40)
+        m1.event_ticker = "DUP-EVENT"
+        m2.event_ticker = "DUP-EVENT"
+        signals = strategy._check_mutual_exclusivity([m1, m2], "DUP-EVENT")
+        # Sum = 0.80 < 0.98 → underpriced
+        assert len(signals) == 1
+
+    def test_overpriced_event_selects_most_expensive(self, mock_graph, mock_forecaster, tmp_db):
+        """Overpriced event should sell the most expensive outcome."""
+        strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
+        markets = [
+            _make_market("OVER-A", yes_price=0.60),
+            _make_market("OVER-B", yes_price=0.30),
+            _make_market("OVER-C", yes_price=0.15),
+        ]
+        # Sum = 1.05 > 1.02
+        signals = strategy._check_mutual_exclusivity(markets, "OVER-EVENT")
+        assert len(signals) == 1
+        assert signals[0].market_id == "OVER-A"
+        assert signals[0].direction == Direction.BUY_NO

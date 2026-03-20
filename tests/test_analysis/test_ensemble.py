@@ -302,3 +302,66 @@ class TestEnsembleExtremeMarketPrices:
             f = _make_forecast(prob)
             result = ensemble_forecast(f, market_price=0.50)
             assert 0.01 <= result.final_probability <= 0.99
+
+
+class TestEnsembleExtremeCombinations:
+    """Edge cases with extreme Claude + market price combinations."""
+
+    def test_max_disagreement_claude_high_market_low(self):
+        """Claude says 0.99, market says 0.01 — extreme divergence."""
+        f = _make_forecast(0.99)
+        result = ensemble_forecast(f, market_price=0.01)
+        assert 0.01 <= result.final_probability <= 0.99
+        # Should be pulled toward market but still bullish
+        assert result.final_probability > 0.40
+
+    def test_max_disagreement_claude_low_market_high(self):
+        """Claude says 0.01, market says 0.99 — extreme inverse."""
+        f = _make_forecast(0.01)
+        result = ensemble_forecast(f, market_price=0.99)
+        assert 0.01 <= result.final_probability <= 0.99
+        assert result.final_probability < 0.60
+
+    def test_both_extreme_high(self):
+        """Both Claude and market at 0.99."""
+        f = _make_forecast(0.99)
+        result = ensemble_forecast(f, market_price=0.99)
+        assert result.final_probability == pytest.approx(0.99, abs=0.01)
+        assert abs(result.edge) < 0.02
+
+    def test_both_extreme_low(self):
+        """Both Claude and market at 0.01."""
+        f = _make_forecast(0.01)
+        result = ensemble_forecast(f, market_price=0.01)
+        assert result.final_probability == pytest.approx(0.01, abs=0.01)
+
+    def test_wide_ci_reduces_claude_weight(self):
+        """Very wide CI (0.0–1.0) should reduce Claude's influence."""
+        f_narrow = ForecastResult(
+            probability=0.80, confidence_low=0.75, confidence_high=0.85,
+            reasoning="narrow", model_used="claude",
+        )
+        f_wide = ForecastResult(
+            probability=0.80, confidence_low=0.0, confidence_high=1.0,
+            reasoning="wide", model_used="claude",
+        )
+        r_narrow = ensemble_forecast(f_narrow, market_price=0.50)
+        r_wide = ensemble_forecast(f_wide, market_price=0.50)
+        # Wide CI → more market influence → closer to 0.50
+        assert abs(r_wide.final_probability - 0.50) < abs(r_narrow.final_probability - 0.50)
+
+    def test_multi_model_all_agree(self):
+        """Multiple models + market all agree → high confidence, no edge."""
+        f1 = _make_forecast(0.60, model="claude")
+        f2 = _make_forecast(0.60, model="manifold")
+        result = multi_model_ensemble(forecasts=[f1, f2], market_price=0.60)
+        assert abs(result.edge) < 0.02
+        assert result.confidence > 0.5
+
+    def test_multi_model_all_disagree(self):
+        """Models wildly disagree → low confidence."""
+        f1 = _make_forecast(0.10, model="claude")
+        f2 = _make_forecast(0.90, model="manifold")
+        result = multi_model_ensemble(forecasts=[f1, f2], market_price=0.50)
+        # Disagreement should tank confidence
+        assert result.confidence < 0.5

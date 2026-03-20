@@ -381,3 +381,92 @@ class TestPositionSync:
         assert mismatches == 1
         # Position should NOT have been added
         assert not pm.has_position("FED-RATE-CUT")
+
+
+class TestPositionReopening:
+    """Test buying → selling → buying again in the same market."""
+
+    def test_reopen_after_close(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        # Open
+        t1 = _make_trade(side=Side.BUY, price=0.30, size=10)
+        pm.update_from_trade(t1)
+        assert pm.has_position("FED-RATE-CUT-MAY26")
+
+        # Close
+        t2 = _make_trade(side=Side.SELL, price=0.40, size=10)
+        pm.update_from_trade(t2)
+        assert not pm.has_position("FED-RATE-CUT-MAY26")
+
+        # Reopen
+        t3 = _make_trade(side=Side.BUY, price=0.50, size=5)
+        pm.update_from_trade(t3)
+        assert pm.has_position("FED-RATE-CUT-MAY26")
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        assert pos.size == 5
+        assert pos.avg_entry_price == 0.50
+
+
+class TestAsymmetricPriceUpdates:
+    """Test price updates where one side is missing or zero."""
+
+    def test_only_yes_price_for_yes_position(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        t = _make_trade(side=Side.BUY, price=0.30, size=10)
+        pm.update_from_trade(t)
+        # Update with YES price only, NO = 0
+        pm.update_price("FED-RATE-CUT-MAY26", yes_price=0.40, no_price=0.0)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        # BUY_YES uses yes_price
+        assert pos.current_price == 0.40
+        assert pos.unrealized_pnl == pytest.approx(1.0, abs=0.01)
+
+    def test_only_no_price_for_no_position(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        t = _make_trade(
+            token_id="FED-RATE-CUT-MAY26_no",
+            side=Side.BUY, price=0.70, size=10,
+        )
+        pm.update_from_trade(t)
+        # Update with NO price only, YES = 0
+        pm.update_price("FED-RATE-CUT-MAY26", yes_price=0.0, no_price=0.80)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        assert pos.current_price == 0.80
+        assert pos.unrealized_pnl == pytest.approx(1.0, abs=0.01)
+
+    def test_both_zero_prices_ignored(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        t = _make_trade(side=Side.BUY, price=0.30, size=10)
+        pm.update_from_trade(t)
+        original_price = pm.get_position("FED-RATE-CUT-MAY26").current_price
+        # Both prices zero — should be ignored
+        pm.update_price("FED-RATE-CUT-MAY26", yes_price=0.0, no_price=0.0)
+        assert pm.get_position("FED-RATE-CUT-MAY26").current_price == original_price
+
+
+class TestPeakPnlTracking:
+    """Verify peak P&L updates correctly for trailing stop."""
+
+    def test_peak_tracks_highest_pnl(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        t = _make_trade(side=Side.BUY, price=0.30, size=10)
+        pm.update_from_trade(t)
+
+        pm.update_price("FED-RATE-CUT-MAY26", yes_price=0.50)
+        assert pm.get_position("FED-RATE-CUT-MAY26").peak_pnl == pytest.approx(2.0, abs=0.01)
+
+        # Price goes higher
+        pm.update_price("FED-RATE-CUT-MAY26", yes_price=0.60)
+        assert pm.get_position("FED-RATE-CUT-MAY26").peak_pnl == pytest.approx(3.0, abs=0.01)
+
+        # Price drops — peak should NOT decrease
+        pm.update_price("FED-RATE-CUT-MAY26", yes_price=0.40)
+        assert pm.get_position("FED-RATE-CUT-MAY26").peak_pnl == pytest.approx(3.0, abs=0.01)
+
+    def test_peak_stays_zero_when_underwater(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        t = _make_trade(side=Side.BUY, price=0.50, size=10)
+        pm.update_from_trade(t)
+
+        pm.update_price("FED-RATE-CUT-MAY26", yes_price=0.40)
+        assert pm.get_position("FED-RATE-CUT-MAY26").peak_pnl == 0.0
