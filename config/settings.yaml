@@ -3,6 +3,14 @@ kalshi:
   demo_host: "https://demo-api.kalshi.co/trade-api/v2"
   use_demo: false
 
+polymarket:
+  clob_host: "https://clob.polymarket.com"
+  gamma_host: "https://gamma-api.polymarket.com"
+  data_host: "https://data-api.polymarket.com"
+  chain_id: 137
+  signature_type: 1  # 0=EOA, 1=proxy/email wallet
+  enabled: false     # Set to true when Polymarket wallet is funded
+
 scanning:
   interval_seconds: 300  # 5 minutes
   min_volume_24h: 100    # 100 contracts (Kalshi volumes are in contracts, not dollars)

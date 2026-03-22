@@ -17,12 +17,13 @@ from src.core.models import Market, MarketSnapshot, Signal, Order, Trade, Calibr
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
--- Markets (Kalshi uses ticker as primary key)
+-- Markets (ticker + platform composite key for multi-platform support)
 CREATE TABLE IF NOT EXISTS markets (
-    ticker TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    platform TEXT DEFAULT 'kalshi',
     question TEXT NOT NULL,
     description TEXT DEFAULT '',
     category TEXT DEFAULT 'Other',
@@ -41,7 +42,8 @@ CREATE TABLE IF NOT EXISTS markets (
     event_ticker TEXT DEFAULT '',
     result TEXT DEFAULT '',
     first_seen TEXT NOT NULL,
-    last_updated TEXT NOT NULL
+    last_updated TEXT NOT NULL,
+    PRIMARY KEY (ticker, platform)
 );
 
 -- Market price snapshots
@@ -63,6 +65,7 @@ CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy TEXT NOT NULL,
     market_id TEXT NOT NULL,
+    platform TEXT DEFAULT 'kalshi',
     market_question TEXT DEFAULT '',
     direction TEXT NOT NULL,
     edge REAL NOT NULL,
@@ -82,6 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_signals_strategy ON signals(strategy);
 CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY,
     market_id TEXT NOT NULL,
+    platform TEXT DEFAULT 'kalshi',
     token_id TEXT NOT NULL,
     side TEXT NOT NULL,
     price REAL NOT NULL,
@@ -108,6 +112,7 @@ CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT NOT NULL,
     market_id TEXT NOT NULL,
+    platform TEXT DEFAULT 'kalshi',
     token_id TEXT NOT NULL,
     side TEXT NOT NULL,
     price REAL NOT NULL,
@@ -127,6 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
 CREATE TABLE IF NOT EXISTS calibration_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id TEXT NOT NULL,
+    platform TEXT DEFAULT 'kalshi',
     market_question TEXT DEFAULT '',
     strategy TEXT DEFAULT 'ai_probability',
     predicted_probability REAL NOT NULL,
@@ -193,6 +199,18 @@ CREATE TABLE IF NOT EXISTS whale_trades (
     FOREIGN KEY (wallet_address) REFERENCES whale_wallets(address)
 );
 CREATE INDEX IF NOT EXISTS idx_whale_trades_market ON whale_trades(market_id);
+
+-- Cross-platform market pairs (Kalshi ↔ Polymarket)
+CREATE TABLE IF NOT EXISTS cross_platform_pairs (
+    kalshi_ticker TEXT NOT NULL,
+    poly_condition_id TEXT NOT NULL,
+    kalshi_question TEXT DEFAULT '',
+    poly_question TEXT DEFAULT '',
+    similarity REAL DEFAULT 0,
+    validated INTEGER DEFAULT 0,
+    validated_at TEXT,
+    PRIMARY KEY (kalshi_ticker, poly_condition_id)
+);
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -349,6 +367,70 @@ class Database:
         # Migration v5 -> v6: add missing performance indices
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calibration_resolved_at ON calibration_records(resolved_at)")
+
+        # Migration v6: add platform columns for multi-platform support
+        # Add platform column to tables that don't have it yet
+        for table_name in ("signals", "orders", "trades", "calibration_records"):
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+            if "platform" not in cols:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN platform TEXT DEFAULT 'kalshi'")
+                logger.info(f"Migration v6: added platform column to {table_name}")
+
+        # Migrate markets table to composite PK (ticker, platform)
+        market_cols = {row[1] for row in conn.execute("PRAGMA table_info(markets)").fetchall()}
+        if "platform" not in market_cols:
+            conn.executescript("""
+                CREATE TABLE markets_new (
+                    ticker TEXT NOT NULL,
+                    platform TEXT DEFAULT 'kalshi',
+                    question TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    category TEXT DEFAULT 'Other',
+                    tags TEXT DEFAULT '[]',
+                    tokens TEXT DEFAULT '[]',
+                    end_date TEXT,
+                    volume_24h REAL DEFAULT 0,
+                    volume_total REAL DEFAULT 0,
+                    liquidity REAL DEFAULT 0,
+                    spread REAL DEFAULT 0,
+                    active INTEGER DEFAULT 1,
+                    closed INTEGER DEFAULT 0,
+                    resolution_source TEXT DEFAULT '',
+                    slug TEXT DEFAULT '',
+                    subtitle TEXT DEFAULT '',
+                    event_ticker TEXT DEFAULT '',
+                    result TEXT DEFAULT '',
+                    first_seen TEXT NOT NULL,
+                    last_updated TEXT NOT NULL,
+                    PRIMARY KEY (ticker, platform)
+                );
+                INSERT INTO markets_new SELECT
+                    ticker, 'kalshi', question, description, category, tags, tokens,
+                    end_date, volume_24h, volume_total, liquidity, spread,
+                    active, closed, resolution_source, slug, subtitle, event_ticker,
+                    result, first_seen, last_updated
+                FROM markets;
+                DROP TABLE markets;
+                ALTER TABLE markets_new RENAME TO markets;
+            """)
+            logger.info("Migration v6: migrated markets to composite PK (ticker, platform)")
+
+        # Create cross_platform_pairs table if missing
+        if "cross_platform_pairs" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cross_platform_pairs (
+                    kalshi_ticker TEXT NOT NULL,
+                    poly_condition_id TEXT NOT NULL,
+                    kalshi_question TEXT DEFAULT '',
+                    poly_question TEXT DEFAULT '',
+                    similarity REAL DEFAULT 0,
+                    validated INTEGER DEFAULT 0,
+                    validated_at TEXT,
+                    PRIMARY KEY (kalshi_ticker, poly_condition_id)
+                )
+            """)
+            logger.info("Migration v6: created cross_platform_pairs table")
+
         conn.commit()
 
     # ──────────────────────────────────────
@@ -358,15 +440,16 @@ class Database:
     def upsert_market(self, market: Market):
         """Insert or update a market."""
         now = datetime.now(timezone.utc).isoformat()
+        platform = market.platform.value if hasattr(market.platform, 'value') else str(market.platform)
         conn = self._get_conn()
         conn.execute("""
             INSERT INTO markets (
-                ticker, question, description, category, tags, tokens,
+                ticker, platform, question, description, category, tags, tokens,
                 end_date, volume_24h, volume_total, liquidity, spread,
                 active, closed, resolution_source, slug, subtitle, event_ticker,
                 result, first_seen, last_updated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(ticker) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, platform) DO UPDATE SET
                 question=excluded.question,
                 description=excluded.description,
                 category=excluded.category,
@@ -384,6 +467,7 @@ class Database:
                 last_updated=excluded.last_updated
         """, (
             market.ticker,
+            platform,
             market.question,
             market.description,
             market.category.value,
@@ -413,14 +497,15 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         conn = self._get_conn()
         for market in markets:
+            platform = market.platform.value if hasattr(market.platform, 'value') else str(market.platform)
             conn.execute("""
                 INSERT INTO markets (
-                    ticker, question, description, category, tags, tokens,
+                    ticker, platform, question, description, category, tags, tokens,
                     end_date, volume_24h, volume_total, liquidity, spread,
                     active, closed, resolution_source, slug, subtitle, event_ticker,
                     result, first_seen, last_updated
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(ticker) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ticker, platform) DO UPDATE SET
                     question=excluded.question,
                     description=excluded.description,
                     category=excluded.category,
@@ -438,6 +523,7 @@ class Database:
                     last_updated=excluded.last_updated
             """, (
                 market.ticker,
+                platform,
                 market.question,
                 market.description,
                 market.category.value,
@@ -510,15 +596,17 @@ class Database:
     def log_signal(self, signal: Signal) -> int:
         """Log a trading signal, return the row ID."""
         conn = self._get_conn()
+        platform = signal.platform.value if hasattr(signal.platform, 'value') else str(signal.platform)
         cursor = conn.execute("""
             INSERT INTO signals (
-                strategy, market_id, market_question, direction,
+                strategy, market_id, platform, market_question, direction,
                 edge, probability_estimate, market_price, confidence,
                 reasoning, timestamp, acted_on, order_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             signal.strategy.value,
             signal.market_id,
+            platform,
             signal.market_question,
             signal.direction.value,
             signal.edge,
@@ -557,12 +645,14 @@ class Database:
     def log_trade(self, trade: Trade) -> int:
         """Log a completed trade."""
         conn = self._get_conn()
+        platform = trade.platform.value if hasattr(trade.platform, 'value') else str(trade.platform)
         cursor = conn.execute("""
-            INSERT INTO trades (order_id, market_id, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trades (order_id, market_id, platform, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade.order_id,
             trade.market_id,
+            platform,
             trade.token_id,
             trade.side.value,
             trade.price,
@@ -1176,3 +1266,48 @@ class Database:
         if deleted > 0:
             logger.info(f"Cleaned up {deleted} snapshots older than {max_age_days} days")
         return deleted
+
+    # ──────────────────────────────────────
+    # Cross-Platform Pairs
+    # ──────────────────────────────────────
+
+    def upsert_cross_platform_pair(
+        self,
+        kalshi_ticker: str,
+        poly_condition_id: str,
+        kalshi_question: str = "",
+        poly_question: str = "",
+        similarity: float = 0.0,
+        validated: bool = False,
+    ):
+        """Insert or update a cross-platform market pair."""
+        conn = self._get_conn()
+        conn.execute("""
+            INSERT INTO cross_platform_pairs
+                (kalshi_ticker, poly_condition_id, kalshi_question, poly_question,
+                 similarity, validated, validated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(kalshi_ticker, poly_condition_id) DO UPDATE SET
+                similarity=excluded.similarity,
+                validated=excluded.validated,
+                validated_at=excluded.validated_at
+        """, (
+            kalshi_ticker,
+            poly_condition_id,
+            kalshi_question,
+            poly_question,
+            similarity,
+            int(validated),
+            datetime.now(timezone.utc).isoformat() if validated else None,
+        ))
+        conn.commit()
+
+    def get_cross_platform_pairs(self, validated_only: bool = False) -> list[dict]:
+        """Get all cross-platform market pairs."""
+        conn = self._get_conn()
+        query = "SELECT * FROM cross_platform_pairs"
+        if validated_only:
+            query += " WHERE validated = 1"
+        query += " ORDER BY similarity DESC"
+        rows = conn.execute(query).fetchall()
+        return [dict(r) for r in rows]

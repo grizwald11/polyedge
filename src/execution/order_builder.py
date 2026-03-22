@@ -1,7 +1,9 @@
-"""Order builder — constructs limit and market orders for Kalshi.
+"""Order builder — constructs limit and market orders for Kalshi and Polymarket.
 
 Validates inputs, calculates costs and fees, and produces Order objects
-ready for routing through paper or live execution.
+ready for routing through paper or live execution. Fee calculation is
+platform-aware: Kalshi charges maker/taker fees, Polymarket event markets
+are fee-free.
 """
 
 from __future__ import annotations
@@ -12,18 +14,28 @@ from datetime import datetime, timezone
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, Order, OrderType, OrderStatus, Side, Signal,
+    Direction, Market, Order, OrderType, OrderStatus, Platform, Side, Signal,
     StrategyName, dollars_to_cents, kalshi_maker_fee, kalshi_taker_fee,
+    polymarket_fee,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class OrderBuilder:
-    """Builds signed orders for Kalshi execution."""
+    """Builds orders for Kalshi and Polymarket execution."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
+
+    def _calculate_fee(self, platform: Platform, size: int, price: float, maker: bool) -> float:
+        """Calculate fee in dollars based on platform and order type."""
+        if platform == Platform.POLYMARKET:
+            return 0.0  # Event markets are fee-free
+        price_cents = dollars_to_cents(price)
+        if maker:
+            return kalshi_maker_fee(size, price_cents) / 100.0
+        return kalshi_taker_fee(size, price_cents) / 100.0
 
     def build_limit_order(
         self,
@@ -45,20 +57,21 @@ class OrderBuilder:
         """
         side, token_id = self._resolve_side_and_token(market, signal.direction)
         price = self._clamp_price(price)
-        fee_cents = kalshi_maker_fee(size, dollars_to_cents(price))
-        fee_dollars = fee_cents / 100.0
+        fee_dollars = self._calculate_fee(market.platform, size, price, maker=True)
         cost = price * size + fee_dollars
+        fee_bps = 0 if market.platform == Platform.POLYMARKET else 175
 
         order = Order(
             id=self._generate_order_id(),
             market_id=market.ticker,
+            platform=market.platform,
             token_id=token_id,
             side=side,
             price=price,
             size=size,
             cost=cost,
             order_type=OrderType.GTC,
-            fee_rate_bps=175,  # Kalshi maker fee basis points
+            fee_rate_bps=fee_bps,
             status=OrderStatus.PENDING,
             strategy=signal.strategy,
             signal_id=signal.id,
@@ -67,7 +80,7 @@ class OrderBuilder:
         )
 
         logger.debug(
-            f"Built limit order: {side.value} {size}x {token_id} "
+            f"Built limit order [{market.platform.value}]: {side.value} {size}x {token_id} "
             f"@ ${price:.2f} (cost=${cost:.2f}, fee=${fee_dollars:.2f})"
         )
         return order
@@ -99,20 +112,21 @@ class OrderBuilder:
             price = market.no_price
 
         price = self._clamp_price(price)
-        fee_cents = kalshi_taker_fee(size, dollars_to_cents(price))
-        fee_dollars = fee_cents / 100.0
+        fee_dollars = self._calculate_fee(market.platform, size, price, maker=False)
         cost = price * size + fee_dollars
+        fee_bps = 0 if market.platform == Platform.POLYMARKET else 700
 
         order = Order(
             id=self._generate_order_id(),
             market_id=market.ticker,
+            platform=market.platform,
             token_id=token_id,
             side=side,
             price=price,
             size=size,
             cost=cost,
             order_type=OrderType.FOK,
-            fee_rate_bps=700,  # Kalshi taker fee basis points
+            fee_rate_bps=fee_bps,
             status=OrderStatus.PENDING,
             strategy=signal.strategy,
             signal_id=signal.id,

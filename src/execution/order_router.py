@@ -1,7 +1,7 @@
 """Order router — routes orders through paper or live execution.
 
 Paper mode simulates fills at the order price.
-Live mode submits to Kalshi API via KalshiClient.
+Live mode submits to Kalshi or Polymarket API based on order platform.
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from typing import Optional
 from src.config import Settings
 from src.core.kalshi_client import KalshiClient
 from src.core.models import (
-    Order, OrderStatus, Side, Trade, dollars_to_cents,
-    kalshi_maker_fee, kalshi_taker_fee, OrderType,
+    Order, OrderStatus, Platform, Side, Trade, dollars_to_cents,
+    kalshi_maker_fee, kalshi_taker_fee, polymarket_fee, OrderType,
 )
 from src.storage.database import Database
 
@@ -41,9 +41,10 @@ class OrderResult:
 class OrderRouter:
     """Routes orders to paper or live execution."""
 
-    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager=None):
+    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager=None, polymarket=None):
         self.settings = settings
         self.kalshi = kalshi
+        self.polymarket = polymarket  # Optional PolymarketClient
         self.db = db
         self.position_manager = position_manager
         self._session_confirmed = False  # Gate 3: first-trade confirmation
@@ -90,6 +91,8 @@ class OrderRouter:
 
         if order.paper or self.settings.trading.mode == "paper":
             return await self._paper_fill(order)
+        elif order.platform == Platform.POLYMARKET:
+            return await self._poly_live_fill(order)
         else:
             return await self._live_fill(order)
 
@@ -102,18 +105,22 @@ class OrderRouter:
         order.filled_at = now
         order.fill_price = order.price
 
-        # Calculate fee
-        price_cents = dollars_to_cents(order.price)
-        if order.order_type == OrderType.GTC:
-            fee_cents = kalshi_maker_fee(int(order.size), price_cents)
+        # Calculate fee (platform-aware)
+        if order.platform == Platform.POLYMARKET:
+            fee_dollars = 0.0  # Event markets are fee-free
         else:
-            fee_cents = kalshi_taker_fee(int(order.size), price_cents)
-        fee_dollars = fee_cents / 100.0
+            price_cents = dollars_to_cents(order.price)
+            if order.order_type == OrderType.GTC:
+                fee_cents = kalshi_maker_fee(int(order.size), price_cents)
+            else:
+                fee_cents = kalshi_taker_fee(int(order.size), price_cents)
+            fee_dollars = fee_cents / 100.0
 
         # Create trade record
         trade = Trade(
             order_id=order.id,
             market_id=order.market_id,
+            platform=order.platform,
             token_id=order.token_id,
             side=order.side,
             price=order.price,
@@ -233,6 +240,7 @@ class OrderRouter:
             trade = Trade(
                 order_id=order.id,
                 market_id=order.market_id,
+                platform=order.platform,
                 token_id=order.token_id,
                 side=order.side,
                 price=fill_price,
@@ -259,6 +267,102 @@ class OrderRouter:
             order.rejection_reason = str(e)
             self._log_order(order)
             logger.error(f"Live order failed: {e}")
+            return OrderResult(success=False, order=order, error=str(e))
+
+    async def _poly_live_fill(self, order: Order) -> OrderResult:
+        """Submit order to Polymarket CLOB API for live execution."""
+        if self.polymarket is None:
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = "Polymarket client not configured"
+            self._log_order(order)
+            return OrderResult(success=False, order=order, error="Polymarket client not configured")
+
+        # Three-gate safety check (same gates for both platforms)
+        if not self._live_gates_passed():
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = "Live trading gates not passed"
+            self._log_order(order)
+            return OrderResult(success=False, order=order, error="Live trading gates not passed")
+
+        if not self._session_confirmed:
+            confirmed = await self._request_confirmation(order)
+            if not confirmed:
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = "User declined live trade confirmation"
+                self._log_order(order)
+                return OrderResult(success=False, order=order, error="User declined")
+            self._session_confirmed = True
+
+        try:
+            poly_side = order.side.value  # "BUY" or "SELL"
+            poly_order_type = "GTC" if order.order_type == OrderType.GTC else "FOK"
+
+            result = await self.polymarket.create_and_post_order(
+                token_id=order.token_id,
+                side=poly_side,
+                price=order.price,
+                size=order.size,
+                order_type=poly_order_type,
+            )
+
+            now = datetime.now(timezone.utc)
+
+            if result is None:
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = "Polymarket API returned None"
+                self._log_order(order)
+                return OrderResult(success=False, order=order, error="Polymarket API returned None")
+
+            # Check fill status
+            status = result.get("status", "").lower()
+            if status in ("matched", "filled"):
+                order.status = OrderStatus.FILLED
+                order.filled_at = now
+                order.fill_price = order.price
+            elif status in ("live", "resting"):
+                order.status = OrderStatus.OPEN
+                self._log_order(order)
+                logger.info(
+                    f"[POLY LIVE] Order resting: {order.side.value} {int(order.size)}x "
+                    f"{order.token_id[:16]}... @ ${order.price:.2f}"
+                )
+                return OrderResult(success=True, order=order, trade=None)
+            else:
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = f"Unexpected status: {status}"
+                self._log_order(order)
+                return OrderResult(success=False, order=order, error=f"Unexpected status: {status}")
+
+            trade = Trade(
+                order_id=order.id,
+                market_id=order.market_id,
+                platform=Platform.POLYMARKET,
+                token_id=order.token_id,
+                side=order.side,
+                price=order.price,
+                size=order.size,
+                fee=0.0,  # Event markets are fee-free
+                realized_pnl=0.0,
+                strategy=order.strategy,
+                paper=False,
+                timestamp=now,
+            )
+
+            self._log_order(order)
+            self.db.log_trade(trade)
+
+            logger.info(
+                f"[POLY LIVE] Filled: {order.side.value} {int(order.size)}x "
+                f"{order.token_id[:16]}... @ ${order.price:.2f}"
+            )
+
+            return OrderResult(success=True, order=order, trade=trade)
+
+        except Exception as e:
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = str(e)
+            self._log_order(order)
+            logger.error(f"Polymarket live order failed: {e}")
             return OrderResult(success=False, order=order, error=str(e))
 
     async def _poll_order_status(
@@ -424,16 +528,18 @@ class OrderRouter:
 
     def _log_order(self, order: Order):
         """Persist order to database."""
+        platform = order.platform.value if hasattr(order.platform, 'value') else str(order.platform)
         conn = self.db._get_conn()
         conn.execute("""
             INSERT OR REPLACE INTO orders (
-                id, market_id, token_id, side, price, size, cost,
+                id, market_id, platform, token_id, side, price, size, cost,
                 order_type, fee_rate_bps, status, strategy, signal_id,
                 paper, created_at, filled_at, fill_price, cancelled_at, rejection_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             order.id,
             order.market_id,
+            platform,
             order.token_id,
             order.side.value,
             order.price,

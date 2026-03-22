@@ -1,7 +1,7 @@
-"""Resolution tracker — checks Kalshi for settled markets and updates calibration records.
+"""Resolution tracker — checks Kalshi and Polymarket for settled markets and updates calibration records.
 
-Queries the Kalshi API for markets we have predictions on that have settled,
-then updates the calibration records with actual outcomes and Brier scores.
+Queries the Kalshi API and Polymarket Gamma API for markets we have predictions on
+that have settled, then updates the calibration records with actual outcomes and Brier scores.
 """
 
 from __future__ import annotations
@@ -11,17 +11,19 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.core.kalshi_client import KalshiClient
+from src.core.models import Platform
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
 
 class ResolutionTracker:
-    """Checks Kalshi API for settled markets and resolves calibration predictions."""
+    """Checks Kalshi and Polymarket APIs for settled markets and resolves calibration predictions."""
 
-    def __init__(self, kalshi: KalshiClient, db: Database):
+    def __init__(self, kalshi: KalshiClient, db: Database, polymarket_discovery=None):
         self.kalshi = kalshi
         self.db = db
+        self.polymarket_discovery = polymarket_discovery  # Optional PolymarketDiscovery
 
     async def check_resolutions(self) -> int:
         """Check all unresolved predictions against the Kalshi API.
@@ -38,13 +40,23 @@ class ResolutionTracker:
             return 0
 
         # Deduplicate market tickers (multiple predictions per market possible)
-        tickers = list({r["market_id"] for r in unresolved})
-        logger.debug(f"Checking {len(tickers)} markets for resolution")
+        # Group by platform for routing
+        market_platforms: dict[str, str] = {}
+        for r in unresolved:
+            mid = r["market_id"]
+            if mid not in market_platforms:
+                market_platforms[mid] = r.get("platform", "kalshi")
+
+        logger.debug(f"Checking {len(market_platforms)} markets for resolution")
 
         resolved_count = 0
-        for ticker in tickers:
+        for ticker, platform_str in market_platforms.items():
             try:
-                result = await self._check_single_market(ticker)
+                platform = Platform(platform_str) if platform_str else Platform.KALSHI
+                if platform == Platform.POLYMARKET:
+                    result = await self._check_polymarket_market(ticker)
+                else:
+                    result = await self._check_single_market(ticker)
                 if result is not None:
                     count = self._resolve_predictions(ticker, result)
                     if count > 0:
@@ -84,6 +96,46 @@ class ResolutionTracker:
             return False
         else:
             logger.warning(f"Unknown result value for {ticker}: {result}")
+            return None
+
+    async def _check_polymarket_market(self, condition_id: str) -> Optional[bool]:
+        """Check if a Polymarket market has resolved via Gamma API.
+
+        Returns:
+            True if YES, False if NO, None if not yet settled.
+        """
+        if self.polymarket_discovery is None:
+            return None
+
+        try:
+            market_data = await self.polymarket_discovery.get_market_by_condition_id(condition_id)
+            if market_data is None:
+                return None
+
+            resolved = market_data.get("resolved", False)
+            if not resolved:
+                return None
+
+            # Gamma API provides resolution in various formats
+            resolution = market_data.get("resolution", "")
+            if resolution:
+                return resolution.lower() == "yes"
+
+            # Fallback: check outcome prices (1.0/0.0 after resolution)
+            outcome_prices = market_data.get("outcomePrices")
+            if outcome_prices:
+                import json
+                if isinstance(outcome_prices, str):
+                    prices = json.loads(outcome_prices)
+                else:
+                    prices = outcome_prices
+                if len(prices) >= 2:
+                    yes_price = float(prices[0])
+                    return yes_price > 0.5  # Resolved YES if price → 1.0
+
+            return None
+        except Exception as e:
+            logger.debug(f"Polymarket resolution check failed for {condition_id}: {e}")
             return None
 
     def _resolve_predictions(self, market_id: str, actual_outcome: bool) -> int:

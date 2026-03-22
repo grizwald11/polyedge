@@ -21,6 +21,15 @@ class KalshiConfig(BaseModel):
         return self.demo_host if self.use_demo else self.host
 
 
+class PolymarketConfig(BaseModel):
+    clob_host: str = "https://clob.polymarket.com"
+    gamma_host: str = "https://gamma-api.polymarket.com"
+    data_host: str = "https://data-api.polymarket.com"
+    chain_id: int = 137
+    signature_type: int = 1  # 0=EOA, 1=proxy/email wallet
+    enabled: bool = False
+
+
 class ScanningConfig(BaseModel):
     interval_seconds: int = 300
     min_volume_24h: float = 10000
@@ -150,6 +159,7 @@ class Settings(BaseModel):
     """Root settings model — all configuration flows through here."""
 
     kalshi: KalshiConfig = Field(default_factory=KalshiConfig)
+    polymarket: PolymarketConfig = Field(default_factory=PolymarketConfig)
     scanning: ScanningConfig = Field(default_factory=ScanningConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
@@ -168,6 +178,7 @@ class Settings(BaseModel):
     searxng_url: Optional[str] = None
     fred_api_key: Optional[str] = None
     metaculus_api_token: Optional[str] = None
+    polymarket_private_key: Optional[str] = None
     live_enabled: bool = False
 
 
@@ -198,6 +209,7 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     settings.searxng_url = os.environ.get("SEARXNG_URL") or None
     settings.fred_api_key = os.environ.get("FRED_API_KEY") or None
     settings.metaculus_api_token = os.environ.get("METACULUS_API_TOKEN") or None
+    settings.polymarket_private_key = os.environ.get("POLYMARKET_PRIVATE_KEY") or None
     settings.live_enabled = os.environ.get("POLYEDGE_LIVE_ENABLED", "false").lower() == "true"
 
     return settings

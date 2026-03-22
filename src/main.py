@@ -49,6 +49,8 @@ from src.data.news_ingestion import NewsIngestion
 from src.data.market_graph import MarketGraph
 from src.data.whale_monitor import WhaleMonitor
 from src.core.websocket_client import KalshiWebSocket, TickerUpdate, FillUpdate
+from src.core.models import Platform
+from src.strategies.cross_platform_arb import CrossPlatformArbStrategy
 from src.metrics import Metrics
 
 
@@ -98,6 +100,8 @@ async def scan_and_trade(
     metrics: Metrics | None,
     settings,
     cycle_count: int = 0,
+    poly_scanner=None,
+    cross_platform_arb: CrossPlatformArbStrategy | None = None,
 ):
     """Execute one scan-assess-trade cycle."""
     logger = logging.getLogger("polyedge.main")
@@ -135,9 +139,27 @@ async def scan_and_trade(
                 logger.warning(f"Failed to send circuit breaker alert: {e}")
         return
 
-    # Scan and filter markets
+    # Scan and filter markets (both platforms in parallel when available)
+    poly_markets: list[Market] = []
     try:
-        markets = await scanner.run_scan_cycle()
+        if poly_scanner is not None:
+            kalshi_task = scanner.run_scan_cycle()
+            poly_task = poly_scanner.run_scan_cycle()
+            kalshi_results, poly_results = await asyncio.gather(
+                kalshi_task, poly_task, return_exceptions=True,
+            )
+            if isinstance(kalshi_results, Exception):
+                logger.error(f"Kalshi scan failed: {kalshi_results}")
+                markets = []
+            else:
+                markets = kalshi_results
+            if isinstance(poly_results, Exception):
+                logger.error(f"Polymarket scan failed: {poly_results}")
+            else:
+                poly_markets = poly_results
+                markets = markets + poly_markets
+        else:
+            markets = await scanner.run_scan_cycle()
     except Exception as e:
         logger.error(f"Market scan failed: {e}")
         if metrics is not None:
@@ -157,31 +179,43 @@ async def scan_and_trade(
     # Fetch prices for open positions not covered by the scan.
     # This prevents $0.00 unrealized P&L on positions whose markets
     # don't rank in the top scanned markets by volume/opportunity.
-    missing_tickers = [
-        p.market_id for p in position_manager.get_all_positions()
+    missing_positions = [
+        p for p in position_manager.get_all_positions()
         if p.market_id not in scanned_tickers
     ]
-    if missing_tickers:
-        logger.debug(f"Fetching prices for {len(missing_tickers)} position markets not in scan")
-        for ticker in missing_tickers:
+    if missing_positions:
+        logger.debug(f"Fetching prices for {len(missing_positions)} position markets not in scan")
+        for pos in missing_positions:
+            ticker = pos.market_id
+            pos_platform = getattr(pos, "platform", Platform.KALSHI)
             try:
-                raw = await kalshi.get_market(ticker)
-                if raw:
-                    yes_bid = float(raw.get("yes_bid_dollars") or raw.get("yes_bid") or 0)
-                    yes_ask = float(raw.get("yes_ask_dollars") or raw.get("yes_ask") or 0)
-                    yes_price = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else max(yes_bid, yes_ask)
-                    no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
-                    position_manager.update_price(ticker, yes_price, no_price)
-                    # Build minimal Market so exit logic can process this position
-                    minimal_market = Market(
-                        ticker=ticker,
-                        question=raw.get("title", ticker),
-                        tokens=[
-                            MarketToken(token_id=f"{ticker}_yes", outcome=TokenOutcome.YES, price=yes_price),
-                            MarketToken(token_id=f"{ticker}_no", outcome=TokenOutcome.NO, price=no_price),
-                        ],
-                    )
-                    markets.append(minimal_market)
+                if pos_platform == Platform.POLYMARKET and poly_scanner is not None:
+                    # Polymarket positions: use Gamma API for price lookup
+                    from src.core.polymarket_discovery import parse_polymarket_market
+                    raw = await poly_scanner.discovery.get_market_by_condition_id(ticker)
+                    if raw:
+                        pm = parse_polymarket_market(raw)
+                        if pm:
+                            position_manager.update_price(ticker, pm.yes_price, pm.no_price)
+                            markets.append(pm)
+                else:
+                    raw = await kalshi.get_market(ticker)
+                    if raw:
+                        yes_bid = float(raw.get("yes_bid_dollars") or raw.get("yes_bid") or 0)
+                        yes_ask = float(raw.get("yes_ask_dollars") or raw.get("yes_ask") or 0)
+                        yes_price = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else max(yes_bid, yes_ask)
+                        no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
+                        position_manager.update_price(ticker, yes_price, no_price)
+                        # Build minimal Market so exit logic can process this position
+                        minimal_market = Market(
+                            ticker=ticker,
+                            question=raw.get("title", ticker),
+                            tokens=[
+                                MarketToken(token_id=f"{ticker}_yes", outcome=TokenOutcome.YES, price=yes_price),
+                                MarketToken(token_id=f"{ticker}_no", outcome=TokenOutcome.NO, price=no_price),
+                            ],
+                        )
+                        markets.append(minimal_market)
             except Exception as e:
                 logger.debug(f"Failed to fetch price for position market {ticker}: {e}")
 
@@ -214,6 +248,7 @@ async def scan_and_trade(
         exit_order = Order(
             id=order_builder._generate_order_id(),
             market_id=position.market_id,
+            platform=getattr(position, "platform", Platform.KALSHI),
             token_id=position.token_id,
             side=Side.SELL,
             price=exit_price,
@@ -293,6 +328,14 @@ async def scan_and_trade(
             all_signals.extend(whale_signals)
         except Exception as e:
             logger.error(f"Whale strategy failed: {e}")
+
+    if cross_platform_arb is not None and poly_markets:
+        try:
+            kalshi_markets = [m for m in markets if getattr(m, "platform", Platform.KALSHI) == Platform.KALSHI]
+            xplat_signals = await cross_platform_arb.scan_for_opportunities(kalshi_markets, poly_markets)
+            all_signals.extend(xplat_signals)
+        except Exception as e:
+            logger.error(f"Cross-platform arb strategy failed: {e}")
 
     if not all_signals:
         logger.info("No signals generated this cycle")
@@ -510,6 +553,7 @@ async def run_trading_loop(
     circuit_breaker, order_builder, order_router, position_manager,
     calibration, resolution_tracker, calibration_analyzer, fill_tracker,
     alert_manager, daily_report, metrics, settings, interval,
+    poly_scanner=None, cross_platform_arb=None,
 ):
     """Run the scan-assess-trade loop on an interval."""
     logger = logging.getLogger("polyedge.main")
@@ -565,6 +609,8 @@ async def run_trading_loop(
                 circuit_breaker, order_builder, order_router, position_manager,
                 calibration, resolution_tracker, calibration_analyzer,
                 fill_tracker, alert_manager, metrics, settings, cycle_count,
+                poly_scanner=poly_scanner,
+                cross_platform_arb=cross_platform_arb,
             ), timeout=settings.execution.cycle_timeout_seconds)
             stats = scanner.db.get_stats()
             logger.info(
@@ -600,6 +646,7 @@ async def main():
     logger.info(f"  Daily loss limit: {settings.trading.daily_loss_limit_pct:.0%}")
     logger.info(f"  Scan interval: {settings.scanning.interval_seconds}s")
     logger.info(f"  Kalshi API: {settings.kalshi.active_host}")
+    logger.info(f"  Polymarket: {'enabled' if settings.polymarket.enabled else 'disabled'}")
     logger.info("=" * 60)
 
     # Initialize core components
@@ -675,11 +722,53 @@ async def main():
     except Exception as e:
         logger.info(f"Whale tracker strategy disabled: {e}")
 
+    # Polymarket integration (conditional)
+    poly_scanner = None
+    cross_platform_arb: CrossPlatformArbStrategy | None = None
+    polymarket_client = None
+    if settings.polymarket.enabled:
+        try:
+            from src.core.polymarket_client import PolymarketClient
+            from src.core.polymarket_discovery import PolymarketDiscovery
+            from src.data.polymarket_scanner import PolymarketScanner
+            from src.data.polymarket_cross_ref import PolymarketCrossRef
+
+            poly_discovery = PolymarketDiscovery(settings.polymarket.gamma_host)
+
+            if settings.polymarket_private_key:
+                polymarket_client = PolymarketClient(
+                    host=settings.polymarket.clob_host,
+                    private_key=settings.polymarket_private_key,
+                    chain_id=settings.polymarket.chain_id,
+                    signature_type=settings.polymarket.signature_type,
+                )
+                await polymarket_client.initialize()
+                logger.info("Polymarket client initialized (trading enabled)")
+            else:
+                logger.info("Polymarket: no private key — read-only mode (scanning only)")
+
+            poly_scanner = PolymarketScanner(poly_discovery, db, settings)
+            logger.info("Polymarket scanner enabled")
+
+            cross_ref = PolymarketCrossRef(ttl_seconds=300)
+            cross_platform_arb = CrossPlatformArbStrategy(settings, db, cross_ref)
+            logger.info("Cross-platform arbitrage strategy enabled")
+
+            # Enable Polymarket resolution tracking
+            resolution_tracker.polymarket_discovery = poly_discovery
+        except Exception as e:
+            logger.warning(f"Polymarket integration failed to initialize: {e}")
+            poly_scanner = None
+            cross_platform_arb = None
+            polymarket_client = None
+    else:
+        logger.info("Polymarket integration disabled (polymarket.enabled=false)")
+
     # Execution
     order_builder = OrderBuilder(settings)
     position_manager = PositionManager(db, settings.trading.bankroll)
-    order_router = OrderRouter(settings, kalshi, db, position_manager=position_manager)
-    fill_tracker = FillTracker(kalshi, db, poll_timeout=settings.execution.order_poll_timeout_seconds)
+    order_router = OrderRouter(settings, kalshi, db, position_manager=position_manager, polymarket=polymarket_client)
+    fill_tracker = FillTracker(kalshi, db, poll_timeout=settings.execution.order_poll_timeout_seconds, polymarket=polymarket_client)
 
     try:
         portfolio_risk = PortfolioRisk(position_manager, db)
@@ -790,6 +879,8 @@ async def main():
             calibration, resolution_tracker, calibration_analyzer,
             fill_tracker, alert_manager, daily_report, metrics,
             settings, settings.scanning.interval_seconds,
+            poly_scanner=poly_scanner,
+            cross_platform_arb=cross_platform_arb,
         )
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")

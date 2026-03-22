@@ -1,6 +1,6 @@
 """Fill tracker — monitors pending orders for fills, cancellations, and expirations.
 
-Polls Kalshi API for order status updates and reconciles with local state.
+Polls Kalshi or Polymarket API for order status updates and reconciles with local state.
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from typing import Optional
 
 from src.core.kalshi_client import KalshiClient
 from src.core.models import (
-    Order, OrderStatus, Trade, Side, StrategyName,
-    dollars_to_cents, kalshi_maker_fee, kalshi_taker_fee, OrderType,
+    Order, OrderStatus, Platform, Trade, Side, StrategyName,
+    dollars_to_cents, kalshi_maker_fee, kalshi_taker_fee, polymarket_fee, OrderType,
 )
 from src.storage.database import Database
 
@@ -31,8 +31,9 @@ class FillTracker:
     - WebSocket: handle_ws_fill() processes real-time fill notifications
     """
 
-    def __init__(self, kalshi: KalshiClient, db: Database, poll_timeout: int = 10):
+    def __init__(self, kalshi: KalshiClient, db: Database, poll_timeout: int = 10, polymarket=None):
         self.kalshi = kalshi
+        self.polymarket = polymarket  # Optional PolymarketClient
         self.db = db
         self._poll_timeout = poll_timeout
         self._pending_orders: dict[str, Order] = {}  # order_id -> Order
@@ -66,9 +67,15 @@ class FillTracker:
         # Poll all orders concurrently instead of sequentially
         async def _poll_one(order_id: str, order: Order):
             try:
-                status = await asyncio.wait_for(
-                    self.kalshi.get_order(order_id), timeout=self._poll_timeout
-                )
+                platform = getattr(order, "platform", Platform.KALSHI)
+                if platform == Platform.POLYMARKET and self.polymarket is not None:
+                    status = await asyncio.wait_for(
+                        self.polymarket.get_order(order_id), timeout=self._poll_timeout
+                    )
+                else:
+                    status = await asyncio.wait_for(
+                        self.kalshi.get_order(order_id), timeout=self._poll_timeout
+                    )
                 return (order_id, order, status)
             except asyncio.TimeoutError:
                 logger.warning(f"Order poll timed out for {order_id}")
@@ -178,21 +185,27 @@ class FillTracker:
 
         now = datetime.now(timezone.utc)
 
-        # Calculate fee on newly filled portion only
-        price_cents = dollars_to_cents(order.price)
-        if order.order_type == OrderType.GTC:
-            fee_cents = kalshi_maker_fee(delta, price_cents)
+        # Calculate fee on newly filled portion only (platform-aware)
+        platform = getattr(order, "platform", Platform.KALSHI)
+        if platform == Platform.POLYMARKET:
+            fee_dollars = 0.0  # Polymarket event markets are fee-free
         else:
-            fee_cents = kalshi_taker_fee(delta, price_cents)
+            price_cents = dollars_to_cents(order.price)
+            if order.order_type == OrderType.GTC:
+                fee_cents = kalshi_maker_fee(delta, price_cents)
+            else:
+                fee_cents = kalshi_taker_fee(delta, price_cents)
+            fee_dollars = fee_cents / 100.0
 
         trade = Trade(
             order_id=order.id,
             market_id=order.market_id,
+            platform=platform,
             token_id=order.token_id,
             side=order.side,
             price=order.price,
             size=float(delta),
-            fee=fee_cents / 100.0,
+            fee=fee_dollars,
             realized_pnl=0.0,
             strategy=order.strategy,
             paper=False,
@@ -245,21 +258,27 @@ class FillTracker:
             logger.debug(f"Full fill for {order.id} — all {int(order.size)} contracts already recorded via partials")
             return None
 
-        # Calculate fee on remaining portion only
-        price_cents = dollars_to_cents(order.price)
-        if order.order_type == OrderType.GTC:
-            fee_cents = kalshi_maker_fee(remaining_size, price_cents)
+        # Calculate fee on remaining portion only (platform-aware)
+        platform = getattr(order, "platform", Platform.KALSHI)
+        if platform == Platform.POLYMARKET:
+            fee_dollars = 0.0
         else:
-            fee_cents = kalshi_taker_fee(remaining_size, price_cents)
+            price_cents = dollars_to_cents(order.price)
+            if order.order_type == OrderType.GTC:
+                fee_cents = kalshi_maker_fee(remaining_size, price_cents)
+            else:
+                fee_cents = kalshi_taker_fee(remaining_size, price_cents)
+            fee_dollars = fee_cents / 100.0
 
         trade = Trade(
             order_id=order.id,
             market_id=order.market_id,
+            platform=platform,
             token_id=order.token_id,
             side=order.side,
             price=order.price,
             size=float(remaining_size),
-            fee=fee_cents / 100.0,
+            fee=fee_dollars,
             realized_pnl=0.0,
             strategy=order.strategy,
             paper=False,
@@ -286,15 +305,17 @@ class FillTracker:
     def _log_order(self, order: Order):
         """Persist order status to database."""
         conn = self.db._get_conn()
+        platform = getattr(order, "platform", Platform.KALSHI)
         conn.execute("""
             INSERT OR REPLACE INTO orders (
-                id, market_id, token_id, side, price, size, cost,
+                id, market_id, platform, token_id, side, price, size, cost,
                 order_type, fee_rate_bps, status, strategy, signal_id,
                 paper, created_at, filled_at, fill_price, cancelled_at, rejection_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             order.id,
             order.market_id,
+            platform.value,
             order.token_id,
             order.side.value,
             order.price,

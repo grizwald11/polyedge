@@ -5,7 +5,8 @@ Models are designed for Phase 1 but include fields needed by later phases.
 
 Kalshi prices are in cents (1-99). We store prices in dollars (0.01-0.99)
 internally for consistency. Use cents_to_dollars() and dollars_to_cents()
-for conversion at the API boundary.
+for conversion at the API boundary. Polymarket prices are already in
+dollars (0.0-1.0) and need no conversion.
 """
 
 from __future__ import annotations
@@ -48,9 +49,18 @@ def kalshi_maker_fee(contracts: int, price_cents: int) -> int:
     return math.ceil(0.0175 * contracts * p * (1 - p))
 
 
+def polymarket_fee(contracts: int, price: float) -> float:
+    """Polymarket event markets are fee-free for maker orders."""
+    return 0.0
+
+
 # ──────────────────────────────────────────────
 # Enums
 # ──────────────────────────────────────────────
+
+class Platform(str, Enum):
+    KALSHI = "kalshi"
+    POLYMARKET = "polymarket"
 
 class Side(str, Enum):
     BUY = "BUY"
@@ -85,6 +95,7 @@ class StrategyName(str, Enum):
     WHALE_TRACKER = "whale_tracker"
     NEWS_REACTIVE = "news_reactive"
     OBVIOUS_NO = "obvious_no"
+    CROSS_PLATFORM_ARB = "cross_platform_arb"
 
 
 class MarketCategory(str, Enum):
@@ -123,8 +134,9 @@ class MarketToken(BaseModel):
 
 
 class Market(BaseModel):
-    """A single prediction market from Kalshi."""
-    ticker: str
+    """A single prediction market (Kalshi or Polymarket)."""
+    ticker: str  # Kalshi ticker or Polymarket condition_id
+    platform: Platform = Platform.KALSHI
     question: str
     description: str = ""
     category: MarketCategory = MarketCategory.OTHER
@@ -210,6 +222,7 @@ class Signal(BaseModel):
     id: Optional[str] = None
     strategy: StrategyName
     market_id: str
+    platform: Platform = Platform.KALSHI
     market_question: str = ""
     direction: Direction
     edge: float  # Our probability - market probability
@@ -248,9 +261,10 @@ class Signal(BaseModel):
 # ──────────────────────────────────────────────
 
 class Order(BaseModel):
-    """An order placed on Kalshi."""
+    """An order placed on Kalshi or Polymarket."""
     id: Optional[str] = None
     market_id: str
+    platform: Platform = Platform.KALSHI
     token_id: str
     side: Side
     price: float
@@ -286,6 +300,7 @@ class Order(BaseModel):
 class Position(BaseModel):
     """An open position (aggregated from fills)."""
     market_id: str
+    platform: Platform = Platform.KALSHI
     market_question: str = ""
     token_id: str
     direction: Direction
@@ -315,6 +330,7 @@ class Trade(BaseModel):
     id: Optional[str] = None
     order_id: str
     market_id: str
+    platform: Platform = Platform.KALSHI
     token_id: str
     side: Side
     price: float

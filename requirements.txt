@@ -4,6 +4,9 @@
 # Kalshi SDK
 kalshi-python>=2.1.0
 
+# Polymarket SDK
+py-clob-client>=0.34.6
+
 # RSA signing for Kalshi API auth
 cryptography>=42.0
 
