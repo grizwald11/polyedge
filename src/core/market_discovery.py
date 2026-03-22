@@ -249,6 +249,7 @@ class MarketDiscovery:
         events_seen = 0
         events_targeted = 0
         cursor = None
+        page = -1
 
         for page in range(max_pages):
             params: dict[str, Any] = {

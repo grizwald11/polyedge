@@ -72,7 +72,7 @@ class TestFormatReport:
             calibration_curve=[
                 CalibrationBin(bin_label="50-60%", predicted_avg=0.55, actual_avg=0.52, count=8),
                 CalibrationBin(bin_label="60-70%", predicted_avg=0.65, actual_avg=0.70, count=12),
-                CalibrationBin(bin_label="70-80%", predicted_avg=0.75, actual_avg=0.0, count=0),
+                CalibrationBin(bin_label="70-80%", predicted_avg=0.75, actual_avg=None, count=0),
             ],
         )
         text = format_report(_make_analyzer(report))
@@ -87,7 +87,7 @@ class TestFormatReport:
             total_resolved=5,
             total_unresolved=0,
             calibration_curve=[
-                CalibrationBin(bin_label="90-100%", predicted_avg=0.0, actual_avg=0.0, count=0),
+                CalibrationBin(bin_label="90-100%", predicted_avg=0.0, actual_avg=None, count=0),
             ],
         )
         text = format_report(_make_analyzer(report))

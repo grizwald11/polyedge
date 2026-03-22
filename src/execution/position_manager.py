@@ -65,6 +65,7 @@ class PositionManager:
                 current_price=trade.price,
                 unrealized_pnl=0.0,
                 total_fees=trade.fee,
+                buy_fees=trade.fee,
                 strategy=trade.strategy,
                 paper=trade.paper,
                 opened_at=trade.timestamp,
@@ -85,6 +86,7 @@ class PositionManager:
                 existing.avg_entry_price = total_cost / existing.size if existing.size > 0 else 0
                 # Accumulate fees on buy
                 existing.total_fees += trade.fee
+                existing.buy_fees += trade.fee
             else:
                 # Reducing position — avg_entry_price stays the same
                 # (it represents the cost basis of remaining contracts)
@@ -95,9 +97,33 @@ class PositionManager:
                         f"for {trade.market_id} — clamping to position size"
                     )
                     sell_size = existing.size
-                # Accumulate all fees (buy + sell). Fees are sunk costs and
-                # should not be reduced when partially closing — they were
-                # already incurred on the initial buy.
+
+                # Proportional buy fee for the contracts being sold
+                proportional_buy_fee = (
+                    existing.buy_fees * (sell_size / existing.size)
+                    if existing.size > 0 else 0.0
+                )
+
+                # Calculate realized P&L: gross profit minus both buy and sell fees
+                realized_pnl = (
+                    (trade.price - existing.avg_entry_price) * sell_size
+                    - proportional_buy_fee
+                    - trade.fee
+                )
+                trade.realized_pnl = round(realized_pnl, 4)
+
+                # Update the DB record with the calculated P&L
+                self._update_trade_pnl(trade)
+
+                logger.info(
+                    f"Realized P&L on {trade.market_id}: ${realized_pnl:+.2f} "
+                    f"(sold {sell_size:.0f}x @ ${trade.price:.2f}, "
+                    f"entry @ ${existing.avg_entry_price:.2f})"
+                )
+
+                # Reduce buy_fees proportionally (remaining fees stay with remaining contracts)
+                existing.buy_fees -= proportional_buy_fee
+                # Accumulate sell fee into total_fees for record-keeping
                 existing.total_fees += trade.fee
                 existing.size -= sell_size
                 if existing.size <= 0:
@@ -458,6 +484,18 @@ class PositionManager:
 
         if self._positions:
             logger.info(f"Loaded {len(self._positions)} open positions from DB")
+
+    def _update_trade_pnl(self, trade: Trade):
+        """Update the realized_pnl in the DB for a trade that was already persisted."""
+        try:
+            conn = self.db._get_conn()
+            conn.execute(
+                "UPDATE trades SET realized_pnl = ? WHERE order_id = ?",
+                (trade.realized_pnl, trade.order_id),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to update trade P&L in DB: {e}")
 
     def _direction_from_trade(self, trade: Trade) -> Direction:
         """Infer direction from trade side and token."""

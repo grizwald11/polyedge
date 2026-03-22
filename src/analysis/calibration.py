@@ -111,12 +111,22 @@ class CalibrationTracker:
             return None
 
         total = 0.0
+        valid_count = 0
         for r in records:
-            outcome = float(r["actual_outcome"])
-            predicted = r["predicted_probability"]
+            if r["actual_outcome"] is None:
+                continue
+            try:
+                outcome = float(r["actual_outcome"])
+                predicted = float(r["predicted_probability"])
+            except (TypeError, ValueError):
+                continue
             total += (predicted - outcome) ** 2
+            valid_count += 1
 
-        return total / len(records)
+        if valid_count == 0:
+            return None
+
+        return total / valid_count
 
     def get_calibration_bins(
         self,
@@ -146,7 +156,9 @@ class CalibrationTracker:
 
             if in_bin:
                 pred_avg = sum(r["predicted_probability"] for r in in_bin) / len(in_bin)
-                actual_avg = sum(float(r["actual_outcome"]) for r in in_bin) / len(in_bin)
+                valid_outcomes = [float(r["actual_outcome"]) for r in in_bin
+                                 if r["actual_outcome"] is not None]
+                actual_avg = sum(valid_outcomes) / len(valid_outcomes) if valid_outcomes else None
             else:
                 pred_avg = (lo + hi) / 2
                 actual_avg = None  # No data — don't bias calibration plot

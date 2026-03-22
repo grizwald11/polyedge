@@ -61,14 +61,14 @@ def format_report(analyzer: CalibrationAnalyzer) -> str:
         lines.append("-" * 40)
         lines.append(f"  {'Bucket':<12s} {'Predicted':>10s} {'Actual':>10s} {'Count':>6s}  {'Delta':>8s}")
         for b in report.calibration_curve:
-            if b.count > 0:
+            if b.count > 0 and b.actual_avg is not None:
                 delta = b.actual_avg - b.predicted_avg
                 delta_str = f"{delta:+.1%}"
                 lines.append(
                     f"  {b.bin_label:<12s} {b.predicted_avg:>10.1%} {b.actual_avg:>10.1%} {b.count:>6d}  {delta_str:>8s}"
                 )
             else:
-                lines.append(f"  {b.bin_label:<12s} {'—':>10s} {'—':>10s} {0:>6d}  {'—':>8s}")
+                lines.append(f"  {b.bin_label:<12s} {'—':>10s} {'—':>10s} {b.count:>6d}  {'—':>8s}")
         lines.append("")
 
     # Per-category breakdown

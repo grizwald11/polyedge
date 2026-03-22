@@ -255,26 +255,30 @@ class TestFeeTracking:
         trade = _make_trade(price=0.50, size=10)  # fee=0.02
         pos = pm.update_from_trade(trade)
         assert pos.total_fees == 0.02
+        assert pos.buy_fees == 0.02
 
     def test_buy_accumulates_fees(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
         pm.update_from_trade(_make_trade(price=0.50, size=10))  # fee=0.02
         pos = pm.update_from_trade(_make_trade(price=0.60, size=5))  # fee=0.02
         assert pos.total_fees == pytest.approx(0.04)
+        assert pos.buy_fees == pytest.approx(0.04)
 
     def test_partial_sell_accumulates_fees(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
         pm.update_from_trade(_make_trade(side=Side.BUY, price=0.50, size=10))  # fee=0.02
-        # Sell half: fees are sunk costs — buy fee stays, sell fee added
+        # Sell half: buy fees prorated (half removed), sell fee added to total
         pos = pm.update_from_trade(_make_trade(side=Side.SELL, price=0.60, size=5))
-        # original buy fee=0.02 + sell fee=0.02 = 0.04
+        # total_fees: original buy fee 0.02 + sell fee 0.02 = 0.04
         assert pos.total_fees == pytest.approx(0.04)
+        # buy_fees: 0.02 * (5/10 remaining) = 0.01
+        assert pos.buy_fees == pytest.approx(0.01)
 
     def test_cost_basis_includes_fees(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)
         trade = _make_trade(price=0.40, size=10)  # fee=0.02
         pos = pm.update_from_trade(trade)
-        # cost_basis = size * avg_entry + total_fees = 10*0.40 + 0.02 = 4.02
+        # cost_basis = size * avg_entry + buy_fees = 10*0.40 + 0.02 = 4.02
         assert pos.cost_basis == pytest.approx(4.02)
 
 

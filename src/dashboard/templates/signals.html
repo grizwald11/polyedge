@@ -49,10 +49,18 @@ let displayCount = 50;
 
 function loadSignals() {
     fetch('/api/signals')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+        })
         .then(data => {
             allSignals = data;
             renderSignals();
+        })
+        .catch(err => {
+            console.error('Failed to load signals:', err);
+            document.getElementById('signals-body').innerHTML =
+                '<tr><td colspan="8" class="muted">Error loading signals: ' + err.message + '</td></tr>';
         });
 }
 
@@ -72,18 +80,22 @@ function renderSignals(filter) {
     }
 
     const rows = filtered.slice(0, displayCount).map(s => {
-        const ts = s.timestamp ? new Date(s.timestamp).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+        const d = s.timestamp ? new Date(s.timestamp) : null;
+        const ts = d && !isNaN(d) ? d.toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
         const acted = s.acted_on ? '<span class="badge badge-green">Yes</span>' : '<span class="badge">No</span>';
         const dirClass = s.direction && s.direction.includes('YES') ? 'badge-green' : 'badge-red';
-        const reasoning = (s.reasoning || '').substring(0, 60);
+        const reasoning = (s.reasoning || '').replace(/[<>"&]/g, c => ({'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c])).substring(0, 60);
+        const mktQ = (s.market_question || '').replace(/[<>"&]/g, c => ({'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c]));
         const mktId = (s.market_id || '').substring(0, 25);
+        const edge = s.edge != null ? (s.edge * 100).toFixed(1) + '%' : '—';
+        const conf = s.confidence != null ? (s.confidence * 100).toFixed(0) + '%' : '—';
         return `<tr>
             <td class="muted-text">${ts}</td>
-            <td title="${s.market_question || s.market_id}">${mktId}</td>
+            <td title="${mktQ}">${mktId}</td>
             <td><span class="badge">${s.strategy || ''}</span></td>
             <td><span class="badge ${dirClass}">${s.direction || ''}</span></td>
-            <td>${(s.edge * 100).toFixed(1)}%</td>
-            <td>${(s.confidence * 100).toFixed(0)}%</td>
+            <td>${edge}</td>
+            <td>${conf}</td>
             <td>${acted}</td>
             <td class="muted-text" title="${s.reasoning || ''}">${reasoning}</td>
         </tr>`;
@@ -100,11 +112,16 @@ function filterSignals(filter, btn) {
     renderSignals(filter);
 }
 
+const _filterMap = {
+    'all': 'all', 'acted_on': 'acted', 'skipped': 'skipped',
+    'ai_prob': 'ai_probability', 'cross-arb': 'cross_arb',
+    'obvious_no': 'obvious_no', 'whale_tracker': 'whale_tracker',
+};
 function loadMore() {
     displayCount += 50;
     const activeFilter = document.querySelector('.filter-btn.active');
-    const filter = activeFilter ? activeFilter.textContent.trim().toLowerCase().replace(' ', '_') : 'all';
-    renderSignals(filter === 'acted_on' ? 'acted' : filter);
+    const raw = activeFilter ? activeFilter.textContent.trim().toLowerCase().replace(' ', '_') : 'all';
+    renderSignals(_filterMap[raw] || raw);
 }
 
 loadSignals();

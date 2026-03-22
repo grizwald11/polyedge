@@ -146,16 +146,33 @@ class AIProbabilityStrategy:
         min_edge = self.settings.trading.min_edge_ai
 
         cross_check_enabled = self.settings.claude.cross_check_enabled
+        cross_check_top_n = self.settings.claude.cross_check_top_n
 
+        # First pass: assess all markets without cross-check
+        initial_signals: list[Signal] = []
         for market in markets[:max_assessments]:
             try:
-                # First pass: assess without cross-check to find edge
                 signal = await self._assess_single_market(
                     market, news_context, min_edge, use_cross_check=False
                 )
-                if signal and cross_check_enabled:
-                    # Only cross-check markets where we found actionable edge.
-                    # This cuts Claude API calls ~40-50% vs cross-checking everything.
+                if signal:
+                    initial_signals.append(signal)
+            except Exception as e:
+                logger.error(f"Failed to assess {market.ticker}: {e}")
+
+        if not cross_check_enabled:
+            signals = initial_signals
+        else:
+            # Cross-check only top N signals by edge (saves API calls)
+            initial_signals.sort(key=lambda s: abs(s.edge), reverse=True)
+            cross_check_candidates = initial_signals[:cross_check_top_n]
+            auto_pass = initial_signals[cross_check_top_n:]
+
+            for signal in cross_check_candidates:
+                market = next((m for m in markets if m.ticker == signal.market_id), None)
+                if market is None:
+                    continue
+                try:
                     validated_signal = await self._assess_single_market(
                         market, news_context, min_edge, use_cross_check=True
                     )
@@ -165,10 +182,11 @@ class AIProbabilityStrategy:
                         logger.info(
                             f"Cross-check rejected signal for {market.ticker}"
                         )
-                elif signal:
-                    signals.append(signal)
-            except Exception as e:
-                logger.error(f"Failed to assess {market.ticker}: {e}")
+                except Exception as e:
+                    logger.error(f"Cross-check failed for {market.ticker}: {e}")
+
+            # Signals outside top N pass without cross-check
+            signals.extend(auto_pass)
 
         logger.info(
             f"AI Probability: assessed {min(len(markets), max_assessments)} markets, "
@@ -244,6 +262,18 @@ class AIProbabilityStrategy:
         # Skip if Claude failed to parse the response (fallback 0.5 is unreliable)
         if getattr(forecast, "parse_failed", False):
             logger.warning(f"Skipping {market.ticker}: Claude response parse failed")
+            return None
+
+        # Divergence gate: reject extreme disagreement with the market.
+        # When Claude diverges by >40% from the market price, it's far more
+        # likely a hallucination than a genuine edge (e.g., Venezuela 80% vs 2%).
+        max_div = self.settings.claude.max_divergence_from_market
+        divergence = abs(forecast.probability - market.yes_price)
+        if divergence > max_div:
+            logger.warning(
+                f"Rejecting {market.ticker}: Claude ({forecast.probability:.0%}) diverges "
+                f"{divergence:.0%} from market ({market.yes_price:.0%}) — exceeds max {max_div:.0%}"
+            )
             return None
 
         # Apply calibration adjustment before ensemble

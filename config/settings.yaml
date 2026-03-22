@@ -28,7 +28,7 @@ trading:
   mode: "paper"  # "paper" or "live"
   bankroll: 500.0
   max_position_pct: 0.05        # 5% of bankroll per position
-  max_total_exposure_pct: 0.40  # 40% total
+  max_total_exposure_pct: 1.00  # 100% total ($500 of $500)
   max_correlated_exposure_pct: 0.20  # 20% in related markets
   min_edge_ai: 0.05             # 5% minimum edge for AI strategy
   min_edge_arb: 0.02            # 2% minimum edge for arbitrage
@@ -55,7 +55,7 @@ claude:
     Culture: 0.4
     Other: 0.35
   cross_check_enabled: true     # Dual-temperature cross-validation
-  cross_check_top_n: 10         # Cross-check top N markets by volume
+  cross_check_top_n: 3          # Cross-check only top N edge signals (saves API time)
   cross_check_temp_low: 0.2
   cross_check_temp_high: 0.5
   cross_check_disagreement_threshold: 0.12  # Skip if temps disagree by more than this
@@ -72,6 +72,9 @@ whales:
   basket_path: "config/whale_basket.yaml"
   consensus_threshold: 0.8
   poll_interval_seconds: 600
+
+execution:
+  cycle_timeout_seconds: 600    # 10 min — cross-check + news research needs headroom
 
 alerts:
   enabled: true

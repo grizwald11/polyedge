@@ -246,7 +246,24 @@ class Database:
         )
         conn.commit()
         self._run_migrations(conn)
+        self._prune_stale_data(conn)
         logger.info(f"Database initialized at {self.db_path}")
+
+    def _prune_stale_data(self, conn: sqlite3.Connection):
+        """Prune old unacted signals and stale snapshots to control DB growth."""
+        # Keep acted signals forever, prune unacted older than 24h
+        deleted_signals = conn.execute(
+            "DELETE FROM signals WHERE acted_on = 0 AND timestamp < datetime('now', '-24 hours')"
+        ).rowcount
+        # Prune snapshots older than 7 days
+        deleted_snaps = conn.execute(
+            "DELETE FROM market_snapshots WHERE timestamp < datetime('now', '-7 days')"
+        ).rowcount
+        conn.commit()
+        if deleted_signals or deleted_snaps:
+            logger.info(
+                f"DB pruned: {deleted_signals} stale signals, {deleted_snaps} old snapshots"
+            )
 
     def _run_migrations(self, conn: sqlite3.Connection):
         """Run schema migrations for existing databases."""
@@ -578,6 +595,29 @@ class Database:
         row = conn.execute(
             "SELECT COUNT(*) as cnt FROM trades "
             "WHERE market_id=? AND side='BUY' AND timestamp > ?",
+            (market_id, cutoff),
+        ).fetchone()
+        return row["cnt"] > 0 if row else False
+
+    def has_recent_exit(self, market_id: str, seconds: int = 300) -> bool:
+        """Check if a SELL trade was placed on this market within the last N seconds.
+
+        Used to prevent duplicate exit orders when scan cycles overlap
+        (e.g. pm2 restart or rapid consecutive cycles).
+
+        Args:
+            market_id: Market ticker
+            seconds: Lookback window (default 5 minutes)
+
+        Returns:
+            True if a recent SELL trade exists
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM trades "
+            "WHERE market_id=? AND side='SELL' AND timestamp > ?",
             (market_id, cutoff),
         ).fetchone()
         return row["cnt"] > 0 if row else False

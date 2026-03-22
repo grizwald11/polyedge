@@ -14,7 +14,7 @@ from typing import Optional
 from src.config import Settings
 from src.core.kalshi_client import KalshiClient
 from src.core.models import (
-    Order, OrderStatus, Trade, dollars_to_cents,
+    Order, OrderStatus, Side, Trade, dollars_to_cents,
     kalshi_maker_fee, kalshi_taker_fee, OrderType,
 )
 from src.storage.database import Database
@@ -41,10 +41,11 @@ class OrderResult:
 class OrderRouter:
     """Routes orders to paper or live execution."""
 
-    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database):
+    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager=None):
         self.settings = settings
         self.kalshi = kalshi
         self.db = db
+        self.position_manager = position_manager
         self._session_confirmed = False  # Gate 3: first-trade confirmation
         self._log_gate_status()
 
@@ -68,6 +69,25 @@ class OrderRouter:
         Paper mode: simulates immediate fill at order price.
         Live mode: submits to Kalshi API.
         """
+        # Validate sell orders don't exceed position size
+        if order.side == Side.SELL and self.position_manager is not None:
+            position = self.position_manager.get_position(order.market_id)
+            if position is None:
+                logger.warning(
+                    f"Rejected SELL: no open position for {order.market_id}"
+                )
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = "No open position to sell"
+                self._log_order(order)
+                return OrderResult(success=False, order=order, error="No open position to sell")
+            if order.size > position.size:
+                logger.warning(
+                    f"Clamping sell size from {order.size:.0f} to {position.size:.0f} "
+                    f"for {order.market_id}"
+                )
+                order.size = position.size
+                order.cost = order.price * order.size
+
         if order.paper or self.settings.trading.mode == "paper":
             return await self._paper_fill(order)
         else:

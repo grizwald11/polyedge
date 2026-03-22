@@ -293,7 +293,8 @@ class Position(BaseModel):
     avg_entry_price: float
     current_price: float = 0.0
     unrealized_pnl: float = 0.0
-    total_fees: float = 0.0  # Accumulated fees paid for this position
+    total_fees: float = 0.0  # Accumulated fees paid for this position (buy + sell)
+    buy_fees: float = 0.0    # Buy-side fees only (for proportional P&L deduction on sell)
     strategy: StrategyName = StrategyName.AI_PROBABILITY
     paper: bool = True
     opened_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -306,7 +307,7 @@ class Position(BaseModel):
 
     @property
     def cost_basis(self) -> float:
-        return self.size * self.avg_entry_price + self.total_fees
+        return self.size * self.avg_entry_price + self.buy_fees
 
 
 class Trade(BaseModel):

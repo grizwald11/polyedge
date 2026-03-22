@@ -33,9 +33,11 @@ class TestGenerateQueries:
         assert "?" not in queries[0]
 
     def test_includes_time_scoped_query(self):
+        from datetime import datetime, timezone
         researcher = NewsResearcher()
         queries = researcher.generate_queries("Will Trump win 2028?")
-        assert any("2026" in q for q in queries)
+        current_year = str(datetime.now(timezone.utc).year)
+        assert any(current_year in q for q in queries)
 
     def test_extracts_entities(self):
         researcher = NewsResearcher()

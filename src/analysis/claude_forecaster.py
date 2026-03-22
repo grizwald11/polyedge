@@ -55,6 +55,13 @@ class ClaudeForecaster:
             category.value, self.settings.claude.temperature
         )
 
+    @staticmethod
+    def _extract_text(response) -> str | None:
+        """Safely extract text from Claude API response. Returns None if empty."""
+        if not response.content:
+            return None
+        return response.content[0].text
+
     def _validate_resolution_criteria(self, description: str) -> str:
         """Validate and enhance resolution criteria if missing or too short."""
         if not description or len(description.strip()) < 20:
@@ -133,7 +140,13 @@ class ClaudeForecaster:
             )
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
-            raw_text = response.content[0].text
+            raw_text = self._extract_text(response)
+            if raw_text is None:
+                logger.warning("Claude API returned empty content for assess_market")
+                return ForecastResult(
+                    probability=0.5, reasoning="Empty API response",
+                    parse_failed=True, model_used=model, latency_ms=latency_ms,
+                )
             tokens_used = response.usage.input_tokens + response.usage.output_tokens
 
             # Parse JSON response
@@ -216,7 +229,13 @@ class ClaudeForecaster:
             )
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
-            raw_text = response.content[0].text
+            raw_text = self._extract_text(response)
+            if raw_text is None:
+                logger.warning("Claude API returned empty content for assess_market_with_prompt")
+                return ForecastResult(
+                    probability=0.5, reasoning="Empty API response",
+                    parse_failed=True, model_used=model, latency_ms=latency_ms,
+                )
             tokens_used = response.usage.input_tokens + response.usage.output_tokens
 
             forecast = self._parse_response(raw_text)
@@ -290,7 +309,13 @@ class ClaudeForecaster:
                 timeout=60,
             )
             latency_ms = int((time.monotonic() - start) * 1000)
-            raw_text = response.content[0].text
+            raw_text = self._extract_text(response)
+            if raw_text is None:
+                logger.warning("Claude API returned empty content for cross_check_assess")
+                return ForecastResult(
+                    probability=0.5, reasoning="Empty API response",
+                    parse_failed=True, model_used=model, latency_ms=latency_ms,
+                )
             tokens_used = response.usage.input_tokens + response.usage.output_tokens
             forecast = self._parse_response(raw_text)
             forecast.model_used = model

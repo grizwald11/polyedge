@@ -111,6 +111,10 @@ class KellySizer:
         max_total = bankroll * self.settings.trading.max_total_exposure_pct
         remaining = max_total - current_exposure
         if remaining <= 0:
+            logger.info(
+                f"Kelly: exposure cap reached (${current_exposure:.2f} / "
+                f"${max_total:.2f}) — no room for new trades"
+            )
             return 0
         kelly_dollars = min(kelly_dollars, remaining)
 

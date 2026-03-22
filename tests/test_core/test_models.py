@@ -239,9 +239,9 @@ class TestPositionModel:
     def test_cost_basis_includes_fees(self):
         p = Position(
             market_id="x", token_id="t", direction=Direction.BUY_YES,
-            size=100, avg_entry_price=0.40, total_fees=1.50,
+            size=100, avg_entry_price=0.40, total_fees=1.50, buy_fees=1.50,
         )
-        # cost_basis = size * avg_entry + total_fees = 40.0 + 1.50
+        # cost_basis = size * avg_entry + buy_fees = 40.0 + 1.50
         assert abs(p.cost_basis - 41.50) < 0.01
 
     def test_total_fees_default_zero(self):

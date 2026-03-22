@@ -238,8 +238,11 @@ def format_report(results: list[BacktestResult], days: int) -> str:
     total_trades = sum(r.total_trades for r in results)
     total_wins = sum(r.winning_trades for r in results)
     lines.append(f"{'─' * 60}")
-    lines.append(f"OVERALL: {total_trades} trades, ${total_pnl:,.2f} P&L, "
-                 f"{total_wins/total_trades:.1%} win rate" if total_trades > 0 else "OVERALL: No trades")
+    if total_trades > 0:
+        lines.append(f"OVERALL: {total_trades} trades, ${total_pnl:,.2f} P&L, "
+                     f"{total_wins/total_trades:.1%} win rate")
+    else:
+        lines.append("OVERALL: No trades")
     lines.append(f"{'=' * 60}")
 
     return "\n".join(lines)

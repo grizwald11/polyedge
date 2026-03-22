@@ -227,7 +227,7 @@ class NewsResearcher:
                         recency_bonus = 0.05
                         break
 
-        return overlap + recency_bonus
+        return min(1.0, overlap + recency_bonus)
 
     def _deduplicate(self, results: list[NewsResult]) -> list[NewsResult]:
         """Remove near-duplicate results based on title word overlap."""

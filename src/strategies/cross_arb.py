@@ -106,14 +106,120 @@ class CrossArbStrategy:
             reasoning=f"Intra-market arb: YES({market.yes_price:.2f}) + NO({market.no_price:.2f}) = {total:.2f} < 1.00",
         )
 
+    def _is_mutually_exclusive(self, markets: list[Market]) -> bool:
+        """Determine if an event's outcomes are mutually exclusive.
+
+        Mutually exclusive: exactly one outcome resolves YES (e.g., "Who will WIN?")
+        Independent: multiple outcomes can resolve YES (e.g., "Will X visit country?")
+        Temporal: same question with different dates (e.g., "before Apr 1" / "before Jun 1")
+
+        Returns True only for genuinely exclusive events where sum-to-1 applies.
+        """
+        if len(markets) < 2:
+            return False
+
+        questions = [m.question.lower() for m in markets]
+
+        # Temporal cascade detection: same base question with different dates.
+        # These are NOT mutually exclusive (if true for Apr, also true for Jun).
+        # Check if questions differ only in date-like suffixes.
+        import re
+        date_pattern = re.compile(
+            r'(before |after |during |by )'
+            r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|'
+            r'march|april|may|june|july|august|september|october|november|december)'
+            r'[^?]*',
+            re.IGNORECASE,
+        )
+        stripped = set()
+        any_had_dates = False
+        for q in questions:
+            s = date_pattern.sub('', q).strip().rstrip('?').strip()
+            if s != q.strip().rstrip('?').strip():
+                any_had_dates = True
+            stripped.add(s)
+        if len(stripped) == 1 and any_had_dates:
+            # All questions are the same after removing date qualifiers → temporal cascade
+            return False
+
+        # Independent event keywords: each outcome asks "Will [person/thing] [verb]?"
+        # where multiple can independently be true.
+        independent_patterns = [
+            r'\bwill .+ (visit|meet|pardon|run for|leave|attend|receive|release)\b',
+            r'\bwill .+ (become|sign|announce|resign|join|endorse)\b',
+        ]
+        shared_question = all(q == questions[0] for q in questions)
+        if not shared_question:
+            # Different questions per outcome — check for independent verbs
+            for pattern in independent_patterns:
+                if all(re.search(pattern, q) for q in questions):
+                    return False
+
+        # If all markets share the same question text (e.g., "Who will win the race
+        # for TX-35?") and outcomes are different options → likely exclusive.
+        if shared_question:
+            # Shared question with multiple outcomes. Check for exclusive keywords.
+            q = questions[0]
+            exclusive_keywords = [
+                r'\bwho will win\b', r'\bwinner\b', r'\bwhich\b',
+                r'\bwhat will be\b', r'\bwhat will .+ be\b',
+                r'\bhow many\b', r'\bwill .+ be .+ or\b',
+                r'\bcontrol\b.*\band\b',  # "House control X AND Senate control Y"
+                r'\bexactly \d+\b',  # "exactly 1 senator"
+                r'\bfall below\b',  # ranges like "fall below 7.60"
+                r'\bat least \d+\b',
+            ]
+            for pattern in exclusive_keywords:
+                if re.search(pattern, q):
+                    return True
+
+            # Shared question + multiple outcomes with different subtitles
+            # (different people/options) but no exclusive keyword →
+            # assume independent unless proven otherwise.
+            # This is the conservative, safe default.
+            return False
+
+        # Different questions, no independent verb match.
+        # Check for structural exclusivity (e.g., combo markets, range brackets).
+        # For safety, default to non-exclusive for > 2 outcomes.
+        if len(markets) > 2:
+            return False
+
+        # Binary (2 outcomes): likely a true YES/NO pair. Check if they look complementary.
+        if len(markets) == 2:
+            q0, q1 = questions[0], questions[1]
+            # Check if one is the negation or complement of the other
+            if ('democratic' in q0 and 'republican' in q1) or ('republican' in q0 and 'democratic' in q1):
+                return True
+            if ('yes' in q0 and 'no' in q1) or ('no' in q0 and 'yes' in q1):
+                return True
+            # Two differently-phrased questions in same event with 2 outcomes → likely exclusive
+            return True
+
+        return False
+
     def _check_mutual_exclusivity(
         self, markets: list[Market], event_ticker: str
     ) -> list[Signal]:
-        """Type C: Check if sum of YES prices in a multi-outcome event != 100%."""
+        """Type C: Check if sum of YES prices in a multi-outcome event != 100%.
+
+        Only applies to truly mutually exclusive events where exactly one
+        outcome resolves YES. Independent events (where multiple outcomes
+        can be true) are skipped.
+        """
         if len(markets) < 2:
             return []
 
-        yes_sum = sum(m.yes_price for m in markets)
+        if not self._is_mutually_exclusive(markets):
+            return []
+
+        # Skip events with stale/zero prices — these create false edge signals
+        valid_markets = [m for m in markets if m.yes_price > 0]
+        if len(valid_markets) < 2:
+            return []
+
+        yes_sum = sum(m.yes_price for m in valid_markets)
+        markets = valid_markets  # Use only markets with valid prices
 
         # If sum > 1.0 + threshold: sell overpriced outcomes
         # If sum < 1.0 - threshold: buy all outcomes for guaranteed profit
@@ -126,22 +232,23 @@ class CrossArbStrategy:
             # Scale edge proportionally: this single outcome captures only its
             # share of the basket mispricing, preventing Kelly from oversizing.
             single_edge = basket_edge * (cheapest.yes_price / yes_sum) if yes_sum > 0 else basket_edge
-            # Probability estimate: market price is the base, edge is the mispricing
-            signals.append(Signal(
-                strategy=StrategyName.CROSS_ARB,
-                market_id=cheapest.ticker,
-                market_question=cheapest.question,
-                direction=Direction.BUY_YES,
-                edge=single_edge,
-                probability_estimate=min(0.99, cheapest.yes_price + single_edge),
-                market_price=cheapest.yes_price,
-                confidence=0.85,
-                reasoning=(
-                    f"Mutual exclusivity arb: {event_ticker} YES prices sum "
-                    f"to {yes_sum:.2f} < 1.00 ({len(markets)} outcomes), "
-                    f"basket edge={basket_edge:.2f}"
-                ),
-            ))
+            # Only emit signal if scaled edge still exceeds min threshold
+            if single_edge >= self.min_edge:
+                signals.append(Signal(
+                    strategy=StrategyName.CROSS_ARB,
+                    market_id=cheapest.ticker,
+                    market_question=cheapest.question,
+                    direction=Direction.BUY_YES,
+                    edge=single_edge,
+                    probability_estimate=min(0.99, cheapest.yes_price + single_edge),
+                    market_price=cheapest.yes_price,
+                    confidence=0.85,
+                    reasoning=(
+                        f"Mutual exclusivity arb: {event_ticker} YES prices sum "
+                        f"to {yes_sum:.2f} < 1.00 ({len(markets)} outcomes), "
+                        f"basket edge={basket_edge:.2f}"
+                    ),
+                ))
 
         elif yes_sum > 1.0 + self.min_edge:
             basket_edge = yes_sum - 1.0
@@ -149,22 +256,22 @@ class CrossArbStrategy:
             most_expensive = max(markets, key=lambda m: m.yes_price)
             # Scale edge: this outcome's share of overpricing
             single_edge = basket_edge * (most_expensive.yes_price / yes_sum) if yes_sum > 0 else basket_edge
-            # Our probability that NO wins = 1 - most_expensive.yes_price
-            signals.append(Signal(
-                strategy=StrategyName.CROSS_ARB,
-                market_id=most_expensive.ticker,
-                market_question=most_expensive.question,
-                direction=Direction.BUY_NO,
-                edge=single_edge,
-                probability_estimate=min(0.99, most_expensive.no_price + single_edge),
-                market_price=most_expensive.no_price,
-                confidence=0.85,
-                reasoning=(
-                    f"Mutual exclusivity arb: {event_ticker} YES prices sum "
-                    f"to {yes_sum:.2f} > 1.00 ({len(markets)} outcomes), "
-                    f"basket edge={basket_edge:.2f}"
-                ),
-            ))
+            if single_edge >= self.min_edge:
+                signals.append(Signal(
+                    strategy=StrategyName.CROSS_ARB,
+                    market_id=most_expensive.ticker,
+                    market_question=most_expensive.question,
+                    direction=Direction.BUY_NO,
+                    edge=single_edge,
+                    probability_estimate=min(0.99, most_expensive.no_price + single_edge),
+                    market_price=most_expensive.no_price,
+                    confidence=0.85,
+                    reasoning=(
+                        f"Mutual exclusivity arb: {event_ticker} YES prices sum "
+                        f"to {yes_sum:.2f} > 1.00 ({len(markets)} outcomes), "
+                        f"basket edge={basket_edge:.2f}"
+                    ),
+                ))
 
         return signals
 

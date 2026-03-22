@@ -15,12 +15,16 @@ from src.data.market_graph import MarketGraph
 from src.strategies.cross_arb import CrossArbStrategy
 
 
-def _make_market(ticker, yes_price, no_price=None, event_ticker=""):
+def _make_market(ticker, yes_price, no_price=None, event_ticker="", question=None):
     if no_price is None:
         no_price = 1.0 - yes_price
+    # Default to a mutually-exclusive question when event_ticker is set,
+    # so Type C mutual-exclusivity tests work correctly.
+    if question is None:
+        question = f"Who will win {event_ticker}?" if event_ticker else f"Market {ticker}"
     return Market(
         ticker=ticker,
-        question=f"Market {ticker}",
+        question=question,
         event_ticker=event_ticker,
         tokens=[
             MarketToken(token_id=f"{ticker}_yes", outcome="Yes", price=yes_price),
@@ -342,12 +346,10 @@ class TestTypeCAdditionalEdgeCases:
         """All markets in event have 0 YES price — no crash."""
         strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
         markets = [
-            _make_market("Z1", yes_price=0.00),
-            _make_market("Z2", yes_price=0.00),
-            _make_market("Z3", yes_price=0.00),
+            _make_market("Z1", yes_price=0.00, event_ticker="ZERO-EVENT"),
+            _make_market("Z2", yes_price=0.00, event_ticker="ZERO-EVENT"),
+            _make_market("Z3", yes_price=0.00, event_ticker="ZERO-EVENT"),
         ]
-        for m in markets:
-            m.event_ticker = "ZERO-EVENT"
         signals = strategy._check_mutual_exclusivity(markets, "ZERO-EVENT")
         # Sum = 0 < 1 − min_edge → underpriced, edge calc shouldn't crash
         for s in signals:
@@ -358,8 +360,7 @@ class TestTypeCAdditionalEdgeCases:
         strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
         markets = []
         for i in range(10):
-            m = _make_market(f"BIG-{i}", yes_price=0.08)
-            m.event_ticker = "BIG-EVENT"
+            m = _make_market(f"BIG-{i}", yes_price=0.08, event_ticker="BIG-EVENT")
             markets.append(m)
         # Sum = 10 * 0.08 = 0.80 < 1.0 − 0.02 = 0.98 → underpriced
         signals = strategy._check_mutual_exclusivity(markets, "BIG-EVENT")
@@ -371,10 +372,8 @@ class TestTypeCAdditionalEdgeCases:
     def test_duplicate_markets_no_double_count(self, mock_graph, mock_forecaster, tmp_db):
         """Duplicate tickers shouldn't cause issues."""
         strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
-        m1 = _make_market("DUP-A", yes_price=0.40)
-        m2 = _make_market("DUP-B", yes_price=0.40)
-        m1.event_ticker = "DUP-EVENT"
-        m2.event_ticker = "DUP-EVENT"
+        m1 = _make_market("DUP-A", yes_price=0.40, event_ticker="DUP-EVENT")
+        m2 = _make_market("DUP-B", yes_price=0.40, event_ticker="DUP-EVENT")
         signals = strategy._check_mutual_exclusivity([m1, m2], "DUP-EVENT")
         # Sum = 0.80 < 0.98 → underpriced
         assert len(signals) == 1
@@ -383,9 +382,9 @@ class TestTypeCAdditionalEdgeCases:
         """Overpriced event should sell the most expensive outcome."""
         strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
         markets = [
-            _make_market("OVER-A", yes_price=0.60),
-            _make_market("OVER-B", yes_price=0.30),
-            _make_market("OVER-C", yes_price=0.15),
+            _make_market("OVER-A", yes_price=0.60, event_ticker="OVER-EVENT"),
+            _make_market("OVER-B", yes_price=0.30, event_ticker="OVER-EVENT"),
+            _make_market("OVER-C", yes_price=0.15, event_ticker="OVER-EVENT"),
         ]
         # Sum = 1.05 > 1.02
         signals = strategy._check_mutual_exclusivity(markets, "OVER-EVENT")

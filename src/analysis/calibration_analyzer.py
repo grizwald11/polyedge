@@ -20,7 +20,7 @@ class CalibrationBin:
     """One bin in a calibration curve."""
     bin_label: str
     predicted_avg: float
-    actual_avg: float
+    actual_avg: Optional[float]
     count: int
 
 
@@ -212,7 +212,7 @@ class CalibrationAnalyzer:
                 actual_avg = sum(float(r["actual_outcome"]) for r in in_bin) / len(in_bin)
             else:
                 pred_avg = (lo + hi) / 2
-                actual_avg = 0.0
+                actual_avg = None
 
             bins.append(CalibrationBin(
                 bin_label=f"{lo:.0%}-{hi:.0%}",

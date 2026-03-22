@@ -18,7 +18,10 @@ from datetime import datetime, timezone
 from src.config import load_settings
 from src.core.kalshi_client import KalshiClient
 from src.core.market_discovery import MarketDiscovery
-from src.core.models import Direction, Order, OrderStatus, OrderType, Side
+from src.core.models import (
+    Direction, Market, MarketToken, Order, OrderStatus, OrderType, Side,
+    StrategyName, TokenOutcome,
+)
 from src.data.market_scanner import MarketScanner
 from src.storage.database import Database
 from src.analysis.claude_forecaster import ClaudeForecaster
@@ -169,6 +172,16 @@ async def scan_and_trade(
                     yes_price = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else max(yes_bid, yes_ask)
                     no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
                     position_manager.update_price(ticker, yes_price, no_price)
+                    # Build minimal Market so exit logic can process this position
+                    minimal_market = Market(
+                        ticker=ticker,
+                        question=raw.get("title", ticker),
+                        tokens=[
+                            MarketToken(token_id=f"{ticker}_yes", outcome=TokenOutcome.YES, price=yes_price),
+                            MarketToken(token_id=f"{ticker}_no", outcome=TokenOutcome.NO, price=no_price),
+                        ],
+                    )
+                    markets.append(minimal_market)
             except Exception as e:
                 logger.debug(f"Failed to fetch price for position market {ticker}: {e}")
 
@@ -180,6 +193,12 @@ async def scan_and_trade(
     for position, exit_reason in exit_candidates:
         market = market_lookup.get(position.market_id)
         if market is None:
+            continue
+
+        # Dedup: skip if we already sold this market recently (prevents duplicate
+        # exits from overlapping scan cycles or pm2 restart races)
+        if scanner.db.has_recent_exit(position.market_id):
+            logger.info(f"Skipping exit for {position.market_id}: recent exit exists (dedup)")
             continue
 
         # Determine exit price from current market
@@ -208,6 +227,9 @@ async def scan_and_trade(
         )
 
         result = await order_router.route_order(exit_order)
+        if result is not None and result.success and result.trade is None:
+            # Resting live order — register with fill tracker for polling
+            fill_tracker.track(exit_order)
         if result is not None and result.success and result.trade:
             position_manager.update_from_trade(result.trade)
             # Record cooldown to prevent immediate re-entry
@@ -282,19 +304,41 @@ async def scan_and_trade(
             )
         return
 
-    # Sort by edge descending — best opportunities first
-    all_signals.sort(key=lambda s: abs(s.edge), reverse=True)
+    # Separate obvious_no from other signals so they get their own trade slot.
+    # Obvious_no has tiny edges (1-2%) and would always lose to AI/arb signals
+    # (5%+) in a single sorted list, never getting executed.
+    edge_signals = [s for s in all_signals if s.strategy != StrategyName.OBVIOUS_NO]
+    obvious_no_signals = [s for s in all_signals if s.strategy == StrategyName.OBVIOUS_NO]
 
-    logger.info(f"Processing {len(all_signals)} signals ({len(ai_signals)} AI, {len(no_signals)} NO)")
+    # Sort each pool by edge descending
+    edge_signals.sort(key=lambda s: abs(s.edge), reverse=True)
+    obvious_no_signals.sort(key=lambda s: abs(s.edge), reverse=True)
+
+    # Reserve 1 slot for obvious_no if any exist, rest for edge strategies
+    max_trades = settings.trading.max_trades_per_cycle
+    max_edge_trades = max_trades - 1 if obvious_no_signals else max_trades
+
+    # Interleave: edge signals first, then obvious_no
+    ordered_signals = edge_signals + obvious_no_signals
+
+    logger.info(
+        f"Processing {len(all_signals)} signals "
+        f"({len(ai_signals)} AI, {len(no_signals)} NO, "
+        f"{len(edge_signals)} edge, {len(obvious_no_signals)} obvious_no)"
+    )
 
     trades_executed = 0
-    max_trades = settings.trading.max_trades_per_cycle
+    edge_trades = 0
     acted_markets: set[str] = set()  # Dedup: one trade per market per cycle
-    for signal in all_signals:
+    for signal in ordered_signals:
         # Enforce max trades per cycle to prevent overtrading
         if trades_executed >= max_trades:
             logger.info(f"Max trades per cycle ({max_trades}) reached — deferring remaining signals")
             break
+        # Per-pool limit: edge strategies share max_edge_trades slots
+        is_obvious_no = signal.strategy == StrategyName.OBVIOUS_NO
+        if not is_obvious_no and edge_trades >= max_edge_trades:
+            continue  # Skip remaining edge signals, move to obvious_no pool
 
         # Dedup: skip if we already acted on this market this cycle
         if signal.market_id in acted_markets:
@@ -357,6 +401,9 @@ async def scan_and_trade(
 
         # Route order
         result = await order_router.route_order(order)
+        if result is not None and result.success and result.trade is None:
+            # Resting live order — register with fill tracker for polling
+            fill_tracker.track(order)
         if result is not None and result.success and result.trade:
             # Update position tracker
             position_manager.update_from_trade(result.trade, market.question)
@@ -398,6 +445,8 @@ async def scan_and_trade(
                     logger.warning(f"Failed to send trade alert for {signal.market_id}: {e}")
 
             trades_executed += 1
+            if not is_obvious_no:
+                edge_trades += 1
             acted_markets.add(signal.market_id)
 
     logger.info(
@@ -628,8 +677,8 @@ async def main():
 
     # Execution
     order_builder = OrderBuilder(settings)
-    order_router = OrderRouter(settings, kalshi, db)
     position_manager = PositionManager(db, settings.trading.bankroll)
+    order_router = OrderRouter(settings, kalshi, db, position_manager=position_manager)
     fill_tracker = FillTracker(kalshi, db, poll_timeout=settings.execution.order_poll_timeout_seconds)
 
     try:

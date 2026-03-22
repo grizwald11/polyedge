@@ -51,7 +51,7 @@ def ensemble_forecast(
     """
     # Adaptive weighting: when Claude's confidence interval is wide,
     # trust the market more. When Claude is very confident, trust Claude more.
-    ci_width = claude_forecast.confidence_high - claude_forecast.confidence_low
+    ci_width = abs(claude_forecast.confidence_high - claude_forecast.confidence_low)
     # Scale claude_weight down as CI widens: at CI=0 → full weight, at CI=1.0 → max reduction
     # Penalty scales linearly across the full 0-1 range (not capped at 0.5)
     ci_penalty = min(1.0, max(0.0, ci_width))  # 0 to 1 as CI goes from 0 to 1.0
@@ -70,7 +70,6 @@ def ensemble_forecast(
     edge = final_prob - market_price
 
     # Confidence based on Claude's CI width (narrow CI = high confidence)
-    ci_width = claude_forecast.confidence_high - claude_forecast.confidence_low
     confidence = max(0.1, min(0.95, 1.0 - ci_width))
 
     return EnsembleForecast(
@@ -140,7 +139,7 @@ def multi_model_ensemble(
     edge = final_prob - market_price
 
     # Confidence: average of individual CIs, penalize disagreement
-    ci_widths = [f.confidence_high - f.confidence_low for f in forecasts]
+    ci_widths = [abs(f.confidence_high - f.confidence_low) for f in forecasts]
     avg_ci = sum(ci_widths) / len(ci_widths) if ci_widths else 0.5
 
     # Disagreement penalty: std dev of probability estimates
