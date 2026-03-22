@@ -178,7 +178,11 @@ class NewsResearcher:
                 data = response.json()
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (400, 401, 403):
-                logger.warning(f"Serper API disabled for this session (credits/auth): {e.response.status_code}")
+                try:
+                    detail = e.response.json().get("message", str(e.response.status_code))
+                except Exception:
+                    detail = str(e.response.status_code)
+                logger.warning(f"Serper API disabled for this session: {detail}")
                 self._serper_disabled = True
             else:
                 logger.warning(f"Serper search failed for '{query}': {e}")

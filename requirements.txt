@@ -39,7 +39,7 @@ jinja2>=3.1
 
 # News / Search
 feedparser>=6.0
-duckduckgo-search>=8.0
+ddgs>=9.0
 
 # Phase 2+ optional dependencies (install when needed):
 # chromadb>=0.5.0

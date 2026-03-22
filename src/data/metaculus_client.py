@@ -4,13 +4,17 @@ Searches the Metaculus API for questions similar to active markets
 and returns community probability estimates. Metaculus forecasters
 are historically well-calibrated, making these valuable reference points.
 
-No authentication needed (public read API).
+Requires authentication via API token. The API currently does not
+return community predictions through search/list endpoints (the
+aggregations.recency_weighted.latest field is always null). When this
+is detected, the client disables itself for the session.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -29,7 +33,66 @@ class MetaculusClient:
     def __init__(self, ttl_seconds: int = 1800, api_token: str | None = None):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
         self._api_token = api_token
-        self._disabled = False  # Set True after persistent auth failures
+        self._disabled = False
+        self._probe_done = False  # Have we checked if API returns predictions?
+
+    async def _probe_api(self) -> bool:
+        """One-time check whether the Metaculus API actually returns predictions.
+
+        Queries a well-established question. If the API returns questions but
+        no prediction data, predictions are unavailable and we disable.
+        Returns True if predictions are available.
+        """
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        }
+        if self._api_token:
+            headers["Authorization"] = f"Token {self._api_token}"
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    METACULUS_API_URL,
+                    params={
+                        "search": "president election",
+                        "status": "open",
+                        "type": "forecast",
+                        "limit": 3,
+                        "order_by": "-forecasters_count",
+                    },
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                logger.info(
+                    "Metaculus API requires authentication — disabling"
+                    + (" (set METACULUS_API_TOKEN)" if not self._api_token else "")
+                )
+            else:
+                logger.info(f"Metaculus API probe failed ({e.response.status_code}) — disabling")
+            return False
+        except httpx.HTTPError as e:
+            logger.info(f"Metaculus API probe failed: {e} — disabling")
+            return False
+
+        questions = data.get("results", [])
+        if not questions:
+            logger.info("Metaculus API returned no questions — disabling")
+            return False
+
+        # Check if any question has actual prediction data
+        for q in questions:
+            if self._extract_prediction(q) is not None:
+                return True
+
+        logger.info(
+            "Metaculus API no longer returns prediction data (aggregations are null) — disabling. "
+            "Community forecasts from Manifold Markets will be used instead."
+        )
+        return False
 
     async def search_questions(self, query: str) -> list[dict]:
         """Search Metaculus for open forecast questions matching a query.
@@ -39,6 +102,13 @@ class MetaculusClient:
         """
         if self._disabled:
             return []
+
+        # One-time probe: check if predictions are actually available
+        if not self._probe_done:
+            self._probe_done = True
+            if not await self._probe_api():
+                self._disabled = True
+                return []
 
         cache_key = f"metaculus_search_{query[:80]}"
         cached = self._cache.get(cache_key)
@@ -67,11 +137,7 @@ class MetaculusClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 403:
-                logger.warning("Metaculus API requires authentication — disabling for this session")
-                self._disabled = True
-            else:
-                logger.warning(f"Metaculus API request failed: {e}")
+            logger.warning(f"Metaculus API request failed: {e}")
             return []
         except httpx.HTTPError as e:
             logger.warning(f"Metaculus API request failed: {e}")
@@ -93,12 +159,6 @@ class MetaculusClient:
                 "url": q.get("url", ""),
                 "id": q.get("id"),
             })
-
-        # If API returned questions but none had predictions, the API
-        # is likely hiding prediction data — disable to avoid noise
-        if questions and not results:
-            logger.info("Metaculus API returned questions but no predictions — disabling for this session")
-            self._disabled = True
 
         self._cache.set(cache_key, results)
         return results
