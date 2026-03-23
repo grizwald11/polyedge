@@ -239,7 +239,10 @@ class Database:
         conn.row_factory = sqlite3.Row
         if self.wal_mode:
             conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        # FK enforcement disabled: v6 migration changed markets to composite PK
+        # (ticker, platform) but child tables still reference single-column ticker.
+        # App logic enforces referential integrity.
+        conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
         return conn
@@ -380,6 +383,8 @@ class Database:
         market_cols = {row[1] for row in conn.execute("PRAGMA table_info(markets)").fetchall()}
         if "platform" not in market_cols:
             conn.executescript("""
+                PRAGMA foreign_keys=OFF;
+                DROP TABLE IF EXISTS markets_new;
                 CREATE TABLE markets_new (
                     ticker TEXT NOT NULL,
                     platform TEXT DEFAULT 'kalshi',
@@ -412,6 +417,7 @@ class Database:
                 FROM markets;
                 DROP TABLE markets;
                 ALTER TABLE markets_new RENAME TO markets;
+                PRAGMA foreign_keys=ON;
             """)
             logger.info("Migration v6: migrated markets to composite PK (ticker, platform)")
 
