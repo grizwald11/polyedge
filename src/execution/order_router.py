@@ -96,14 +96,52 @@ class OrderRouter:
         else:
             return await self._live_fill(order)
 
+    def _simulate_slippage(self, order: Order) -> tuple[bool, float]:
+        """Simulate realistic fill behavior for paper trading.
+
+        Returns (filled, fill_price). ~15% of limit orders miss entirely.
+        Fills include 0-1 cent adverse slippage.
+        Uses deterministic hash for reproducibility.
+        """
+        import hashlib
+        # Deterministic pseudo-random based on order details
+        seed = hashlib.md5(
+            f"{order.market_id}:{order.price}:{order.size}:{order.side.value}".encode()
+        ).hexdigest()
+        rand_val = int(seed[:8], 16) / 0xFFFFFFFF  # 0.0 to 1.0
+
+        # 15% chance limit order doesn't fill
+        if rand_val < 0.15:
+            return False, order.price
+
+        # Adverse slippage: 0-1 cent based on order characteristics
+        slippage_rand = int(seed[8:16], 16) / 0xFFFFFFFF
+        slippage = slippage_rand * 0.01  # 0 to 1 cent
+        if order.side == Side.BUY:
+            fill_price = min(0.99, order.price + slippage)
+        else:
+            fill_price = max(0.01, order.price - slippage)
+
+        return True, round(fill_price, 2)
+
     async def _paper_fill(self, order: Order) -> OrderResult:
         """Simulate a fill in paper trading mode."""
         now = datetime.now(timezone.utc)
 
-        # Simulate fill at order price
+        # Simulate realistic fill with possible slippage/miss
+        filled, fill_price = self._simulate_slippage(order)
+        if not filled:
+            order.status = OrderStatus.CANCELLED
+            logger.info(
+                f"[PAPER] Missed fill: {order.side.value} {int(order.size)}x "
+                f"{order.token_id} @ ${order.price:.2f} (simulated no-fill)"
+            )
+            self._log_order(order)
+            return OrderResult(success=False, order=order, error="Paper order missed fill")
+
         order.status = OrderStatus.FILLED
         order.filled_at = now
-        order.fill_price = order.price
+        order.fill_price = fill_price
 
         # Calculate fee (platform-aware)
         if order.platform == Platform.POLYMARKET:
@@ -116,14 +154,14 @@ class OrderRouter:
                 fee_cents = kalshi_taker_fee(int(order.size), price_cents)
             fee_dollars = fee_cents / 100.0
 
-        # Create trade record
+        # Create trade record (use fill_price for accurate P&L)
         trade = Trade(
             order_id=order.id,
             market_id=order.market_id,
             platform=order.platform,
             token_id=order.token_id,
             side=order.side,
-            price=order.price,
+            price=fill_price,
             size=order.size,
             fee=fee_dollars,
             realized_pnl=0.0,  # P&L calculated on position close

@@ -172,9 +172,18 @@ async def scan_and_trade(
 
     # Update unrealized P&L with latest market prices
     scanned_tickers = set()
+    pos_tickers = {p.market_id for p in position_manager.get_all_positions()}
+    positions_updated_from_scan = 0
     for market in markets:
         position_manager.update_price(market.ticker, market.yes_price, market.no_price)
         scanned_tickers.add(market.ticker)
+        if market.ticker in pos_tickers:
+            positions_updated_from_scan += 1
+    if pos_tickers:
+        logger.info(
+            f"Price update: {positions_updated_from_scan}/{len(pos_tickers)} positions "
+            f"updated from scan ({len(scanned_tickers)} markets scanned)"
+        )
 
     # Fetch prices for open positions not covered by the scan.
     # This prevents $0.00 unrealized P&L on positions whose markets
@@ -184,7 +193,7 @@ async def scan_and_trade(
         if p.market_id not in scanned_tickers
     ]
     if missing_positions:
-        logger.debug(f"Fetching prices for {len(missing_positions)} position markets not in scan")
+        logger.info(f"Fetching prices for {len(missing_positions)} position markets not in scan")
         for pos in missing_positions:
             ticker = pos.market_id
             pos_platform = getattr(pos, "platform", Platform.KALSHI)
@@ -217,12 +226,22 @@ async def scan_and_trade(
                         )
                         markets.append(minimal_market)
             except Exception as e:
-                logger.debug(f"Failed to fetch price for position market {ticker}: {e}")
+                logger.warning(f"Failed to fetch price for position market {ticker}: {e}")
 
     # Build market lookup (used by both exit logic and signal processing)
     market_lookup = {m.ticker: m for m in markets}
 
     # Process exit candidates — close positions that hit stop-loss, time limit, or lost edge
+    # Log position state for debugging
+    all_pos = position_manager.get_all_positions()
+    if all_pos:
+        pos_with_market = sum(1 for p in all_pos if p.market_id in market_lookup)
+        pos_with_pnl = sum(1 for p in all_pos if p.unrealized_pnl != 0)
+        logger.info(
+            f"Exit scan: {len(all_pos)} positions, {pos_with_market} have market data, "
+            f"{pos_with_pnl} have non-zero P&L, "
+            f"total unrealized: ${position_manager.get_total_unrealized_pnl():.2f}"
+        )
     exit_candidates = position_manager.get_exit_candidates(markets=market_lookup)
     for position, exit_reason in exit_candidates:
         market = market_lookup.get(position.market_id)
@@ -297,7 +316,7 @@ async def scan_and_trade(
     no_signals: list = []
 
     try:
-        ai_signals = await ai_strategy.scan_for_opportunities(markets[:30])
+        ai_signals = await ai_strategy.scan_for_opportunities(markets)
         all_signals.extend(ai_signals)
     except Exception as e:
         logger.error(f"AI probability strategy failed: {e}")
@@ -357,9 +376,10 @@ async def scan_and_trade(
     edge_signals.sort(key=lambda s: abs(s.edge), reverse=True)
     obvious_no_signals.sort(key=lambda s: abs(s.edge), reverse=True)
 
-    # Reserve 1 slot for obvious_no if any exist, rest for edge strategies
+    # Reserve up to 2 slots for obvious_no — low-risk diversification
     max_trades = settings.trading.max_trades_per_cycle
-    max_edge_trades = max_trades - 1 if obvious_no_signals else max_trades
+    no_slots = min(2, len(obvious_no_signals)) if obvious_no_signals else 0
+    max_edge_trades = max_trades - no_slots
 
     # Interleave: edge signals first, then obvious_no
     ordered_signals = edge_signals + obvious_no_signals
@@ -861,6 +881,7 @@ async def main():
             calibration_tracker=calibration,
             calibration_analyzer=calibration_analyzer,
             circuit_breaker=circuit_breaker,
+            bankroll=settings.trading.bankroll,
         ))
         logger.info("Dashboard starting at http://0.0.0.0:8080")
     except ImportError:

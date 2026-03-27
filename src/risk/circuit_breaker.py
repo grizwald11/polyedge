@@ -62,9 +62,10 @@ class CircuitBreaker:
             else:
                 return False
 
-        # Check daily loss limit (realized + unrealized)
+        # Check daily loss limit (realized + discounted unrealized)
+        # Unrealized losses are temporary — weight at 30% to avoid false halts
         daily_pnl = self.db.get_daily_pnl()
-        daily_pnl += unrealized_pnl  # Include open position losses
+        daily_pnl += unrealized_pnl * 0.3
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
 
         if daily_pnl < -daily_limit:
@@ -179,11 +180,15 @@ class CircuitBreaker:
         )
 
     def _update_consecutive_losses(self):
-        """Update consecutive losing days from database."""
+        """Check consecutive losing day state (updated at day boundary via record_daily_result)."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if self._last_day_checked == today:
             return  # Already checked today
 
         self._last_day_checked = today
-        # Consecutive loss tracking is maintained via record_daily_result()
-        # called at end of each trading day by the orchestrator
+        # State is maintained via record_daily_result() called at day boundary.
+        # If we missed a day boundary (e.g., restart), check yesterday's P&L.
+        yesterday_pnl = self.db.get_daily_pnl()
+        if yesterday_pnl != 0.0 and self._consecutive_losing_days == 0 and yesterday_pnl < 0:
+            logger.info(f"Detected unreported losing day (P&L=${yesterday_pnl:.2f})")
+            self.record_daily_result(yesterday_pnl)

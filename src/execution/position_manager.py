@@ -15,12 +15,13 @@ from src.core.models import (
 from src.storage.database import Database
 
 # Exit thresholds
-DEFAULT_STOP_LOSS_PCT = 0.50       # Exit if unrealized loss > 50% of cost basis
-DEFAULT_MAX_HOLD_DAYS = 30         # Exit if held > 30 days
-DEFAULT_EDGE_GONE_THRESHOLD = 0.01 # Exit if remaining edge < 1%
-DEFAULT_TRAILING_STOP_ACTIVATE = 0.20  # Activate trailing stop after 20% gain
+DEFAULT_STOP_LOSS_PCT = 0.30       # Exit if unrealized loss > 30% of cost basis
+DEFAULT_MAX_HOLD_DAYS = 21         # Exit if held > 21 days — frees capital faster
+DEFAULT_EDGE_GONE_THRESHOLD = 0.20 # Exit if remaining edge < 20% of original
+DEFAULT_TRAILING_STOP_ACTIVATE = 0.12  # Activate trailing stop after 12% gain
 DEFAULT_TRAILING_STOP_DISTANCE = 0.50  # Trail 50% of peak gain (e.g., peak +30% → exit at +15%)
 DEFAULT_TAKE_PROFIT_PCT = 0.80     # Take profit at 80% of max theoretical gain
+DEFAULT_CAPITAL_ROTATION_EDGE = 0.50  # When exposure >50%, exit profitable positions with <50% remaining edge
 
 if __name__ != "__main__":
     from typing import TYPE_CHECKING
@@ -283,6 +284,17 @@ class PositionManager:
             if remaining_edge < edge_gone_threshold:
                 return True, f"edge_gone: remaining edge {remaining_edge:.1%} < {edge_gone_threshold:.1%}"
 
+        # 6. Capital rotation: when portfolio is crowded, exit profitable positions
+        #    where most of the edge has been captured to free capital for new trades
+        if market is not None and position.unrealized_pnl > 0:
+            exposure_pct = self.get_total_exposure_pct()
+            remaining = self._calculate_remaining_edge(position, market)
+            if exposure_pct > 0.50 and remaining < DEFAULT_CAPITAL_ROTATION_EDGE:
+                return True, (
+                    f"capital_rotation: edge {remaining:.1%} < {DEFAULT_CAPITAL_ROTATION_EDGE:.0%} "
+                    f"threshold with portfolio at {exposure_pct:.0%} exposure"
+                )
+
         return False, ""
 
     def get_exit_candidates(
@@ -333,10 +345,10 @@ class PositionManager:
         current_edge = (1.0 - current) / current
         if entry_edge <= 0:
             return 0.0
-        # Smooth exit curve: ratio squared creates gradual decline instead of
-        # a hard cliff. Values below ~0.35 of original edge trigger exit.
+        # Linear ratio: exit when remaining edge drops below threshold fraction
+        # of original edge. Less aggressive than squared — holds winners longer.
         ratio = max(0.0, min(1.0, current_edge / entry_edge))
-        return ratio * ratio  # 0.6 ratio → 0.36 (exit), 0.7 ratio → 0.49 (hold)
+        return ratio
 
     async def sync_with_kalshi(self, kalshi, auto_correct: bool = True) -> int:
         """Reconcile local positions against Kalshi API positions.

@@ -196,21 +196,21 @@ class TestCalibrationMultiplier:
         sizer.update_calibration_multiplier(0.08)
         assert sizer.calibration_multiplier == 1.0
 
-    def test_fair_brier_reduces_to_75(self, sizer):
-        sizer.update_calibration_multiplier(0.25)
-        assert sizer.calibration_multiplier == 0.75
-
-    def test_poor_brier_reduces_to_50(self, sizer):
-        sizer.update_calibration_multiplier(0.35)
+    def test_fair_brier_reduces_to_50(self, sizer):
+        sizer.update_calibration_multiplier(0.20)
         assert sizer.calibration_multiplier == 0.50
 
-    def test_terrible_brier_reduces_to_25(self, sizer):
-        sizer.update_calibration_multiplier(0.50)
+    def test_poor_brier_reduces_to_25(self, sizer):
+        sizer.update_calibration_multiplier(0.25)
         assert sizer.calibration_multiplier == 0.25
+
+    def test_terrible_brier_reduces_to_10(self, sizer):
+        sizer.update_calibration_multiplier(0.50)
+        assert sizer.calibration_multiplier == 0.10
 
     def test_none_brier_resets_to_full(self, sizer):
         sizer.update_calibration_multiplier(0.50)
-        assert sizer.calibration_multiplier == 0.25
+        assert sizer.calibration_multiplier == 0.10
         sizer.update_calibration_multiplier(None)
         assert sizer.calibration_multiplier == 1.0
 

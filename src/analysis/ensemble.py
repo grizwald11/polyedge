@@ -49,13 +49,22 @@ def ensemble_forecast(
     Returns:
         EnsembleForecast with final combined probability
     """
-    # Adaptive weighting: when Claude's confidence interval is wide,
-    # trust the market more. When Claude is very confident, trust Claude more.
+    # Adaptive weighting based on CI width AND divergence from market.
     ci_width = abs(claude_forecast.confidence_high - claude_forecast.confidence_low)
-    # Scale claude_weight down as CI widens: at CI=0 → full weight, at CI=1.0 → max reduction
-    # Penalty scales linearly across the full 0-1 range (not capped at 0.5)
-    ci_penalty = min(1.0, max(0.0, ci_width))  # 0 to 1 as CI goes from 0 to 1.0
-    effective_claude_weight = claude_weight * (1.0 - ci_penalty * 0.5)  # At most 50% reduction
+    ci_penalty = min(1.0, max(0.0, ci_width))
+    effective_claude_weight = claude_weight * (1.0 - ci_penalty * 0.5)
+
+    # Divergence-based adjustment: when Claude strongly disagrees with market,
+    # the market likely hasn't repriced — trust Claude more. When marginal
+    # disagreement, be more humble.
+    divergence = abs(claude_forecast.probability - market_price)
+    if divergence > 0.20:
+        # Strong divergence: boost Claude weight (the edge IS the disagreement)
+        effective_claude_weight = min(0.95, effective_claude_weight + 0.07)
+    elif divergence < 0.05:
+        # Marginal call: reduce Claude weight, trust market more
+        effective_claude_weight = max(0.50, effective_claude_weight - 0.10)
+
     market_weight = 1.0 - effective_claude_weight
 
     # Weighted average

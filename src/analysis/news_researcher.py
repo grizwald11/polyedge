@@ -20,10 +20,29 @@ logger = logging.getLogger(__name__)
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
 
 MAX_RESULTS_PER_QUERY = 5
-MAX_QUERIES = 3
+MAX_QUERIES = 4
 MAX_CONTEXT_CHARS = 3200  # ~800 tokens
 MAX_RELEVANT_RESULTS = 5
 DEDUP_SIMILARITY_THRESHOLD = 0.7
+
+# Common abbreviation → expanded form for broader news coverage
+_ENTITY_EXPANSIONS = [
+    ("Fed ", "Federal Reserve "),
+    ("DHS ", "Department of Homeland Security "),
+    ("DOJ ", "Department of Justice "),
+    ("GDP ", "gross domestic product "),
+    ("CPI ", "consumer price index inflation "),
+    ("SCOTUS ", "Supreme Court "),
+    ("NATO ", "North Atlantic Treaty Organization "),
+    ("EU ", "European Union "),
+    ("UN ", "United Nations "),
+    ("WHO ", "World Health Organization "),
+    ("SEC ", "Securities and Exchange Commission "),
+    ("EPA ", "Environmental Protection Agency "),
+    ("FBI ", "Federal Bureau of Investigation "),
+    ("CIA ", "Central Intelligence Agency "),
+    ("DNI ", "Director of National Intelligence "),
+]
 
 # Check if ddgs (or legacy duckduckgo_search) is available
 try:
@@ -98,6 +117,16 @@ class NewsResearcher:
             entity_query = " ".join(entities[:3])
             if entity_query.lower() != cleaned.lower():
                 queries.append(entity_query)
+
+        # Add broader context query — expand key terms for wider coverage
+        # e.g., "Fed cut rates" → "Federal Reserve interest rate decision"
+        broad = cleaned
+        for short, expanded in _ENTITY_EXPANSIONS:
+            if short in broad:
+                broad = broad.replace(short, expanded, 1)
+                break
+        if broad != cleaned:
+            queries.append(f"{broad} {current_year}")
 
         return queries[:MAX_QUERIES]
 

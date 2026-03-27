@@ -17,7 +17,7 @@ class TestGenerateQueries:
             "Will DHS funding bill become law before Apr 1, 2026?"
         )
         assert len(queries) >= 2
-        assert len(queries) <= 3
+        assert len(queries) <= 4
         assert "Will" not in queries[0]
         assert "DHS" in queries[0]
 

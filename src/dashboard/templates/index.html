@@ -43,7 +43,7 @@
             {% set exp_pct = (exposure|default(0) / summary.bankroll|default(500) * 100) if summary.bankroll|default(500) > 0 else 0 %}
             <div class="progress-bar {% if exp_pct > 35 %}progress-danger{% elif exp_pct > 25 %}progress-warning{% endif %}" style="width: {{ exp_pct|int }}%"></div>
         </div>
-        <div class="card-detail">{{ "%.1f"|format(exp_pct) }}% of bankroll (limit: 40%)</div>
+        <div class="card-detail">{{ "%.1f"|format(exp_pct) }}% of bankroll (limit: 60%)</div>
     </div>
     <div class="card">
         <div class="card-label">Open Positions</div>

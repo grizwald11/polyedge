@@ -15,11 +15,12 @@ logger = logging.getLogger(__name__)
 
 
 # Brier score thresholds for calibration-based sizing
+# Note: 0.25 = random guessing — must reduce aggressively at/above that
 BRIER_EXCELLENT = 0.10  # Full sizing
-BRIER_GOOD = 0.20       # Full sizing
-BRIER_FAIR = 0.30       # Reduce to 75%
-BRIER_POOR = 0.40       # Reduce to 50%
-# Above 0.40 → reduce to 25%
+BRIER_GOOD = 0.18       # Full sizing
+BRIER_FAIR = 0.22       # Reduce to 50%
+BRIER_POOR = 0.28       # Reduce to 25%
+# Above 0.28 → reduce to 10%
 
 
 class KellySizer:
@@ -123,6 +124,11 @@ class KellySizer:
         cost_price = order_price if order_price and order_price > 0 else market_price
         contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
 
+        # Hard check: ensure contracts * cost_price doesn't exceed position cap
+        if contracts > 0 and contracts * cost_price > max_position:
+            contracts = int(max_position / cost_price)
+            logger.debug(f"Kelly: clamped contracts to {contracts} (position cap ${max_position:.2f})")
+
         # Account for estimated fee so total cost stays within cap.
         # Fee formula returns cents: ceil(fee_rate * contracts * price * (1 - price))
         # Convert to dollars before comparing.
@@ -175,11 +181,11 @@ class KellySizer:
         if brier_score <= BRIER_GOOD:
             mult = 1.0
         elif brier_score <= BRIER_FAIR:
-            mult = 0.75
-        elif brier_score <= BRIER_POOR:
             mult = 0.50
-        else:
+        elif brier_score <= BRIER_POOR:
             mult = 0.25
+        else:
+            mult = 0.10
 
         if mult != self._calibration_multiplier:
             logger.info(

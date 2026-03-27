@@ -124,46 +124,39 @@ class MarketScanner:
         for m in markets:
             score = 0.0
 
-            # Volume score (log-scaled, normalized to 0-40 range)
+            # Volume score (log-scaled, normalized to 0-50 range)
             # Use effective volume (24h or total)
             vol = m.volume_24h if m.volume_24h > 0 else m.volume_total
             if vol > 0:
-                score += min(40, math.log10(vol) * 10)
+                score += min(50, math.log10(vol) * 12.5)
 
-            # Spread score (wider spread = more potential mispricing, 0-20 range)
-            price_sum = m.yes_price + m.no_price
-            if price_sum > 0:
-                deviation_from_one = abs(1.0 - price_sum)
-                score += min(20, deviation_from_one * 200)
-
-            # Time to resolution score (sweet spot: 7-90 days, 0-20 range)
+            # Time to resolution score (sweet spot: 7-90 days, 0-30 range)
             days = m.days_to_resolution
             if days is not None:
                 if 7 <= days <= 90:
-                    score += 20
+                    score += 30
                 elif 3 <= days < 7:
-                    score += 10
+                    score += 15
                 elif 90 < days <= 180:
-                    score += 10
+                    score += 15
                 elif days < 3:
                     score += 5  # Too close to resolution, less time for edge
                 else:
                     score += 5  # Very long-dated, capital locked up
 
-            # Category boost (target categories get +10)
-            for tag in m.tags:
-                if tag in target_cats:
-                    score += 10
-                    break
-            if m.category.value in target_cats:
+            # Category boost (target categories get +10, no double-counting)
+            has_target_cat = m.category.value in target_cats or any(
+                tag in target_cats for tag in m.tags
+            )
+            if has_target_cat:
                 score += 10
 
-            # Price extremity score (markets near 50% have more edge potential, 0-10)
+            # Price extremity score (extreme prices have more mispricing potential, 0-10)
             mid_price = m.yes_price
-            if 0.20 <= mid_price <= 0.80:
-                score += 10  # Most edge potential
-            elif 0.10 <= mid_price <= 0.90:
-                score += 5  # Some edge potential
+            if mid_price < 0.15 or mid_price > 0.85:
+                score += 10  # Extreme prices: small absolute errors = large relative edge
+            elif mid_price < 0.30 or mid_price > 0.70:
+                score += 5  # Moderate extremity
 
             # Fee penalty: higher fees at mid-prices reduce attractiveness
             if mid_price > 0:

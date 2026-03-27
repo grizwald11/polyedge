@@ -41,6 +41,7 @@ def create_app(
     calibration_tracker=None,
     calibration_analyzer=None,
     circuit_breaker=None,
+    bankroll: float = 500.0,
 ) -> Optional[object]:
     """Create the FastAPI dashboard application.
 
@@ -83,6 +84,7 @@ def create_app(
         """Portfolio overview page."""
         stats = db.get_stats()
         summary = db.get_portfolio_summary()
+        summary["bankroll"] = bankroll
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         daily_pnl = db.get_daily_pnl(today)
 
@@ -188,7 +190,7 @@ def create_app(
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         daily_pnl = db.get_daily_pnl(today)
         summary = db.get_portfolio_summary()
-        bankroll = summary.get("bankroll", 500)
+        summary["bankroll"] = bankroll
         daily_loss_pct = abs(min(0, daily_pnl)) / bankroll if bankroll > 0 else 0
 
         return _render(
@@ -426,6 +428,7 @@ async def start_dashboard(
     calibration_tracker=None,
     calibration_analyzer=None,
     circuit_breaker=None,
+    bankroll: float = 500.0,
     host: str = "0.0.0.0",
     port: int = 8080,
 ):
@@ -437,6 +440,7 @@ async def start_dashboard(
         calibration_tracker=calibration_tracker,
         calibration_analyzer=calibration_analyzer,
         circuit_breaker=circuit_breaker,
+        bankroll=bankroll,
     )
     if app is None:
         logger.info("Dashboard not available (install fastapi + uvicorn)")

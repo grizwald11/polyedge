@@ -34,7 +34,7 @@
         <div class="progress-bar-container">
             <div class="progress-bar {% if exposure_pct > 0.35 %}progress-danger{% elif exposure_pct > 0.25 %}progress-warning{% endif %}" style="width: {{ (exposure_pct * 100)|int }}%"></div>
         </div>
-        <div class="card-detail">{{ "%.1f"|format(exposure_pct * 100) }}% of bankroll (limit: 40%)</div>
+        <div class="card-detail">{{ "%.1f"|format(exposure_pct * 100) }}% of bankroll (limit: 60%)</div>
     </div>
     <div class="card">
         <div class="card-label">Consecutive Losing Days</div>
