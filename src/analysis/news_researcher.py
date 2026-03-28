@@ -21,7 +21,7 @@ SERPER_SEARCH_URL = "https://google.serper.dev/search"
 
 MAX_RESULTS_PER_QUERY = 5
 MAX_QUERIES = 4
-MAX_CONTEXT_CHARS = 3200  # ~800 tokens
+MAX_CONTEXT_CHARS = 4000  # ~1000 tokens — increased to reduce mid-article truncation
 MAX_RELEVANT_RESULTS = 5
 DEDUP_SIMILARITY_THRESHOLD = 0.7
 

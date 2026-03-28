@@ -59,11 +59,13 @@ def ensemble_forecast(
     # Divergence-based adjustment: when Claude strongly disagrees with market,
     # the market likely hasn't repriced — trust Claude more. When marginal
     # disagreement, be more humble.
-    # For extreme-price markets (<15¢ or >85¢), REDUCE Claude's weight rather
-    # than boosting it — cheap/expensive contracts are noisy and Claude's
+    # For extreme-price markets (<5¢ or >95¢), REDUCE Claude's weight rather
+    # than boosting it — very cheap/expensive contracts are noisy and Claude's
     # divergence is more likely a hallucination than genuine edge.
+    # Threshold at 5%/95% (not 15%/85%) to avoid filtering out legitimate
+    # mid-rare opportunities like FDA approvals at 10-15%.
     divergence = abs(claude_forecast.probability - market_price)
-    extreme_price = market_price < 0.15 or market_price > 0.85
+    extreme_price = market_price < 0.05 or market_price > 0.95
     if extreme_price:
         # On extreme-price markets, trust the market more — Claude divergence
         # here is usually wrong. Aggressively reduce Claude weight: floor at 25%,
@@ -229,8 +231,10 @@ def _compute_model_weights(
     # Compute weights from Brier scores
     has_scores = [w for w in weights if w.brier_score is not None]
 
-    if len(has_scores) >= 2:
-        # Brier-weighted: w = (1 - brier) normalized
+    if len(has_scores) >= 1:
+        # Brier-weighted: w = (1 - brier) normalized.
+        # Works with 1+ scored models (was >=2; lowered so a single well-
+        # calibrated model still gets its earned weight advantage).
         raw = [(1.0 - max(0.0, min(1.0, w.brier_score))) for w in has_scores]
         total = sum(raw)
         if total > 0:
@@ -251,7 +255,7 @@ def _compute_model_weights(
             if w.brier_score is None:
                 w.weight = avg_weight
     else:
-        # Equal weights
+        # Equal weights (no models have Brier scores yet)
         equal = 1.0 / len(weights) if weights else 1.0
         for w in weights:
             w.weight = equal

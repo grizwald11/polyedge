@@ -65,7 +65,7 @@ class PolymarketClient:
             self._initialized = True
             logger.info("Polymarket client initialized and API credentials derived")
         except Exception as e:
-            logger.error(f"Failed to derive Polymarket API credentials: {e}")
+            logger.error(f"Failed to derive Polymarket API credentials: {e}", exc_info=True)
             raise
 
     async def _run(self, func, *args, **kwargs):

@@ -93,7 +93,7 @@ class NewsReactiveStrategy:
                 custom_prompt=prompt,
             )
         except Exception as e:
-            logger.error(f"News impact assessment failed for {market.ticker}: {e}")
+            logger.error(f"News impact assessment failed for {market.ticker}: {e}", exc_info=True)
             return None
 
         if result is None:

@@ -1,6 +1,10 @@
 # Secrets
 .env
 config/.env
+*.pem
+*.key
+config/kalshi_private_key*
+credentials*.json
 
 # Database
 data/*.db

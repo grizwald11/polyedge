@@ -1425,3 +1425,33 @@ class Database:
         query += " ORDER BY similarity DESC"
         rows = conn.execute(query).fetchall()
         return [dict(r) for r in rows]
+
+    def cleanup_orphaned_records(self) -> dict[str, int]:
+        """Remove orphaned child records whose parent markets no longer exist.
+
+        Since foreign keys are disabled (see _get_conn), this method provides
+        application-level referential integrity cleanup. Call periodically
+        (e.g., daily alongside cleanup_old_snapshots).
+
+        Returns dict of {table_name: rows_deleted}.
+        """
+        conn = self._get_conn()
+        deleted: dict[str, int] = {}
+        child_tables = [
+            "market_snapshots", "signals", "orders", "trades",
+            "calibration_records", "prices",
+        ]
+        for table in child_tables:
+            try:
+                cursor = conn.execute(f"""
+                    DELETE FROM {table}
+                    WHERE market_id NOT IN (SELECT ticker FROM markets)
+                """)
+                if cursor.rowcount > 0:
+                    deleted[table] = cursor.rowcount
+            except Exception as e:
+                logger.debug(f"Orphan cleanup skipped for {table}: {e}")
+        if deleted:
+            conn.commit()
+            logger.info(f"Orphan cleanup: {deleted}")
+        return deleted

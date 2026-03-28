@@ -457,4 +457,4 @@ async def start_dashboard(
     except SystemExit:
         logger.warning(f"Dashboard failed to bind port {port} (address in use)")
     except Exception as e:
-        logger.error(f"Dashboard failed: {e}")
+        logger.error(f"Dashboard failed: {e}", exc_info=True)

@@ -62,7 +62,7 @@ class AIProbabilityStrategy:
             if self._category_brier_scores:
                 logger.info(f"Category Brier scores: {self._category_brier_scores}")
         except Exception as e:
-            logger.error(f"Failed to load calibration adjustments: {e}")
+            logger.error(f"Failed to load calibration adjustments: {e}", exc_info=True)
 
     async def _get_community_forecast(self, market: Market) -> Optional[ForecastResult]:
         """Get community forecast from Manifold Markets or Metaculus.
@@ -156,7 +156,7 @@ class AIProbabilityStrategy:
                 if signal:
                     initial_signals.append(signal)
             except Exception as e:
-                logger.error(f"Failed to assess {market.ticker}: {e}")
+                logger.error(f"Failed to assess {market.ticker}: {e}", exc_info=True)
 
         if not cross_check_enabled:
             signals = initial_signals
@@ -181,7 +181,7 @@ class AIProbabilityStrategy:
                             f"Cross-check rejected signal for {market.ticker}"
                         )
                 except Exception as e:
-                    logger.error(f"Cross-check failed for {market.ticker}: {e}")
+                    logger.error(f"Cross-check failed for {market.ticker}: {e}", exc_info=True)
 
             # Signals outside top N pass without cross-check
             signals.extend(auto_pass)
@@ -276,7 +276,7 @@ class AIProbabilityStrategy:
             # absolute divergences can be huge relative to the price.
             base_price = max(market.yes_price, 1.0 - market.yes_price)
             relative_div = divergence / base_price if base_price > 0 else 0
-            if relative_div > 1.5:
+            if relative_div > 1.2:
                 logger.warning(
                     f"Rejecting {market.ticker}: relative divergence {relative_div:.1f}x "
                     f"on extreme-price market ({market.yes_price:.0%})"
@@ -299,12 +299,21 @@ class AIProbabilityStrategy:
                 f"{original:.3f} → {forecast.probability:.3f} (adj={adjustment:+.3f})"
             )
 
-        # Confidence gate: skip if confidence interval is too wide
+        # Confidence gate: skip if confidence interval is too wide.
+        # Category-specific thresholds: data-rich categories (Politics, Fed)
+        # should have narrower CIs; inherently uncertain categories allow wider.
         ci_width = forecast.confidence_high - forecast.confidence_low
-        if ci_width > 0.40:
+        ci_thresholds = {
+            "Politics": 0.35, "Elections": 0.35, "Economics": 0.35,
+            "Financials": 0.35, "Fed": 0.35,
+            "World": 0.45, "Geopolitics": 0.45,
+            "Entertainment": 0.50, "Culture": 0.50,
+        }
+        max_ci = ci_thresholds.get(category.value, 0.40)
+        if ci_width > max_ci:
             logger.info(
                 f"Skipping {market.ticker}: confidence interval too wide "
-                f"({ci_width:.2f})"
+                f"({ci_width:.2f} > {max_ci:.2f} for {category.value})"
             )
             return None
 

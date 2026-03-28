@@ -66,7 +66,7 @@ class ResolutionTracker:
                             f"({count} predictions updated)"
                         )
             except Exception as e:
-                logger.error(f"Failed to check resolution for {ticker}: {e}")
+                logger.error(f"Failed to check resolution for {ticker}: {e}", exc_info=True)
 
         if resolved_count > 0:
             logger.info(f"Resolved {resolved_count} markets this cycle")

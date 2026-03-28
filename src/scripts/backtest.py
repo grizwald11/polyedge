@@ -172,14 +172,14 @@ async def run_backtest(
 
     try:
         # Step 1: Fetch settled events
-        print("Fetching settled events from Kalshi...")
+        logger.info("Fetching settled events from Kalshi...")
         raw_markets = await fetch_settled_events(kalshi, max_events=200)
 
         # Step 2: Filter to backtestable markets
         backtestable = filter_backtestable_markets(raw_markets)
 
         if not backtestable:
-            print("No backtestable markets found.")
+            logger.info("No backtestable markets found.")
             return
 
         # Cap at limit
@@ -187,9 +187,9 @@ async def run_backtest(
 
         # Dry run: just list markets and exit
         if dry_run:
-            print(f"\n{'='*60}")
-            print(f"  DRY RUN — {len(backtestable)} settled markets available")
-            print(f"{'='*60}\n")
+            logger.info(f"\n{'='*60}")
+            logger.info(f"  DRY RUN — {len(backtestable)} settled markets available")
+            logger.info(f"{'='*60}\n")
             for i, raw in enumerate(backtestable, 1):
                 title = raw.get("title") or raw.get("question", "?")
                 result = raw.get("result", "?")
@@ -200,8 +200,8 @@ async def run_backtest(
                         volume = max(volume, float(raw.get(key, 0)))
                     except (ValueError, TypeError):
                         continue  # Expected for missing/malformed fields
-                print(f"  {i:3d}. [{result.upper():>3s}] {ticker:<30s} vol={volume:>10,.0f}  {title[:60]}")
-            print(f"\nRun without --dry-run to backtest these markets.")
+                logger.info(f"  {i:3d}. [{result.upper():>3s}] {ticker:<30s} vol={volume:>10,.0f}  {title[:60]}")
+            logger.info(f"\nRun without --dry-run to backtest these markets.")
             return
 
         # Step 3: Initialize Claude forecaster and news researcher
@@ -212,8 +212,8 @@ async def run_backtest(
         )
 
         # Step 4: Process each market
-        print(f"\nBacktesting {len(backtestable)} markets...")
-        print(f"{'='*60}\n")
+        logger.info(f"\nBacktesting {len(backtestable)} markets...")
+        logger.info(f"{'='*60}\n")
 
         processed = 0
         errors = 0
@@ -228,7 +228,7 @@ async def run_backtest(
             # Build Market object for Claude (blind — no outcome info)
             market = build_settled_market(raw)
             if market is None:
-                print(f"  [{i:3d}/{len(backtestable)}] SKIP  {ticker} — failed to parse")
+                logger.info(f"  [{i:3d}/{len(backtestable)}] SKIP  {ticker} — failed to parse")
                 errors += 1
                 continue
 
@@ -276,7 +276,7 @@ async def run_backtest(
                 status = "OK" if correct else "MISS"
                 avg_brier = brier_sum / processed
 
-                print(
+                logger.info(
                     f"  [{i:3d}/{len(backtestable)}] {status:4s}  "
                     f"pred={predicted_prob:.0%} actual={'YES' if actual_yes else 'NO':>3s}  "
                     f"brier={brier:.3f}  avg={avg_brier:.3f}  "
@@ -285,7 +285,7 @@ async def run_backtest(
 
             except Exception as e:
                 errors += 1
-                print(f"  [{i:3d}/{len(backtestable)}] ERR   {ticker} — {e}")
+                logger.info(f"  [{i:3d}/{len(backtestable)}] ERR   {ticker} — {e}")
                 logger.exception(f"Error backtesting {ticker}")
 
             # Rate limit delay
@@ -293,18 +293,18 @@ async def run_backtest(
                 await asyncio.sleep(delay)
 
         # Step 5: Print summary and calibration report
-        print(f"\n{'='*60}")
-        print(f"  BACKTEST COMPLETE")
-        print(f"{'='*60}")
-        print(f"  Processed: {processed}")
-        print(f"  Errors:    {errors}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"  BACKTEST COMPLETE")
+        logger.info(f"{'='*60}")
+        logger.info(f"  Processed: {processed}")
+        logger.info(f"  Errors:    {errors}")
         if processed > 0:
-            print(f"  Avg Brier: {brier_sum / processed:.4f}")
-        print()
+            logger.info(f"  Avg Brier: {brier_sum / processed:.4f}")
+        logger.info()
 
         # Generate full calibration report
         analyzer = CalibrationAnalyzer(db)
-        print(format_report(analyzer))
+        logger.info(format_report(analyzer))
 
     finally:
         await kalshi.close()
@@ -345,7 +345,7 @@ def main():
     # Validate required keys (not needed for dry-run)
     if not args.dry_run:
         if not settings.anthropic_api_key:
-            print("ERROR: ANTHROPIC_API_KEY not set in environment")
+            logger.error("ANTHROPIC_API_KEY not set in environment")
             sys.exit(1)
 
     # Initialize database

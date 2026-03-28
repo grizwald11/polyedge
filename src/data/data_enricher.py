@@ -99,8 +99,8 @@ class DataEnricher:
             try:
                 name, result = task.result()
                 results[name] = result
-            except Exception:
-                pass  # _safe_fetch already handles exceptions
+            except Exception as e:
+                logger.debug(f"Data enrichment task failed: {e}")
 
         # Cancel any still-pending tasks and await them to ensure cleanup
         if pending:

@@ -34,6 +34,9 @@ class ClaudeForecaster:
             serper_api_key=settings.serper_api_key,
             searxng_url=settings.searxng_url,
         )
+        # Simple token usage tracking for cost awareness
+        self._total_tokens_today: int = 0
+        self._today_date: str = ""
 
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
@@ -54,6 +57,17 @@ class ClaudeForecaster:
         return self.settings.claude.category_temperatures.get(
             category.value, self.settings.claude.temperature
         )
+
+    def _track_tokens(self, tokens: int):
+        """Track daily token usage for cost awareness."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today != self._today_date:
+            if self._today_date and self._total_tokens_today > 0:
+                logger.info(f"Claude API usage yesterday: {self._total_tokens_today:,} tokens")
+            self._today_date = today
+            self._total_tokens_today = 0
+        self._total_tokens_today += tokens
 
     @staticmethod
     def _extract_text(response) -> str | None:
@@ -148,6 +162,7 @@ class ClaudeForecaster:
                     parse_failed=True, model_used=model, latency_ms=latency_ms,
                 )
             tokens_used = response.usage.input_tokens + response.usage.output_tokens
+            self._track_tokens(tokens_used)
 
             # Parse JSON response
             forecast = self._parse_response(raw_text)
@@ -185,7 +200,7 @@ class ClaudeForecaster:
                 parse_failed=True,
             )
         except Exception as e:
-            logger.error(f"Claude assessment failed: {e}")
+            logger.error(f"Claude assessment failed: {e}", exc_info=True)
             return ForecastResult(
                 probability=market.yes_price,
                 confidence_low=max(0, market.yes_price - 0.25),
@@ -251,7 +266,7 @@ class ClaudeForecaster:
             return forecast
 
         except Exception as e:
-            logger.error(f"Custom Claude assessment failed: {e}")
+            logger.error(f"Custom Claude assessment failed: {e}", exc_info=True)
             return None
 
     async def cross_check_assess(
@@ -408,24 +423,25 @@ class ClaudeForecaster:
             except (json.JSONDecodeError, ValueError) as e:
                 logger.debug(f"JSON brace extraction parse failed: {e}")
 
-        # Strategy 4: Try to extract probability from prose as last resort
-        # Match various formats: "probability": 0.65, probability: 0.7, probability = 0.50, 65%
-        prob_match = re.search(
+        # Strategy 4: Try to extract probability from prose as last resort.
+        # Use findall + take LAST match to avoid picking up stale references
+        # like "probability shifted from 0.73 to 0.85" (we want 0.85, not 0.73).
+        prob_matches = re.findall(
             r'(?:probability|prob)["\'\s:=]+\s*([01]?\.\d+|0|1(?:\.0+)?)', text, re.IGNORECASE
         )
-        if not prob_match:
-            # Try percentage format: "probability: 65%" or "70%"
-            pct_match = re.search(r'(?:probability|prob)["\'\s:=]+\s*(\d{1,3})%', text, re.IGNORECASE)
-            if pct_match:
-                prob = float(pct_match.group(1)) / 100.0
-                logger.warning(f"Extracted probability {prob} from percentage in prose")
+        if not prob_matches:
+            # Try percentage format: "probability: 65%"
+            pct_matches = re.findall(r'(?:probability|prob)["\'\s:=]+\s*(\d{1,3})%', text, re.IGNORECASE)
+            if pct_matches:
+                prob = float(pct_matches[-1]) / 100.0
+                logger.warning(f"Extracted probability {prob} from percentage in prose (last of {len(pct_matches)} matches)")
                 return ForecastResult(
                     probability=max(0.01, min(0.99, prob)),
                     reasoning=f"Parsed probability from prose (%). Raw: {raw_text[:200]}",
                 )
-        if prob_match:
-            prob = float(prob_match.group(1))
-            logger.warning(f"Extracted probability {prob} from prose response")
+        if prob_matches:
+            prob = float(prob_matches[-1])
+            logger.warning(f"Extracted probability {prob} from prose response (last of {len(prob_matches)} matches)")
             return ForecastResult(
                 probability=max(0.01, min(0.99, prob)),
                 reasoning=f"Parsed probability from prose. Raw: {raw_text[:200]}",
@@ -440,14 +456,19 @@ class ClaudeForecaster:
 
     def _build_forecast(self, data: dict) -> ForecastResult:
         """Build a ForecastResult from parsed JSON data."""
-        probability = float(data.get("probability", 0.5))
-        # Clamp to valid range
-        probability = max(0.01, min(0.99, probability))
+        raw_probability = float(data.get("probability", 0.5))
+        # Clamp to valid range for trading calculations
+        probability = max(0.01, min(0.99, raw_probability))
+
+        if raw_probability != probability:
+            logger.debug(
+                f"Clamped probability from {raw_probability:.6f} to {probability:.2f}"
+            )
 
         return ForecastResult(
             probability=probability,
-            confidence_low=max(0.0, min(1.0, float(data.get("confidence_low", max(0, probability - 0.25))))),
-            confidence_high=max(0.0, min(1.0, float(data.get("confidence_high", min(1, probability + 0.25))))),
+            confidence_low=max(0.0, min(1.0, float(data.get("confidence_low", max(0, probability - 0.20))))),
+            confidence_high=max(0.0, min(1.0, float(data.get("confidence_high", min(1, probability + 0.20))))),
             key_factors_for=data.get("key_factors_for", []),
             key_factors_against=data.get("key_factors_against", []),
             uncertainties=data.get("uncertainties", []),

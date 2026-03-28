@@ -163,11 +163,18 @@ class PositionManager:
         now = datetime.now(timezone.utc)
         time_since_update = (now - position.last_updated).total_seconds()
         price_for_side = no_price if position.direction in (Direction.BUY_NO, Direction.SELL_NO) else yes_price
-        if time_since_update > 300 and price_for_side == position.current_price and position.current_price > 0:
-            logger.warning(
-                f"Stale price detected for {market_id}: ${price_for_side:.2f} unchanged "
-                f"for {time_since_update:.0f}s — data feed may be dead"
-            )
+        if time_since_update > 300 and position.current_price > 0:
+            price_delta = abs(price_for_side - position.current_price)
+            if price_delta == 0:
+                logger.warning(
+                    f"Stale price detected for {market_id}: ${price_for_side:.2f} unchanged "
+                    f"for {time_since_update:.0f}s — data feed may be dead"
+                )
+            elif price_delta < 0.005:
+                logger.warning(
+                    f"Potentially stale price for {market_id}: moved only ${price_delta:.4f} "
+                    f"in {time_since_update:.0f}s — data feed may be replaying old prices"
+                )
 
         # Use the price matching the position's side, but only if valid
         if position.direction in (Direction.BUY_NO, Direction.SELL_NO):
@@ -319,15 +326,23 @@ class PositionManager:
                 return True, f"edge_gone: remaining edge {remaining_edge:.1%} < {edge_gone_threshold:.1%}"
 
         # 6. Capital rotation: when portfolio is crowded, exit profitable positions
-        #    where most of the edge has been captured to free capital for new trades
+        #    where most of the edge has been captured to free capital for new trades.
+        #    Skip if market price data is stale (>5 min) to avoid exiting on outdated edge calc.
         if market is not None and position.unrealized_pnl > 0:
-            exposure_pct = self.get_total_exposure_pct()
-            remaining = self._calculate_remaining_edge(position, market)
-            if exposure_pct > 0.35 and remaining < DEFAULT_CAPITAL_ROTATION_EDGE:
-                return True, (
-                    f"capital_rotation: edge {remaining:.1%} < {DEFAULT_CAPITAL_ROTATION_EDGE:.0%} "
-                    f"threshold with portfolio at {exposure_pct:.0%} exposure"
+            price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
+            if price_age > 300:
+                logger.debug(
+                    f"Skipping capital_rotation for {position.market_id}: "
+                    f"price data stale ({price_age:.0f}s old)"
                 )
+            else:
+                exposure_pct = self.get_total_exposure_pct()
+                remaining = self._calculate_remaining_edge(position, market)
+                if exposure_pct > 0.35 and remaining < DEFAULT_CAPITAL_ROTATION_EDGE:
+                    return True, (
+                        f"capital_rotation: edge {remaining:.1%} < {DEFAULT_CAPITAL_ROTATION_EDGE:.0%} "
+                        f"threshold with portfolio at {exposure_pct:.0%} exposure"
+                    )
 
         return False, ""
 
@@ -432,7 +447,7 @@ class PositionManager:
         try:
             api_positions = await kalshi.get_positions()
         except Exception as e:
-            logger.error(f"Failed to sync positions with Kalshi: {e}")
+            logger.error(f"Failed to sync positions with Kalshi: {e}", exc_info=True)
             return 0
 
         if not api_positions:
@@ -572,7 +587,7 @@ class PositionManager:
             )
             conn.commit()
         except Exception as e:
-            logger.error(f"Failed to update trade P&L in DB: {e}")
+            logger.error(f"Failed to update trade P&L in DB: {e}", exc_info=True)
 
     def _direction_from_trade(self, trade: Trade) -> Direction:
         """Infer direction from trade side and token."""

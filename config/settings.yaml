@@ -56,17 +56,17 @@ claude:
   max_assessments_per_cycle: 15 # AI strategy is top earner, assess more markets
   ensemble_weight: 0.85         # Claude weight in ensemble (market gets 1 - this)
   category_temperatures:        # Per-category temperature overrides
-    Politics: 0.3
+    Politics: 0.35              # Slightly raised from 0.3 to avoid overconfident point estimates
     "Fed/Macro": 0.3
-    Geopolitics: 0.4
+    Geopolitics: 0.45           # Inherently uncertain; allow more exploration
     "Tech/AI": 0.35
-    Culture: 0.4
+    Culture: 0.45               # Inherently uncertain; allow more exploration
     Other: 0.35
   cross_check_enabled: true     # Dual-temperature cross-validation
   cross_check_top_n: 3          # Cross-check only top N edge signals (saves API time)
   cross_check_temp_low: 0.2
   cross_check_temp_high: 0.5
-  cross_check_disagreement_threshold: 0.15  # Skip if temps disagree by more than this (matches config.py default)
+  cross_check_disagreement_threshold: 0.22  # Skip if temps disagree by more (relaxed from 0.15)
 
 news:
   rss_feeds:

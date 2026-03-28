@@ -75,7 +75,7 @@ class WhaleMonitor:
 
             logger.info(f"Loaded {len(self._basket)} whale wallets from basket")
         except Exception as e:
-            logger.error(f"Failed to load whale basket: {e}")
+            logger.error(f"Failed to load whale basket: {e}", exc_info=True)
 
     @property
     def basket_size(self) -> int:

@@ -107,7 +107,7 @@ class ClaudeConfig(BaseModel):
     cross_check_top_n: int = 3
     cross_check_temp_low: float = 0.2
     cross_check_temp_high: float = 0.5
-    cross_check_disagreement_threshold: float = 0.15
+    cross_check_disagreement_threshold: float = 0.22
     max_divergence_from_market: float = 0.40  # Reject if |claude - market| > this
 
 

@@ -82,7 +82,7 @@ class FillTracker:
                 logger.warning(f"Order poll timed out for {order_id}")
                 return (order_id, order, None)
             except Exception as e:
-                logger.error(f"Fill check failed for {order_id}: {e}")
+                logger.error(f"Fill check failed for {order_id}: {e}", exc_info=True)
                 return (order_id, order, None)
 
         poll_results = await asyncio.gather(

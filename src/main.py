@@ -131,7 +131,7 @@ async def scan_and_trade(
             position_manager.clear_pending_exit(fill.market_id)
             position_manager.update_from_trade(fill)
     except Exception as e:
-        logger.error(f"Fill tracker check failed: {e}")
+        logger.error(f"Fill tracker check failed: {e}", exc_info=True)
 
     # Cancel stale open orders (resting > 30 min with no fill)
     try:
@@ -141,7 +141,7 @@ async def scan_and_trade(
         if stale_cancelled:
             logger.info(f"Cancelled {stale_cancelled} stale open orders")
     except Exception as e:
-        logger.error(f"Stale order cancellation failed: {e}")
+        logger.error(f"Stale order cancellation failed: {e}", exc_info=True)
 
     # Check circuit breaker (include unrealized losses from open positions)
     unrealized_pnl = position_manager.get_total_unrealized_pnl()
@@ -178,7 +178,7 @@ async def scan_and_trade(
         else:
             markets = await scanner.run_scan_cycle()
     except Exception as e:
-        logger.error(f"Market scan failed: {e}")
+        logger.error(f"Market scan failed: {e}", exc_info=True)
         if metrics is not None:
             metrics.record_error("scanner", str(e))
         return  # Skip this cycle, try again next time
@@ -388,34 +388,34 @@ async def scan_and_trade(
         ai_signals = await ai_strategy.scan_for_opportunities(markets)
         all_signals.extend(ai_signals)
     except Exception as e:
-        logger.error(f"AI probability strategy failed: {e}")
+        logger.error(f"AI probability strategy failed: {e}", exc_info=True)
 
     try:
         no_signals = no_strategy.scan_for_opportunities(markets)
         all_signals.extend(no_signals)
     except Exception as e:
-        logger.error(f"Obvious NO strategy failed: {e}")
+        logger.error(f"Obvious NO strategy failed: {e}", exc_info=True)
 
     if news_strategy is not None:
         try:
             news_signals = await news_strategy.scan_for_opportunities(markets)
             all_signals.extend(news_signals)
         except Exception as e:
-            logger.error(f"News strategy failed: {e}")
+            logger.error(f"News strategy failed: {e}", exc_info=True)
 
     if cross_arb_strategy is not None:
         try:
             arb_signals = await cross_arb_strategy.scan_for_opportunities(markets)
             all_signals.extend(arb_signals)
         except Exception as e:
-            logger.error(f"Cross-arb strategy failed: {e}")
+            logger.error(f"Cross-arb strategy failed: {e}", exc_info=True)
 
     if whale_strategy is not None:
         try:
             whale_signals = whale_strategy.scan_for_opportunities(markets)
             all_signals.extend(whale_signals)
         except Exception as e:
-            logger.error(f"Whale strategy failed: {e}")
+            logger.error(f"Whale strategy failed: {e}", exc_info=True)
 
     if cross_platform_arb is not None and poly_markets:
         try:
@@ -423,7 +423,7 @@ async def scan_and_trade(
             xplat_signals = await cross_platform_arb.scan_for_opportunities(kalshi_markets, poly_markets)
             all_signals.extend(xplat_signals)
         except Exception as e:
-            logger.error(f"Cross-platform arb strategy failed: {e}")
+            logger.error(f"Cross-platform arb strategy failed: {e}", exc_info=True)
 
     if not all_signals:
         logger.info("No signals generated this cycle")
@@ -603,7 +603,7 @@ async def scan_and_trade(
         if resolved > 0:
             logger.info(f"Resolved {resolved} markets this cycle")
     except Exception as e:
-        logger.error(f"Resolution check failed: {e}")
+        logger.error(f"Resolution check failed: {e}", exc_info=True)
 
     # Every 10 cycles (~50 min), generate and log calibration report
     if cycle_count > 0 and cycle_count % 10 == 0:
@@ -633,7 +633,7 @@ async def scan_and_trade(
             else:
                 logger.info("Calibration: no resolved predictions yet")
         except Exception as e:
-            logger.error(f"Calibration report failed: {e}")
+            logger.error(f"Calibration report failed: {e}", exc_info=True)
 
     # Periodic position sync with Kalshi (every 10 cycles, live mode only)
     if settings.trading.mode == "live" and cycle_count % 10 == 0:
@@ -652,6 +652,7 @@ async def run_trading_loop(
     calibration, resolution_tracker, calibration_analyzer, fill_tracker,
     alert_manager, daily_report, metrics, settings, interval,
     poly_scanner=None, cross_platform_arb=None,
+    shutdown_event: asyncio.Event | None = None,
 ):
     """Run the scan-assess-trade loop on an interval."""
     logger = logging.getLogger("polyedge.main")
@@ -659,7 +660,7 @@ async def run_trading_loop(
     last_trading_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     _last_report_date: str = ""
 
-    while True:
+    while not (shutdown_event and shutdown_event.is_set()):
         try:
             # Day-boundary: record previous day's result, reset daily halt, send report
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -670,13 +671,14 @@ async def run_trading_loop(
                 logger.info(f"New trading day: previous day P&L=${yesterday_pnl:.2f}")
                 last_trading_day = today
 
-                # Daily maintenance: clean up old snapshots to prevent DB bloat
+                # Daily maintenance: clean up old snapshots and orphaned records
                 try:
                     scanner.db.cleanup_old_snapshots(
                         max_age_days=settings.database.snapshot_retention_days
                     )
+                    scanner.db.cleanup_orphaned_records()
                 except Exception as e:
-                    logger.warning(f"Snapshot cleanup failed: {e}")
+                    logger.warning(f"Daily cleanup failed: {e}")
 
             # Send daily report at configured time (once per day)
             now = datetime.now(timezone.utc)
@@ -695,7 +697,7 @@ async def run_trading_loop(
                     await daily_report.generate_and_send(today)
                     _last_report_date = today
                 except Exception as e:
-                    logger.error(f"Daily report failed: {e}")
+                    logger.error(f"Daily report failed: {e}", exc_info=True)
 
             cycle_count += 1
             # Hard timeout: if any individual scan cycle hangs (stuck API call,
@@ -721,12 +723,30 @@ async def run_trading_loop(
             logger.info("Shutting down...")
             break
         except asyncio.TimeoutError:
-            logger.error(f"Trade cycle timed out (>{settings.execution.cycle_timeout_seconds}s) — skipping")
+            logger.error(
+                f"Trade cycle timed out (>{settings.execution.cycle_timeout_seconds}s) — skipping. "
+                f"WARNING: orders submitted before timeout may be resting on exchange but untracked locally. "
+                f"Run position sync on next live cycle to reconcile.",
+                exc_info=True,
+            )
         except Exception as e:
             logger.error(f"Trade cycle failed: {e}", exc_info=True)
 
+        if shutdown_event and shutdown_event.is_set():
+            logger.info("Shutdown requested — exiting trading loop cleanly")
+            break
         logger.info(f"Next cycle in {interval} seconds...")
-        await asyncio.sleep(interval)
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait() if shutdown_event else asyncio.sleep(interval),
+                timeout=interval,
+            )
+            # If we get here via shutdown_event, break
+            if shutdown_event and shutdown_event.is_set():
+                logger.info("Shutdown requested during sleep — exiting trading loop cleanly")
+                break
+        except asyncio.TimeoutError:
+            pass  # Normal timeout — proceed to next cycle
 
 
 async def main():
@@ -775,7 +795,9 @@ async def main():
     discovery = MarketDiscovery(kalshi)
     scanner = MarketScanner(discovery, db, settings)
 
-    # Analysis
+    # Analysis — validate Anthropic key early to fail fast
+    if not settings.anthropic_api_key:
+        logger.error("ANTHROPIC_API_KEY not set — Claude forecasting will not work")
     forecaster = ClaudeForecaster(settings)
     calibration = CalibrationTracker(db)
     resolution_tracker = ResolutionTracker(kalshi, db)
@@ -970,6 +992,18 @@ async def main():
     except Exception as e:
         logger.warning(f"Dashboard failed to start: {e}")
 
+    # Graceful shutdown event — set by signal handlers so the trading loop
+    # can exit cleanly between cycles instead of being killed mid-trade.
+    shutdown_event = asyncio.Event()
+
+    def _signal_handler(sig, _frame):
+        logger.info(f"Received signal {sig}, requesting graceful shutdown...")
+        shutdown_event.set()
+
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _signal_handler)
+
     # Enter trading loop
     logger.info(f"\nEntering trading loop (every {settings.scanning.interval_seconds}s)...")
     try:
@@ -983,6 +1017,7 @@ async def main():
             settings, settings.scanning.interval_seconds,
             poly_scanner=poly_scanner,
             cross_platform_arb=cross_platform_arb,
+            shutdown_event=shutdown_event,
         )
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")

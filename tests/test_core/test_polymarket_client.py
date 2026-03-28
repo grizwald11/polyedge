@@ -67,7 +67,8 @@ class TestHealthCheck:
 class TestGetBalance:
     @pytest.mark.asyncio
     async def test_balance_small_value(self, client):
-        client._client.get_balance_allowance.return_value = {"balance": 500.0}
+        # Balance is in USDC atomic units (6 decimals): 500 USDC = 500_000_000
+        client._client.get_balance_allowance.return_value = {"balance": 500_000_000}
         balance = await client.get_balance()
         assert balance == 500.0
 

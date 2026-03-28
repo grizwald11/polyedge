@@ -193,15 +193,18 @@ class TestComputeModelWeights:
         assert abs(weights[0].weight - 0.6) < 0.01  # 0.9/1.5
 
     def test_partial_brier_uses_average_for_missing(self):
-        """Models without Brier scores get average weight."""
+        """Models without Brier scores get the scored model's average weight."""
         forecasts = [
             _make_forecast(0.5, "known"),
             _make_forecast(0.6, "unknown"),
         ]
         brier = {"known": 0.10}
         weights = _compute_model_weights(forecasts, brier, "", None)
-        # Only 1 model has score, so falls back to equal weights
-        assert abs(weights[0].weight - 0.5) < 0.01
+        # With 1 scored model: known gets full Brier weight (1.0),
+        # unknown gets average of scored weights (also 1.0).
+        # Both end up equal because there's only one scored model.
+        assert abs(weights[0].weight - 1.0) < 0.01
+        assert abs(weights[1].weight - 1.0) < 0.01
 
 
 class TestCIPenaltyScaling:

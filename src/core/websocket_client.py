@@ -132,13 +132,16 @@ class KalshiWebSocket:
     # ── Callback registration ──────────────────────
 
     def on_price_update(self, callback: PriceCallback):
-        self._price_callbacks.append(callback)
+        if callback not in self._price_callbacks:
+            self._price_callbacks.append(callback)
 
     def on_fill(self, callback: FillCallback):
-        self._fill_callbacks.append(callback)
+        if callback not in self._fill_callbacks:
+            self._fill_callbacks.append(callback)
 
     def on_lifecycle(self, callback: LifecycleCallback):
-        self._lifecycle_callbacks.append(callback)
+        if callback not in self._lifecycle_callbacks:
+            self._lifecycle_callbacks.append(callback)
 
     # ── Connection lifecycle ───────────────────────
 
@@ -256,7 +259,7 @@ class KalshiWebSocket:
             except json.JSONDecodeError:
                 logger.debug(f"Non-JSON WebSocket message: {raw[:100]}")
             except Exception as e:
-                logger.error(f"Error processing WebSocket message: {e}")
+                logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
 
     async def _dispatch(self, msg: dict):
         """Route a parsed message to the appropriate handler."""
@@ -411,5 +414,5 @@ class KalshiWebSocket:
                 self._private_key = load_pem_private_key(f.read(), password=None)
             return self._private_key
         except Exception as e:
-            logger.error(f"Failed to load private key: {e}")
+            logger.error(f"Failed to load private key: {e}", exc_info=True)
             return None

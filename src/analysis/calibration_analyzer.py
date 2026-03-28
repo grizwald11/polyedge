@@ -147,10 +147,10 @@ class CalibrationAnalyzer:
 
         base_rates = {}
         for cat, records in by_category.items():
-            # Require a minimum of 8 resolved markets per category before
-            # reporting base rates. With fewer samples, the rate is too noisy
-            # and could anchor Claude's estimates to statistical noise.
-            if len(records) < 8:
+            # Require a minimum of 4 resolved markets per category before
+            # reporting base rates. Lower threshold (was 8) ensures rare
+            # categories get anchoring sooner, at the cost of noisier rates.
+            if len(records) < 4:
                 continue
             yes_count = sum(1 for r in records if bool(r["actual_outcome"]))
             base_rates[cat] = {

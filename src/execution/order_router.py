@@ -324,7 +324,7 @@ class OrderRouter:
             order.status = OrderStatus.REJECTED
             order.rejection_reason = str(e)
             self._log_order(order)
-            logger.error(f"Live order failed: {e}")
+            logger.error(f"Live order failed: {e}", exc_info=True)
             return OrderResult(success=False, order=order, error=str(e))
 
     async def _poly_live_fill(self, order: Order) -> OrderResult:
@@ -429,7 +429,7 @@ class OrderRouter:
             order.status = OrderStatus.REJECTED
             order.rejection_reason = str(e)
             self._log_order(order)
-            logger.error(f"Polymarket live order failed: {e}")
+            logger.error(f"Polymarket live order failed: {e}", exc_info=True)
             return OrderResult(success=False, order=order, error=str(e))
 
     async def _poll_order_status(
@@ -465,6 +465,8 @@ class OrderRouter:
         """Request interactive confirmation for the first live trade of the session.
 
         Uses asyncio.run_in_executor to avoid blocking the event loop.
+        Times out after 60 seconds to prevent the trading loop from hanging
+        indefinitely when running unattended (e.g., under pm2).
         """
         prompt = (
             f"\n{'='*60}\n"
@@ -474,12 +476,18 @@ class OrderRouter:
             f"Market: {order.market_id}\n"
             f"Strategy: {order.strategy.value}\n"
             f"{'='*60}\n"
-            f"Confirm first live trade of session? [y/N]: "
+            f"Confirm first live trade of session? [y/N] (60s timeout): "
         )
         loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(None, input, prompt)
+            response = await asyncio.wait_for(
+                loop.run_in_executor(None, input, prompt),
+                timeout=60,
+            )
             return response.strip().lower() in ("y", "yes")
+        except asyncio.TimeoutError:
+            logger.warning("Live trade confirmation timed out after 60s — rejecting trade")
+            return False
         except (EOFError, KeyboardInterrupt):
             return False
 
@@ -534,7 +542,7 @@ class OrderRouter:
                 logger.warning(f"Cancel returned None for {order_id}")
                 return False
         except Exception as e:
-            logger.error(f"Cancel failed for {order_id}: {e}")
+            logger.error(f"Cancel failed for {order_id}: {e}", exc_info=True)
             return False
 
     async def cancel_stale_orders(self, max_age_seconds: int = 1800) -> int:

@@ -364,7 +364,7 @@ class CrossArbStrategy:
                 except json.JSONDecodeError:
                     pass
         except Exception as e:
-            logger.error(f"Arb validation failed: {e}")
+            logger.error(f"Arb validation failed: {e}", exc_info=True)
 
         return None
 

@@ -65,7 +65,7 @@ class KalshiClient:
             logger.info("Loaded RSA private key for Kalshi auth")
             return self._private_key
         except Exception as e:
-            logger.error(f"Failed to load private key: {e}")
+            logger.error(f"Failed to load private key: {e}", exc_info=True)
             return None
 
     def _full_path(self, path: str) -> str:
@@ -191,7 +191,7 @@ class KalshiClient:
             result = await self._request("GET", "/exchange/status")
             return result is not None
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
+            logger.error(f"Health check failed: {e}", exc_info=True)
             return False
 
     # ──────────────────────────────────────
@@ -228,7 +228,7 @@ class KalshiClient:
                 return data["market"]
             return data
         except Exception as e:
-            logger.error(f"Failed to get market {ticker}: {e}")
+            logger.error(f"Failed to get market {ticker}: {e}", exc_info=True)
             return None
 
     async def get_events(
@@ -258,7 +258,7 @@ class KalshiClient:
                 return data["orderbook"]
             return data
         except Exception as e:
-            logger.error(f"Failed to get orderbook for {ticker}: {e}")
+            logger.error(f"Failed to get orderbook for {ticker}: {e}", exc_info=True)
             return None
 
     async def get_market_history(self, ticker: str, limit: int = 1000) -> list[dict]:
@@ -289,7 +289,7 @@ class KalshiClient:
                     break
 
         except Exception as e:
-            logger.error(f"Failed to get trade history for {ticker}: {e}")
+            logger.error(f"Failed to get trade history for {ticker}: {e}", exc_info=True)
 
         return all_trades
 
@@ -309,8 +309,11 @@ class KalshiClient:
                     return 0.0
                 return balance
             return None
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error(f"Failed to get balance: {e}", exc_info=True)
+            return None
         except Exception as e:
-            logger.error(f"Failed to get balance: {e}")
+            logger.error("Unexpected error getting balance", exc_info=True)
             return None
 
     async def get_positions(self) -> list[dict]:
@@ -320,8 +323,11 @@ class KalshiClient:
             if data and "market_positions" in data:
                 return data["market_positions"]
             return []
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error(f"Failed to get positions: {e}", exc_info=True)
+            return []
         except Exception as e:
-            logger.error(f"Failed to get positions: {e}")
+            logger.error("Unexpected error getting positions", exc_info=True)
             return []
 
     # ──────────────────────────────────────
@@ -361,8 +367,11 @@ class KalshiClient:
                 logger.info(f"Order created: {action} {count} {side} on {ticker} at {yes_price}c")
                 return data["order"]
             return data
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error(f"Failed to create order: {e}", exc_info=True)
+            return None
         except Exception as e:
-            logger.error(f"Failed to create order: {e}")
+            logger.error("Unexpected error creating order", exc_info=True)
             return None
 
     async def cancel_order(self, order_id: str) -> Optional[dict]:
@@ -371,8 +380,11 @@ class KalshiClient:
             data = await self._request("DELETE", f"/portfolio/orders/{order_id}")
             logger.info(f"Order cancelled: {order_id}")
             return data
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error(f"Failed to cancel order {order_id}: {e}", exc_info=True)
+            return None
         except Exception as e:
-            logger.error(f"Failed to cancel order {order_id}: {e}")
+            logger.error(f"Unexpected error cancelling order {order_id}", exc_info=True)
             return None
 
     async def get_order(self, order_id: str) -> Optional[dict]:
@@ -382,8 +394,11 @@ class KalshiClient:
             if data and "order" in data:
                 return data["order"]
             return data
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error(f"Failed to get order {order_id}: {e}", exc_info=True)
+            return None
         except Exception as e:
-            logger.error(f"Failed to get order {order_id}: {e}")
+            logger.error(f"Unexpected error getting order {order_id}", exc_info=True)
             return None
 
     async def get_open_orders(self) -> list[dict]:
@@ -393,6 +408,9 @@ class KalshiClient:
             if data and "orders" in data:
                 return data["orders"]
             return []
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error(f"Failed to get open orders: {e}", exc_info=True)
+            return []
         except Exception as e:
-            logger.error(f"Failed to get open orders: {e}")
+            logger.error("Unexpected error getting open orders", exc_info=True)
             return []
