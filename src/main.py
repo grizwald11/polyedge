@@ -630,6 +630,8 @@ async def scan_and_trade(
 
                 # Adapt Kelly sizing based on calibration quality
                 kelly_sizer.update_calibration_multiplier(report.overall_brier)
+                # Also apply circuit breaker sizing reduction if consecutive losses
+                kelly_sizer.set_circuit_breaker_multiplier(circuit_breaker.get_kelly_multiplier())
             else:
                 logger.info("Calibration: no resolved predictions yet")
         except Exception as e:
@@ -729,6 +731,13 @@ async def run_trading_loop(
                 f"Run position sync on next live cycle to reconcile.",
                 exc_info=True,
             )
+            # After timeout, sync positions to detect any orphaned orders
+            try:
+                mismatches = await position_manager.sync_with_kalshi(kalshi)
+                if mismatches:
+                    logger.warning(f"Post-timeout sync found {mismatches} position mismatches")
+            except Exception as sync_err:
+                logger.error(f"Post-timeout position sync failed: {sync_err}", exc_info=True)
         except Exception as e:
             logger.error(f"Trade cycle failed: {e}", exc_info=True)
 
@@ -799,6 +808,14 @@ async def main():
     if not settings.anthropic_api_key:
         logger.error("ANTHROPIC_API_KEY not set — Claude forecasting will not work")
     forecaster = ClaudeForecaster(settings)
+    # Validate Anthropic API key works before starting trading loop
+    if settings.anthropic_api_key:
+        try:
+            await forecaster.health_check()
+            logger.info("Anthropic API: key validated successfully")
+        except Exception as e:
+            logger.error(f"Anthropic API key validation failed: {e}", exc_info=True)
+            logger.warning("Claude forecasting may not work — check ANTHROPIC_API_KEY")
     calibration = CalibrationTracker(db)
     resolution_tracker = ResolutionTracker(kalshi, db)
     calibration_analyzer = CalibrationAnalyzer(db)

@@ -68,6 +68,22 @@ class TestCallbackRegistration:
         ws_client.on_lifecycle(cb)
         assert len(ws_client._lifecycle_callbacks) == 1
 
+    def test_remove_callback(self, ws_client):
+        cb = AsyncMock()
+        cb_id = ws_client.on_price_update(cb)
+        assert len(ws_client._price_callbacks) == 1
+        assert ws_client.remove_callback(cb_id) is True
+        assert len(ws_client._price_callbacks) == 0
+
+    def test_remove_callback_nonexistent(self, ws_client):
+        assert ws_client.remove_callback(999999) is False
+
+    def test_duplicate_registration_replaces(self, ws_client):
+        cb = AsyncMock()
+        ws_client.on_price_update(cb)
+        ws_client.on_price_update(cb)
+        assert len(ws_client._price_callbacks) == 1
+
 
 class TestMessageParsing:
     def test_parse_ticker(self, ws_client):

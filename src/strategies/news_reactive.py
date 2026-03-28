@@ -99,6 +99,20 @@ class NewsReactiveStrategy:
         if result is None:
             return None
 
+        # Divergence gate: reject extreme disagreement with the market.
+        # Similar to ai_probability strategy — when Claude diverges too far
+        # from market price, it's more likely a hallucination than genuine edge.
+        max_div = self.settings.claude.max_divergence_from_market
+        divergence = abs(result.probability - market.yes_price)
+        if market.yes_price < 0.15 or market.yes_price > 0.85:
+            max_div = min(max_div, 0.25)
+        if divergence > max_div:
+            logger.warning(
+                f"News: rejecting {market.ticker}: Claude ({result.probability:.0%}) diverges "
+                f"{divergence:.0%} from market ({market.yes_price:.0%}) — exceeds max {max_div:.0%}"
+            )
+            return None
+
         # Calculate edge
         edge = result.probability - market.yes_price
         abs_edge = abs(edge)

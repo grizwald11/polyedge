@@ -288,7 +288,7 @@ class CrossArbStrategy:
                     market_question=most_expensive.question,
                     direction=Direction.BUY_NO,
                     edge=single_edge,
-                    probability_estimate=min(0.99, most_expensive.no_price + single_edge),
+                    probability_estimate=min(0.99, (1.0 - most_expensive.yes_price) + single_edge),
                     market_price=most_expensive.no_price,
                     confidence=0.85,
                     reasoning=(

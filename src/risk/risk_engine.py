@@ -79,7 +79,15 @@ class RiskEngine:
         bankroll = self.bankroll
 
         # 1. Balance check
+        # NOTE: total_exposure only counts filled positions — pending (unfilled)
+        # orders are NOT included.  A proper fix requires tracking open orders in
+        # the OrderRouter and summing their cost here.  Until then, the
+        # max_total_exposure_pct headroom provides a safety buffer.
         total_exposure = self.positions.get_total_exposure()
+        logger.debug(
+            "Exposure check: total_exposure=$%.2f (pending orders not included)",
+            total_exposure,
+        )
         available = bankroll - total_exposure
         if proposed_cost > available:
             failed.append(f"Insufficient balance: need ${proposed_cost:.2f}, available ${available:.2f}")

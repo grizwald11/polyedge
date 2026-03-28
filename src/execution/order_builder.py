@@ -156,40 +156,32 @@ class OrderBuilder:
             if token:
                 return Side.BUY, token.token_id
             else:
-                synthetic = f"{market.ticker}_yes"
-                logger.warning(f"Missing YES token for {market.ticker} ({market.platform.value}) — using synthetic ID '{synthetic}'")
-                return Side.BUY, synthetic
+                raise ValueError(f"Missing YES token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         elif direction == Direction.BUY_NO:
             token = market.no_token
             if token:
                 return Side.BUY, token.token_id
             else:
-                synthetic = f"{market.ticker}_no"
-                logger.warning(f"Missing NO token for {market.ticker} ({market.platform.value}) — using synthetic ID '{synthetic}'")
-                return Side.BUY, synthetic
+                raise ValueError(f"Missing NO token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         elif direction == Direction.SELL_YES:
             token = market.yes_token
             if token:
                 return Side.SELL, token.token_id
             else:
-                synthetic = f"{market.ticker}_yes"
-                logger.warning(f"Missing YES token for {market.ticker} ({market.platform.value}) — using synthetic ID '{synthetic}'")
-                return Side.SELL, synthetic
+                raise ValueError(f"Missing YES token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         else:  # SELL_NO
             token = market.no_token
             if token:
                 return Side.SELL, token.token_id
             else:
-                synthetic = f"{market.ticker}_no"
-                logger.warning(f"Missing NO token for {market.ticker} ({market.platform.value}) — using synthetic ID '{synthetic}'")
-                return Side.SELL, synthetic
+                raise ValueError(f"Missing NO token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
 
     @staticmethod
     def _clamp_price(price: float) -> float:
         """Clamp price to valid Kalshi range (0.01-0.99)."""
         clamped = max(0.01, min(0.99, round(price, 2)))
         if clamped != round(price, 2):
-            logger.debug(f"Price clamped: ${price:.4f} → ${clamped:.2f}")
+            logger.warning(f"Price clamped: ${price:.4f} → ${clamped:.2f}")
         return clamped
 
     @staticmethod

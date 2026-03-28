@@ -360,14 +360,16 @@ class TestTypeCAdditionalEdgeCases:
         strategy = self._make_strategy(mock_graph, mock_forecaster, tmp_db)
         markets = []
         for i in range(10):
-            m = _make_market(f"BIG-{i}", yes_price=0.08, event_ticker="BIG-EVENT")
+            # Use 0.07 (not 0.08) so sum=0.70, basket_edge=0.30,
+            # single_edge=0.03 — clearly above min_edge=0.02 even with float rounding.
+            m = _make_market(f"BIG-{i}", yes_price=0.07, event_ticker="BIG-EVENT")
             markets.append(m)
-        # Sum = 10 * 0.08 = 0.80 < 1.0 − 0.02 = 0.98 → underpriced
+        # Sum = 10 * 0.07 = 0.70 < 1.0 − 0.02 = 0.98 → underpriced
         signals = strategy._check_mutual_exclusivity(markets, "BIG-EVENT")
         assert len(signals) == 1
         assert signals[0].direction == Direction.BUY_YES
         # Edge should be scaled down for single outcome
-        assert signals[0].edge < 0.20  # Not full basket edge of 0.20
+        assert signals[0].edge < 0.30  # Not full basket edge of 0.30
 
     def test_duplicate_markets_no_double_count(self, mock_graph, mock_forecaster, tmp_db):
         """Duplicate tickers shouldn't cause issues."""

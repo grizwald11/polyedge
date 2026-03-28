@@ -103,8 +103,8 @@ class MetaculusClient:
         if self._disabled:
             # Allow retry after 30 minutes (don't permanently disable on transient failures)
             import time as _time
-            if hasattr(self, '_disabled_at') and _time.time() - self._disabled_at > 1800:
-                logger.info("Metaculus: re-enabling after 30min cooldown")
+            if hasattr(self, '_disabled_at') and _time.time() - self._disabled_at > 3600:
+                logger.info("Metaculus: re-enabling after 1h cooldown")
                 self._disabled = False
                 self._probe_done = False
             else:

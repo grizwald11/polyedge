@@ -52,6 +52,20 @@ class ClaudeForecaster:
             return self.settings.claude.model_highstakes
         return self.settings.claude.model_primary
 
+    async def health_check(self) -> None:
+        """Validate API key with a minimal Claude call.
+
+        Raises on failure so callers can log/warn appropriately.
+        """
+        client = self._get_client()
+        response = await client.messages.create(
+            model=self.settings.claude.model_primary,
+            max_tokens=10,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        if not response.content:
+            raise RuntimeError("Empty response from Claude API health check")
+
     def _select_temperature(self, category: MarketCategory) -> float:
         """Select temperature based on market category, falling back to default."""
         return self.settings.claude.category_temperatures.get(
@@ -68,6 +82,13 @@ class ClaudeForecaster:
             self._today_date = today
             self._total_tokens_today = 0
         self._total_tokens_today += tokens
+        # Soft daily token budget warning (hardcoded; make configurable if needed)
+        DAILY_TOKEN_WARNING_THRESHOLD = 500_000
+        if self._total_tokens_today > DAILY_TOKEN_WARNING_THRESHOLD:
+            logger.warning(
+                f"Claude API daily token usage ({self._total_tokens_today:,}) "
+                f"exceeds soft limit ({DAILY_TOKEN_WARNING_THRESHOLD:,})"
+            )
 
     @staticmethod
     def _extract_text(response) -> str | None:
@@ -457,7 +478,10 @@ class ClaudeForecaster:
     def _build_forecast(self, data: dict) -> ForecastResult:
         """Build a ForecastResult from parsed JSON data."""
         raw_probability = float(data.get("probability", 0.5))
-        # Clamp to valid range for trading calculations
+        # Clamp to valid range for trading calculations.
+        # NOTE: raw_probability is not stored on ForecastResult to avoid a
+        # model change; if downstream analysis needs the unclamped value,
+        # add a `raw_probability` field to ForecastResult.
         probability = max(0.01, min(0.99, raw_probability))
 
         if raw_probability != probability:
@@ -467,6 +491,8 @@ class ClaudeForecaster:
 
         return ForecastResult(
             probability=probability,
+            # Default CI of ±0.20 is arbitrary; could be improved with
+            # category-specific defaults or calibration-derived widths.
             confidence_low=max(0.0, min(1.0, float(data.get("confidence_low", max(0, probability - 0.20))))),
             confidence_high=max(0.0, min(1.0, float(data.get("confidence_high", min(1, probability + 0.20))))),
             key_factors_for=data.get("key_factors_for", []),

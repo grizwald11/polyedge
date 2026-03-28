@@ -231,7 +231,10 @@ def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
     text = text[:max_length]
     if original_len > max_length:
         logger.debug(f"Sanitize: truncated text from {original_len} to {max_length} chars")
-    # Detect and warn about suspicious prompt injection patterns
+    # Detect and STRIP suspicious prompt injection patterns.
+    # Prior to this fix, detected patterns were only warned about but still
+    # included in the prompt — a crafted market description could manipulate
+    # Claude's probability output.
     warning_patterns = [
         (r"(?i)ignore\s+(all\s+)?previous\s+instructions", "ignore previous instructions"),
         (r"(?i)you\s+are\s+now\s+", "role override attempt"),
@@ -243,9 +246,10 @@ def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
     for pattern, description in warning_patterns:
         if re.search(pattern, text):
             logger.warning(
-                f"Suspicious prompt injection pattern detected ({description}) "
-                f"in external text: {text[:100]!r}..."
+                f"Prompt injection pattern STRIPPED ({description}) "
+                f"from external text: {text[:100]!r}..."
             )
+            text = re.sub(pattern, "[REMOVED]", text)
     return text
 
 

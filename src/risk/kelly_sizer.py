@@ -34,6 +34,7 @@ class KellySizer:
         self.fee_rate = 0.0
         self._fee_rate_if_enabled = 0.0175 if settings.trading.prefer_maker else 0.07
         self._calibration_multiplier: float = 1.0
+        self._circuit_breaker_multiplier: float = 1.0
 
     def calculate_position_size(
         self,
@@ -166,18 +167,19 @@ class KellySizer:
         # For multi-contract positions, scale down but floor at 1 contract.
         # Only skip entirely when calibration is very poor (≤25%) AND the
         # original Kelly sizing was already just 1 contract (minimal conviction).
-        if self._calibration_multiplier < 1.0 and contracts > 0:
-            if self._calibration_multiplier <= 0.25 and contracts == 1:
+        effective_multiplier = self._calibration_multiplier * self._circuit_breaker_multiplier
+        if effective_multiplier < 1.0 and contracts > 0:
+            if effective_multiplier <= 0.25 and contracts == 1:
                 # Very poor calibration on a minimal-conviction trade — don't trade
                 return 0
-            scaled = int(contracts * self._calibration_multiplier)
+            scaled = int(contracts * effective_multiplier)
             contracts = max(1, scaled)
 
         logger.debug(
             f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "
             f"kelly_f={kelly_fraction:.3f}, half={half_kelly:.3f}, "
             f"${kelly_dollars:.2f} → {contracts} contracts @ ${cost_price:.2f}"
-            f" (cal_mult={self._calibration_multiplier:.2f})"
+            f" (cal_mult={self._calibration_multiplier:.2f}, cb_mult={self._circuit_breaker_multiplier:.2f})"
         )
 
         return contracts
@@ -210,6 +212,18 @@ class KellySizer:
                 f"(Brier={brier_score:.3f})"
             )
         self._calibration_multiplier = mult
+
+    def set_circuit_breaker_multiplier(self, multiplier: float) -> None:
+        """Apply circuit breaker multiplier on top of calibration multiplier.
+
+        Called when circuit breaker detects consecutive losses and wants
+        to reduce position sizing as a safety measure.
+        """
+        if multiplier != self._circuit_breaker_multiplier:
+            logger.info(
+                f"Kelly: circuit breaker multiplier {self._circuit_breaker_multiplier:.2f} → {multiplier:.2f}"
+            )
+            self._circuit_breaker_multiplier = multiplier
 
     @property
     def calibration_multiplier(self) -> float:

@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
+-- NOTE: Prices and monetary values are stored as REAL (float). Ideally these
+-- would be INTEGER cents to avoid floating-point rounding, but migrating the
+-- schema is deferred to avoid risk. All comparison logic should use epsilon
+-- tolerances (e.g., abs(a - b) < 1e-9) rather than exact equality.
+
 -- Markets (ticker + platform composite key for multi-platform support)
 CREATE TABLE IF NOT EXISTS markets (
     ticker TEXT NOT NULL,
@@ -251,6 +256,7 @@ class Database:
         # to re-enable database-level referential integrity. Until then, orphaned
         # records are possible if markets are deleted without cascading.
         conn.execute("PRAGMA foreign_keys=OFF")
+        logger.debug("FK enforcement off (tech debt: child tables need composite FK migration)")
         conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
         return conn

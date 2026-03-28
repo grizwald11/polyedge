@@ -112,8 +112,11 @@ class CalibrationTracker:
 
         total = 0.0
         valid_count = 0
+        skipped_null = 0
+        skipped_bad = 0
         for r in records:
             if r["actual_outcome"] is None:
+                skipped_null += 1
                 continue
             try:
                 outcome = float(r["actual_outcome"])
@@ -124,9 +127,17 @@ class CalibrationTracker:
                     f"market={r.get('market_id')}, outcome={r.get('actual_outcome')!r}, "
                     f"predicted={r.get('predicted_probability')!r}: {e}"
                 )
+                skipped_bad += 1
                 continue
             total += (predicted - outcome) ** 2
             valid_count += 1
+
+        if skipped_null or skipped_bad:
+            logger.info(
+                f"Brier score: {valid_count} valid records, "
+                f"{skipped_null} skipped (cancelled/NULL outcome), "
+                f"{skipped_bad} skipped (bad data)"
+            )
 
         if valid_count == 0:
             return None

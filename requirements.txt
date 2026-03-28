@@ -6,7 +6,7 @@
 kalshi-python==2.1.4
 
 # Polymarket SDK (not installed locally — pin when deploying Polymarket features)
-py-clob-client>=0.34.6
+py-clob-client==0.34.6
 
 # RSA signing for Kalshi API auth
 cryptography==46.0.5

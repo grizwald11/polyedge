@@ -92,15 +92,16 @@ class DataEnricher:
             asyncio.create_task(self._safe_fetch(name, coro))
             for name, coro in tasks.items()
         ]
-        done, pending = await asyncio.wait(wrapped_tasks, timeout=30)
+        done, pending = await asyncio.wait(wrapped_tasks, timeout=15)
 
-        # Collect results from completed tasks
+        # Collect results from completed tasks, logging any failures
         for task in done:
             try:
                 name, result = task.result()
                 results[name] = result
             except Exception as e:
-                logger.debug(f"Data enrichment task failed: {e}")
+                # Extract source name from the exception or task for diagnostics
+                logger.warning(f"Data enrichment source failed: {e}")
 
         # Cancel any still-pending tasks and await them to ensure cleanup
         if pending:
@@ -110,7 +111,7 @@ class DataEnricher:
             # ensure underlying HTTP connections are properly released.
             await asyncio.gather(*pending, return_exceptions=True)
             logger.warning(
-                f"Data enrichment: {len(pending)} sources timed out after 30s, "
+                f"Data enrichment: {len(pending)} sources timed out after 15s, "
                 f"{len(done)} completed"
             )
 

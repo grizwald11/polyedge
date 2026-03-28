@@ -93,15 +93,15 @@ class KalshiWebSocket:
         self._private_key = None
 
         self._subscriptions: set[str] = set()
-        self._channels: list[str] = ["ticker"]
+        self._channels: list[str] = ["ticker", "fill"]
         self._ws = None
         self._cmd_id: int = 0
         self._running: bool = False
 
-        # Callbacks
-        self._price_callbacks: list[PriceCallback] = []
-        self._fill_callbacks: list[FillCallback] = []
-        self._lifecycle_callbacks: list[LifecycleCallback] = []
+        # Callbacks keyed by id to prevent duplicates and allow removal
+        self._price_callbacks: dict[int, PriceCallback] = {}
+        self._fill_callbacks: dict[int, FillCallback] = {}
+        self._lifecycle_callbacks: dict[int, LifecycleCallback] = {}
 
     # ── Subscription management ────────────────────
 
@@ -131,17 +131,31 @@ class KalshiWebSocket:
 
     # ── Callback registration ──────────────────────
 
-    def on_price_update(self, callback: PriceCallback):
-        if callback not in self._price_callbacks:
-            self._price_callbacks.append(callback)
+    def on_price_update(self, callback: PriceCallback) -> int:
+        cb_id = id(callback)
+        self._price_callbacks[cb_id] = callback
+        return cb_id
 
-    def on_fill(self, callback: FillCallback):
-        if callback not in self._fill_callbacks:
-            self._fill_callbacks.append(callback)
+    def on_fill(self, callback: FillCallback) -> int:
+        cb_id = id(callback)
+        self._fill_callbacks[cb_id] = callback
+        return cb_id
 
-    def on_lifecycle(self, callback: LifecycleCallback):
-        if callback not in self._lifecycle_callbacks:
-            self._lifecycle_callbacks.append(callback)
+    def on_lifecycle(self, callback: LifecycleCallback) -> int:
+        cb_id = id(callback)
+        self._lifecycle_callbacks[cb_id] = callback
+        return cb_id
+
+    def remove_callback(self, cb_id: int) -> bool:
+        """Remove a previously registered callback by its id.
+
+        Returns True if the callback was found and removed.
+        """
+        for registry in (self._price_callbacks, self._fill_callbacks, self._lifecycle_callbacks):
+            if cb_id in registry:
+                del registry[cb_id]
+                return True
+        return False
 
     # ── Connection lifecycle ───────────────────────
 
@@ -234,7 +248,7 @@ class KalshiWebSocket:
             return
         exc = task.exception()
         if exc is not None:
-            logger.error(f"WebSocket background task failed: {exc}")
+            logger.error(f"WebSocket background task failed: {exc}", exc_info=exc)
 
     # ── Internal ───────────────────────────────────
 
@@ -242,8 +256,9 @@ class KalshiWebSocket:
         """Run callbacks concurrently instead of sequentially."""
         if not callbacks:
             return
+        cb_list = list(callbacks.values()) if isinstance(callbacks, dict) else callbacks
         results = await asyncio.gather(
-            *(cb(update) for cb in callbacks),
+            *(cb(update) for cb in cb_list),
             return_exceptions=True,
         )
         for i, result in enumerate(results):
@@ -324,10 +339,17 @@ class KalshiWebSocket:
         try:
             data = msg.get("msg", msg)
             settlement = data.get("settlement_value")
+            settlement_float = float(settlement) if settlement is not None else None
+            if settlement_float is not None and not (0.0 <= settlement_float <= 1.0):
+                logger.warning(
+                    f"Settlement value {settlement_float} out of range [0, 1] "
+                    f"for {data.get('market_ticker', '?')} — clamping"
+                )
+                settlement_float = max(0.0, min(1.0, settlement_float))
             return LifecycleUpdate(
                 market_ticker=data.get("market_ticker", ""),
                 status=data.get("status", ""),
-                settlement_value=float(settlement) if settlement is not None else None,
+                settlement_value=settlement_float,
             )
         except (ValueError, TypeError) as e:
             logger.debug(f"Failed to parse lifecycle: {e}")

@@ -79,6 +79,7 @@ class AIProbabilityStrategy:
             if match is not None:
                 prob = match["community_prediction"]
                 bettors = match.get("forecasters_count", 0)
+                # Heuristic: CI narrows linearly with bettor count (0.20 at 0 bettors → 0.10 at 100)
                 ci_half = max(0.05, 0.20 - min(bettors, 100) * 0.001)
                 return ForecastResult(
                     probability=prob,
@@ -88,7 +89,7 @@ class AIProbabilityStrategy:
                     model_used="manifold_community",
                 )
         except Exception as e:
-            logger.debug(f"Manifold forecast unavailable for {market.ticker}: {e}")
+            logger.info(f"Manifold forecast unavailable for {market.ticker}: {e}")
 
         # Fall back to Metaculus
         try:
@@ -105,7 +106,7 @@ class AIProbabilityStrategy:
                     model_used="metaculus_community",
                 )
         except Exception as e:
-            logger.debug(f"Metaculus forecast unavailable for {market.ticker}: {e}")
+            logger.info(f"Metaculus forecast unavailable for {market.ticker}: {e}")
 
         return None
 

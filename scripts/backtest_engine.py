@@ -21,6 +21,7 @@ KNOWN BIASES (do NOT use results for live trading decisions):
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,9 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 from src.config import Settings, load_settings
 from src.core.models import (
@@ -590,6 +594,10 @@ def format_result(result: BacktestResult, bankroll: float = 500.0) -> str:
         lines.append(f"  Sharpe Ratio:  {result.sharpe_ratio:.2f}")
     if result.calmar_ratio is not None:
         lines.append(f"  Calmar Ratio:  {result.calmar_ratio:.2f}")
+    lines.append(
+        "  ⚠ WARNING: MockForecaster uses lookahead bias — "
+        "results are NOT indicative of live performance"
+    )
     return "\n".join(lines)
 
 
@@ -636,6 +644,11 @@ def main():
     parser.add_argument("--sweep", default=None,
                         help="Parameter sweep: param_name=v1,v2,v3 (e.g. kelly_fraction=0.25,0.5,0.75)")
     args = parser.parse_args()
+
+    logger.warning(
+        "BACKTEST WARNING: MockForecaster uses lookahead bias "
+        "— results are NOT indicative of live performance"
+    )
 
     settings = load_settings()
     db = Database(args.db)

@@ -255,14 +255,27 @@ class OrderRouter:
                     success=False, order=order, error="Kalshi API returned None"
                 )
 
-            # Poll for fill status (limit orders may rest)
-            kalshi_order_id = result.get("order_id", "")
+            # Validate order_id exists in response — without it we can't
+            # track or poll the order, risking orphaned positions on Kalshi.
+            kalshi_order_id = (result.get("order_id") or "").strip()
+            if not kalshi_order_id:
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = "Kalshi API did not return order_id"
+                self._log_order(order)
+                logger.error(
+                    f"Kalshi order response missing order_id: {result}",
+                    exc_info=True,
+                )
+                return OrderResult(
+                    success=False, order=order,
+                    error="Kalshi API did not return order_id",
+                )
             final_status = await self._poll_order_status(kalshi_order_id, result)
 
             # Capture timestamp once for consistency
             now = datetime.now(timezone.utc)
 
-            if final_status in ("executed", "filled"):
+            if final_status in ("executed",):
                 order.status = OrderStatus.FILLED
                 order.filled_at = now
                 # Use actual fill price from API if available; fall back to order price
@@ -440,7 +453,7 @@ class OrderRouter:
         Returns the final status string.
         """
         status = initial_data.get("status", "").lower()
-        if status in ("executed", "filled", "canceled", "cancelled"):
+        if status in ("executed", "canceled", "cancelled", "expired"):
             return status
 
         if not kalshi_order_id:
@@ -454,7 +467,7 @@ class OrderRouter:
                 order_data = await self.kalshi.get_order(kalshi_order_id)
                 if order_data:
                     status = order_data.get("status", "").lower()
-                    if status in ("executed", "filled", "canceled", "cancelled"):
+                    if status in ("executed", "canceled", "cancelled", "expired"):
                         return status
             except Exception as e:
                 logger.warning(f"Order poll attempt {attempt + 1} failed: {e}")
