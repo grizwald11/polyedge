@@ -156,10 +156,14 @@ class PositionManager:
         if yes_price <= 0 and no_price <= 0:
             return
 
-        # Use the price matching the position's side
+        # Use the price matching the position's side, but only if valid
         if position.direction in (Direction.BUY_NO, Direction.SELL_NO):
+            if no_price <= 0:
+                return  # No valid price for this position's side
             position.current_price = no_price
         else:
+            if yes_price <= 0:
+                return  # No valid price for this position's side
             position.current_price = yes_price
         # P&L = (current - entry) * size for BUY, (entry - current) * size for SELL
         if position.direction in (Direction.BUY_YES, Direction.BUY_NO):
@@ -259,7 +263,12 @@ class PositionManager:
                     )
 
         # 3. Take-profit: capture gains when near max theoretical payout
-        max_gain = (1.0 - position.avg_entry_price) * position.size  # Max possible gain
+        # BUY_YES/BUY_NO: max gain = (1.0 - entry) * size (payout is $1.00)
+        # SELL_YES/SELL_NO: max gain = entry * size (payout is $0.00)
+        if position.direction in (Direction.BUY_YES, Direction.BUY_NO):
+            max_gain = (1.0 - position.avg_entry_price) * position.size
+        else:
+            max_gain = position.avg_entry_price * position.size
         if max_gain > 0 and position.unrealized_pnl >= max_gain * DEFAULT_TAKE_PROFIT_PCT:
             return True, (
                 f"take_profit: captured {position.unrealized_pnl / max_gain:.0%} of max gain "

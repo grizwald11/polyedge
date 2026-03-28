@@ -81,7 +81,7 @@ class KellySizer:
         # For binary markets: b = (1 - market_price) / market_price
         # market_price = probability - edge (approx)
         market_price = probability - edge
-        if market_price <= 0 or market_price >= 0.99:
+        if market_price <= 0 or market_price >= 1.0:
             logger.debug(
                 f"Kelly: invalid market_price={market_price:.3f} "
                 f"(prob={probability:.3f}, edge={edge:.3f}) — skipping"

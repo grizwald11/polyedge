@@ -77,7 +77,7 @@ class CrossArbStrategy:
 
     def _check_intra_market(self, market: Market) -> Optional[Signal]:
         """Type A: Check if YES + NO prices sum to less than 1.0 (minus fee threshold)."""
-        if not market.yes_price or not market.no_price:
+        if market.yes_price <= 0 or market.no_price <= 0:
             return None
 
         total = market.yes_price + market.no_price

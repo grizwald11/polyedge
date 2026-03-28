@@ -111,6 +111,13 @@ class OrderBuilder:
         else:
             price = market.no_price
 
+        # Reject if price is missing/zero — don't silently clamp to $0.01
+        if price <= 0:
+            raise ValueError(
+                f"Cannot build market order: {signal.direction.value} price is "
+                f"${price:.4f} for {market.ticker} (missing market token data)"
+            )
+
         price = self._clamp_price(price)
         fee_dollars = self._calculate_fee(market.platform, size, price, maker=False)
         cost = price * size + fee_dollars

@@ -420,11 +420,14 @@ class ForecastResult(BaseModel):
         # Re-clamp ci_low defensively in case field validation order varies
         ci_low = max(0.0, min(1.0, info.data.get("confidence_low", 0.0)))
         if v < ci_low:
-            # Auto-correct inverted CI bounds rather than rejecting
+            # Auto-correct inverted CI bounds by swapping
             # (Claude occasionally returns them swapped)
             logging.getLogger(__name__).warning(
                 f"Inverted CI bounds: low={ci_low}, high={v} — swapping"
             )
+            # Swap: put the original v (smaller) into confidence_low,
+            # and use ci_low (larger) as confidence_high
+            info.data["confidence_low"] = v
             v = ci_low
         return v
 
@@ -436,6 +439,16 @@ class EnsembleForecast(BaseModel):
     market_price: float = 0.0
     edge: float = 0.0  # final_probability - market_price
     confidence: float = 0.5
+
+    @field_validator("final_probability")
+    @classmethod
+    def final_probability_valid(cls, v: float) -> float:
+        import math
+        if not math.isfinite(v):
+            raise ValueError(f"final_probability must be finite, got {v}")
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"final_probability must be in [0, 1], got {v}")
+        return v
 
     @field_validator("edge")
     @classmethod
