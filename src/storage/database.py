@@ -247,6 +247,9 @@ class Database:
         # SQLite requires the parent to have a UNIQUE constraint on the referenced
         # column(s), and composite PK (ticker, platform) doesn't satisfy FK refs
         # to markets(ticker) alone. App logic enforces referential integrity.
+        # TECH DEBT: Migrate child tables to composite FK (market_id, platform)
+        # to re-enable database-level referential integrity. Until then, orphaned
+        # records are possible if markets are deleted without cascading.
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
@@ -622,12 +625,22 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_market(self, ticker: str) -> Optional[dict]:
-        """Get a single market by ticker."""
+    def get_market(self, ticker: str, platform: str = None) -> Optional[dict]:
+        """Get a single market by ticker, optionally filtered by platform.
+
+        When platform is None, returns the first match (backward-compatible).
+        When platform is specified, returns only the exact match for that
+        ticker+platform combination (correct for multi-platform usage).
+        """
         conn = self._get_conn()
-        row = conn.execute(
-            "SELECT * FROM markets WHERE ticker=?", (ticker,)
-        ).fetchone()
+        if platform:
+            row = conn.execute(
+                "SELECT * FROM markets WHERE ticker=? AND platform=?", (ticker, platform)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM markets WHERE ticker=?", (ticker,)
+            ).fetchone()
         return dict(row) if row else None
 
     def get_market_count(self) -> int:

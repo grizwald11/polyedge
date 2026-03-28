@@ -178,10 +178,18 @@ class FillTracker:
         if filled_count <= 0:
             return None
 
-        # Calculate delta: only record contracts not yet recorded
+        # Calculate delta: only record contracts not yet recorded.
+        # Assumption: filled_count is monotonically increasing from the API.
+        # If the API ever reports a lower count (fill correction), log a warning.
         already_recorded = self._partial_recorded.get(order.id, 0)
         delta = filled_count - already_recorded
-        if delta <= 0:
+        if delta < 0:
+            logger.warning(
+                f"Non-monotonic filled_count for {order.id}: "
+                f"API={filled_count}, recorded={already_recorded} — possible API anomaly"
+            )
+            return None
+        if delta == 0:
             return None
 
         now = datetime.now(timezone.utc)

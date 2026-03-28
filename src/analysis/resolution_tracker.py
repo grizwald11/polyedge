@@ -58,7 +58,7 @@ class ResolutionTracker:
                 else:
                     result = await self._check_single_market(ticker)
                 if result is not None:
-                    count = self._resolve_predictions(ticker, result)
+                    count = self._resolve_predictions(ticker, platform_str, result)
                     if count > 0:
                         resolved_count += 1
                         logger.info(
@@ -150,10 +150,12 @@ class ResolutionTracker:
             logger.debug(f"Polymarket resolution check failed for {condition_id}: {e}")
             return None
 
-    def _resolve_predictions(self, market_id: str, actual_outcome: bool) -> int:
+    def _resolve_predictions(self, market_id: str, platform: str, actual_outcome: bool) -> int:
         """Update all unresolved predictions for a market with the actual outcome.
 
         Computes Brier score and profit/loss for each prediction.
+        Filters by both market_id AND platform to prevent cross-platform
+        calibration data corruption.
 
         Returns:
             Number of predictions resolved.
@@ -162,12 +164,12 @@ class ResolutionTracker:
         outcome_int = 1 if actual_outcome else 0
 
         conn = self.db._get_conn()
-        # Get unresolved predictions for this market
+        # Get unresolved predictions for this market+platform combination
         rows = conn.execute(
             """SELECT id, predicted_probability, market_price_at_prediction
                FROM calibration_records
-               WHERE market_id = ? AND actual_outcome IS NULL""",
-            (market_id,),
+               WHERE market_id = ? AND platform = ? AND actual_outcome IS NULL""",
+            (market_id, platform),
         ).fetchall()
 
         if not rows:

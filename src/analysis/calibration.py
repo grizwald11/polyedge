@@ -201,6 +201,8 @@ class CalibrationTracker:
 
         result = {}
         for cat, records in categories.items():
+            if not records:
+                continue
             brier = sum(
                 (r["predicted_probability"] - float(r["actual_outcome"])) ** 2
                 for r in records

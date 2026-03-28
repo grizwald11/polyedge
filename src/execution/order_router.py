@@ -111,12 +111,13 @@ class OrderRouter:
 
         Returns (filled, fill_price). ~15% of limit orders miss entirely.
         Fills include 0-1 cent adverse slippage.
-        Uses deterministic hash for reproducibility.
+        Uses order ID for per-order randomness (different results across cycles).
         """
         import hashlib
-        # Deterministic pseudo-random based on order details
+        # Per-order pseudo-random: include order ID so repeated assessments
+        # of the same signal produce different outcomes across cycles
         seed = hashlib.md5(
-            f"{order.market_id}:{order.price}:{order.size}:{order.side.value}".encode()
+            f"{order.id}:{order.market_id}:{order.price}:{order.size}:{order.side.value}".encode()
         ).hexdigest()
         rand_val = int(seed[:8], 16) / 0xFFFFFFFF  # 0.0 to 1.0
 
@@ -153,15 +154,16 @@ class OrderRouter:
         order.filled_at = now
         order.fill_price = fill_price
 
-        # Calculate fee (platform-aware)
+        # Calculate fee using fill_price (not order.price) for accuracy
+        # when slippage causes the fill to differ from the submitted price
         if order.platform == Platform.POLYMARKET:
             fee_dollars = 0.0  # Event markets are fee-free
         else:
-            price_cents = dollars_to_cents(order.price)
+            fill_price_cents = dollars_to_cents(fill_price)
             if order.order_type == OrderType.GTC:
-                fee_cents = kalshi_maker_fee(int(order.size), price_cents)
+                fee_cents = kalshi_maker_fee(int(order.size), fill_price_cents)
             else:
-                fee_cents = kalshi_taker_fee(int(order.size), price_cents)
+                fee_cents = kalshi_taker_fee(int(order.size), fill_price_cents)
             fee_dollars = fee_cents / 100.0
 
         # Create trade record (use fill_price for accurate P&L)

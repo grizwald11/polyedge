@@ -49,7 +49,8 @@ class PortfolioRisk:
 
         total = 0.0
         for pos in self.positions.get_all_positions():
-            pos_event = self._get_event_ticker(pos.market_id)
+            pos_platform = pos.platform.value if hasattr(pos.platform, 'value') else str(pos.platform)
+            pos_event = self._get_event_ticker(pos.market_id, platform=pos_platform)
             if pos_event == event_ticker:
                 total += pos.cost_basis
 
@@ -59,7 +60,8 @@ class PortfolioRisk:
         """Get total exposure for all positions in an event."""
         total = 0.0
         for pos in self.positions.get_all_positions():
-            pos_event = self._get_event_ticker(pos.market_id)
+            pos_platform = pos.platform.value if hasattr(pos.platform, 'value') else str(pos.platform)
+            pos_event = self._get_event_ticker(pos.market_id, platform=pos_platform)
             if pos_event == event_ticker:
                 total += pos.cost_basis
         return total
@@ -68,7 +70,8 @@ class PortfolioRisk:
         """Get total exposure for a market category."""
         total = 0.0
         for pos in self.positions.get_all_positions():
-            market_data = self.db.get_market(pos.market_id)
+            pos_platform = pos.platform.value if hasattr(pos.platform, 'value') else str(pos.platform)
+            market_data = self.db.get_market(pos.market_id, platform=pos_platform)
             if market_data and market_data.get("category") == category:
                 total += pos.cost_basis
         return total
@@ -114,11 +117,12 @@ class PortfolioRisk:
 
         return warnings
 
-    def _get_event_ticker(self, market_id: str) -> Optional[str]:
+    def _get_event_ticker(self, market_id: str, platform: str = None) -> Optional[str]:
         """Look up the event_ticker for a market from the database (cached)."""
-        if market_id in self._event_ticker_cache:
-            return self._event_ticker_cache[market_id]
-        market_data = self.db.get_market(market_id)
+        cache_key = f"{market_id}:{platform}" if platform else market_id
+        if cache_key in self._event_ticker_cache:
+            return self._event_ticker_cache[cache_key]
+        market_data = self.db.get_market(market_id, platform=platform)
         result = market_data.get("event_ticker") or None if market_data else None
-        self._event_ticker_cache[market_id] = result
+        self._event_ticker_cache[cache_key] = result
         return result

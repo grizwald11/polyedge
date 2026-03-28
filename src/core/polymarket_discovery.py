@@ -149,8 +149,17 @@ def parse_polymarket_market(raw: dict[str, Any]) -> Optional[Market]:
         # Liquidity
         liquidity = float(raw.get("liquidity", 0) or 0)
 
-        # Spread
-        spread = abs(yes_price + no_price - 1.0) if yes_price > 0 else 0.0
+        # Spread: use actual bid-ask data if available, fall back to price deviation
+        best_bid = raw.get("bestBid")
+        best_ask = raw.get("bestAsk")
+        if best_bid is not None and best_ask is not None:
+            try:
+                spread = max(0.0, float(best_ask) - float(best_bid))
+            except (ValueError, TypeError):
+                spread = abs(yes_price + no_price - 1.0) if yes_price > 0 else 0.0
+        else:
+            # Fallback: price deviation from 1.0 as proxy for data quality
+            spread = abs(yes_price + no_price - 1.0) if yes_price > 0 else 0.0
 
         # End date
         end_date = None

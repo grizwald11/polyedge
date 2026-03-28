@@ -158,6 +158,17 @@ class PositionManager:
         if yes_price <= 0 and no_price <= 0:
             return
 
+        # Stale price detection: warn if price hasn't changed in a while.
+        # This catches dead data feeds that silently replay old prices.
+        now = datetime.now(timezone.utc)
+        time_since_update = (now - position.last_updated).total_seconds()
+        price_for_side = no_price if position.direction in (Direction.BUY_NO, Direction.SELL_NO) else yes_price
+        if time_since_update > 300 and price_for_side == position.current_price and position.current_price > 0:
+            logger.warning(
+                f"Stale price detected for {market_id}: ${price_for_side:.2f} unchanged "
+                f"for {time_since_update:.0f}s — data feed may be dead"
+            )
+
         # Use the price matching the position's side, but only if valid
         if position.direction in (Direction.BUY_NO, Direction.SELL_NO):
             if no_price <= 0:

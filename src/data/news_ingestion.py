@@ -58,7 +58,8 @@ class NewsIngestion:
         ]
         self.max_article_age_seconds = max_article_age_minutes * 60
         self.min_relevance = min_relevance
-        self._seen_urls: set[str] = set()
+        from collections import OrderedDict
+        self._seen_urls: OrderedDict[str, None] = OrderedDict()
         self._max_seen_urls = 10000  # Cap to prevent unbounded memory growth
 
     async def poll_feeds(self) -> list[NewsItem]:
@@ -80,13 +81,10 @@ class NewsIngestion:
                     url = entry.get("link", "")
                     if url in self._seen_urls:
                         continue
-                    # Evict oldest entries when cap reached
-                    if len(self._seen_urls) >= self._max_seen_urls:
-                        # Remove ~20% of oldest (set is unordered, but clearing
-                        # a chunk is sufficient to bound memory)
-                        to_remove = list(self._seen_urls)[:self._max_seen_urls // 5]
-                        self._seen_urls -= set(to_remove)
-                    self._seen_urls.add(url)
+                    # Evict oldest entries (FIFO) when cap reached
+                    while len(self._seen_urls) >= self._max_seen_urls:
+                        self._seen_urls.popitem(last=False)  # Remove oldest
+                    self._seen_urls[url] = None
 
                     published = self._parse_date(entry)
                     item = NewsItem(

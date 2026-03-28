@@ -308,19 +308,27 @@ class TestEnsembleExtremeCombinations:
     """Edge cases with extreme Claude + market price combinations."""
 
     def test_max_disagreement_claude_high_market_low(self):
-        """Claude says 0.99, market says 0.01 — extreme divergence."""
+        """Claude says 0.99, market says 0.01 — extreme divergence.
+
+        On extreme-price markets, Claude's weight is aggressively reduced
+        (floor=0.25) because divergence at the tails is more likely a
+        hallucination than genuine edge.
+        """
         f = _make_forecast(0.99)
         result = ensemble_forecast(f, market_price=0.01)
         assert 0.01 <= result.final_probability <= 0.99
-        # Should be pulled toward market but still bullish
-        assert result.final_probability > 0.40
+        # Extreme-price weighting pulls hard toward market; result should be
+        # above market but well below midpoint due to reduced Claude weight
+        assert result.final_probability > 0.10
+        assert result.final_probability < 0.50
 
     def test_max_disagreement_claude_low_market_high(self):
         """Claude says 0.01, market says 0.99 — extreme inverse."""
         f = _make_forecast(0.01)
         result = ensemble_forecast(f, market_price=0.99)
         assert 0.01 <= result.final_probability <= 0.99
-        assert result.final_probability < 0.60
+        # Symmetric: pulled toward market, above midpoint
+        assert result.final_probability > 0.50
 
     def test_both_extreme_high(self):
         """Both Claude and market at 0.99."""

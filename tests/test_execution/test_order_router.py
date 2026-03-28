@@ -62,10 +62,11 @@ class TestPaperFill:
 
         assert result.success is True
         assert result.order.status == OrderStatus.FILLED
-        assert result.order.fill_price == 0.34
+        # Fill price includes up to 1 cent adverse slippage (BUY → price goes up)
+        assert 0.34 <= result.order.fill_price <= 0.35
         assert result.order.filled_at is not None
         assert result.trade is not None
-        assert result.trade.price == 0.34
+        assert result.trade.price == result.order.fill_price
         assert result.trade.size == 10
         assert result.trade.paper is True
 
