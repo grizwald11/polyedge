@@ -88,10 +88,12 @@ class KellySizer:
             )
             return 0
 
-        # Reject ultra-cheap contracts (<$0.05): tiny absolute moves wipe out
+        # Reject cheap contracts (<$0.10): tiny absolute moves wipe out
         # the position, and Kelly produces huge contract counts that amplify losses.
+        # $0.05 was too low — contracts at $0.05-$0.10 still caused major losses
+        # (KXDHSFUND at $0.05, KXTRUMPADMINLEAVE at $0.15, etc.).
         cost_price_check = order_price if order_price and order_price > 0 else market_price
-        if cost_price_check < 0.05:
+        if cost_price_check < 0.10:
             logger.debug(
                 f"Kelly: rejecting ultra-cheap contract @ ${cost_price_check:.2f} "
                 f"(prob={probability:.3f}, edge={edge:.3f})"

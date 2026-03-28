@@ -142,6 +142,26 @@ class CrossArbStrategy:
             # All questions are the same after removing date qualifiers → temporal cascade
             return False
 
+        # Threshold/range cascade detection: same base question with different
+        # numeric thresholds (e.g., "below 38%" vs "below 36%"). These are
+        # nested/cumulative — if below 36% is true, below 38% is also true.
+        # NOT mutually exclusive.
+        threshold_pattern = re.compile(
+            r'(below |above |over |under |at least |more than |less than |fewer than )'
+            r'[\d,.]+%?',
+            re.IGNORECASE,
+        )
+        threshold_stripped = set()
+        any_had_thresholds = False
+        for q in questions:
+            s = threshold_pattern.sub('', q).strip().rstrip('?').strip()
+            if s != q.strip().rstrip('?').strip():
+                any_had_thresholds = True
+            threshold_stripped.add(s)
+        if len(threshold_stripped) == 1 and any_had_thresholds:
+            # All questions are the same after removing thresholds → nested cascade
+            return False
+
         # Independent event keywords: each outcome asks "Will [person/thing] [verb]?"
         # where multiple can independently be true.
         independent_patterns = [
@@ -185,7 +205,8 @@ class CrossArbStrategy:
         if len(markets) > 2:
             return False
 
-        # Binary (2 outcomes): likely a true YES/NO pair. Check if they look complementary.
+        # Binary (2 outcomes): check if they look complementary.
+        # Do NOT default to True — false positives here generate bad arb signals.
         if len(markets) == 2:
             q0, q1 = questions[0], questions[1]
             # Check if one is the negation or complement of the other
@@ -193,8 +214,9 @@ class CrossArbStrategy:
                 return True
             if ('yes' in q0 and 'no' in q1) or ('no' in q0 and 'yes' in q1):
                 return True
-            # Two differently-phrased questions in same event with 2 outcomes → likely exclusive
-            return True
+            # Two differently-phrased questions — NOT safe to assume exclusive.
+            # Could be nested thresholds, temporal variants, or independent events.
+            return False
 
         return False
 

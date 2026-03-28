@@ -57,16 +57,19 @@ def ensemble_forecast(
     # Divergence-based adjustment: when Claude strongly disagrees with market,
     # the market likely hasn't repriced — trust Claude more. When marginal
     # disagreement, be more humble.
-    # Use relative divergence for extreme prices: a 3¢ difference on a $0.05
-    # market is 60% disagreement, not "marginal."
+    # For extreme-price markets (<15¢ or >85¢), REDUCE Claude's weight rather
+    # than boosting it — cheap/expensive contracts are noisy and Claude's
+    # divergence is more likely a hallucination than genuine edge.
     divergence = abs(claude_forecast.probability - market_price)
     extreme_price = market_price < 0.15 or market_price > 0.85
-    div_threshold_high = 0.10 if extreme_price else 0.20
-    div_threshold_low = 0.02 if extreme_price else 0.05
-    if divergence > div_threshold_high:
-        # Strong divergence: boost Claude weight (the edge IS the disagreement)
+    if extreme_price:
+        # On extreme-price markets, trust the market more — Claude divergence
+        # here is usually wrong. Reduce Claude weight proportionally to divergence.
+        effective_claude_weight = max(0.40, effective_claude_weight - divergence * 0.5)
+    elif divergence > 0.20:
+        # Strong divergence on mid-price markets: boost Claude weight
         effective_claude_weight = min(0.95, effective_claude_weight + 0.07)
-    elif divergence < div_threshold_low:
+    elif divergence < 0.05:
         # Marginal call: reduce Claude weight, trust market more
         effective_claude_weight = max(0.50, effective_claude_weight - 0.10)
 
