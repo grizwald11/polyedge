@@ -1,7 +1,7 @@
-# PolyEdge Full Codebase Audit — 2026-03-28 (Revision 2)
+# PolyEdge Full Codebase Audit — 2026-03-28 (Revision 3)
 
 Complete line-by-line audit of all 56 source files (~42K lines).
-Two full audit passes completed. Issues marked **[FIXED]** were resolved.
+Three full audit passes completed. Issues marked **[FIXED]** were resolved.
 
 ---
 
@@ -21,7 +21,7 @@ Two full audit passes completed. Issues marked **[FIXED]** were resolved.
 | # | File:Line | Issue | Status |
 |---|-----------|-------|--------|
 | 7 | ensemble.py:231 | Brier-weighted ensemble breaks when all scores=1.0 (weights don't normalize) | **[FIXED r1]** |
-| 8 | ensemble.py:53 | CI width penalty uses abs() which masks inverted bounds → confidence inflated | Open |
+| 8 | ensemble.py:53 | CI width penalty uses abs() which masks inverted bounds → confidence inflated | **[FIXED r3]** |
 
 ### Data Layer
 | # | File:Line | Issue | Status |
@@ -40,11 +40,13 @@ Two full audit passes completed. Issues marked **[FIXED]** were resolved.
 |---|-----------|-------|--------|
 | 13 | position_manager.py:262 | Take-profit used `1.0 - avg_entry_price` — wrong for BUY_NO and SELL positions → stuck capital | **[FIXED r2]** |
 | 14 | order_builder.py:110 | Market order with missing token price (0.0) silently clamped to $0.01 → wrong order price | **[FIXED r2]** |
+| 79 | position_manager.py:330 | `_calculate_remaining_edge()` wrong for SELL and BUY_NO: used wrong price source, wrong underwater check (current < entry backwards for SELL), wrong upside formula | **[FIXED r3]** |
 
 ### Risk & Sizing
 | # | File:Line | Issue | Status |
 |---|-----------|-------|--------|
 | 15 | kelly_sizer.py:84 | market_price >= 0.99 rejected valid high-probability trades (should be >= 1.0) | **[FIXED r2]** |
+| 80 | kelly_sizer.py:168 | Calibration multiplier killed multi-contract positions: 5 contracts × 0.10 = 0, treated same as single-contract zero-conviction | **[FIXED r3]** |
 
 ---
 
@@ -135,7 +137,7 @@ Two full audit passes completed. Issues marked **[FIXED]** were resolved.
 | # | File:Line | Issue | Status |
 |---|-----------|-------|--------|
 | 53 | calibration.py:115 | Records with bad actual_outcome silently skipped (no logging) | Open |
-| 54 | claude_forecaster.py:449 | Default CI (±0.15) creates false precision when Claude omits bounds | Open |
+| 54 | claude_forecaster.py:449 | Default CI (±0.15) creates false precision when Claude omits bounds — widened to ±0.25 | **[FIXED r3]** |
 | 55 | calibration.py:224 | Win rate uses flat 0.5 threshold regardless of edge size | Open |
 
 ### Execution Details
@@ -149,7 +151,7 @@ Two full audit passes completed. Issues marked **[FIXED]** were resolved.
 | # | File:Line | Issue | Status |
 |---|-----------|-------|--------|
 | 59 | backtest_engine.py:314+387 | Positions can be resolved twice (mid-loop + final loop) | Open |
-| 60 | backtest_engine.py:322 | Division by zero: pnl / (size * price) when size=0 | Open |
+| 60 | backtest_engine.py:322 | Division by zero: pnl / (size * price) when size=0 | **[FIXED r3]** |
 | 61 | backfill_markets.py:198 | volume_1h is trade count, not dollar volume | Open |
 | 62 | backfill_markets.py:262 | Synthetic snapshots use linear drift (unrealistic) | Open |
 
@@ -219,3 +221,11 @@ Two full audit passes completed. Issues marked **[FIXED]** were resolved.
 5. **Position price validation**: skip update when the active direction's price is zero (prevents false stop-loss)
 6. **Kelly market_price bound**: changed `>= 0.99` to `>= 1.0` — no longer rejects valid high-probability trades
 7. **Order builder zero-price**: market orders now raise ValueError when token price is 0.0 instead of silently clamping to $0.01
+
+## Fixes Applied — Revision 3 (2026-03-28)
+
+1. **Remaining edge direction fix**: `_calculate_remaining_edge()` now handles all four directions correctly — SELL positions check `current > entry` (underwater when price rises), BUY positions check `current < entry`. Each direction uses the correct token price (yes_price or no_price) and correct upside formula.
+2. **Kelly calibration multiplier**: Only kills trades when calibration ≤25% AND original sizing was 1 contract (minimal conviction). Multi-contract positions (e.g., 5 × 0.10 = 0) now floor to 1 contract instead of being silently dropped.
+3. **Ensemble CI masking**: Removed `abs()` from CI width calculation — inverted bounds now produce conservative penalty (width ≤ 0 → penalty 0) instead of being masked as a wide confident interval.
+4. **Default CI widened**: When Claude omits confidence bounds, fallback changed from ±0.15 to ±0.25 — produces appropriately humble ensemble weighting instead of false precision.
+5. **Backtest div-by-zero**: Combined `t.price > 0` and `t.size > 0` into a single guard before computing realized edge ratio.

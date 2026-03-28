@@ -330,35 +330,65 @@ class PositionManager:
     def _calculate_remaining_edge(self, position: Position, market: Market) -> float:
         """Calculate remaining edge for a position given current market prices.
 
-        For a BUY_YES position at entry E, the upside was (1 - E). As the
-        market price moves toward 1.0 (our thesis), less upside remains.
-        If price drops below entry, the position is underwater and edge = 0.
+        BUY positions profit when the bought token's price rises toward 1.0.
+        SELL positions profit when the sold token's price drops toward 0.0.
 
         Returns a fraction in [0, 1]:
         - 1.0 = all original upside remains (price hasn't moved from entry)
         - 0.5 = half the upside captured
         - 0.0 = price moved against us (underwater) or fully captured
         """
-        if position.direction in (Direction.BUY_YES, Direction.SELL_NO):
-            current = market.yes_price
-        else:
-            current = market.no_price
         entry = position.avg_entry_price
-        if current <= 0 or entry <= 0:
+        if entry <= 0:
             return 0.0
 
-        # If price moved AGAINST us, edge is gone (position is underwater)
-        if current < entry:
-            return 0.0
+        if position.direction == Direction.BUY_YES:
+            # Bought YES at entry, profits as yes_price → 1.0
+            current = market.yes_price
+            if current <= 0:
+                return 0.0
+            if current < entry:
+                return 0.0  # underwater
+            original_upside = 1.0 - entry
+            if original_upside <= 0:
+                return 0.0
+            return max(0.0, min(1.0, (1.0 - current) / original_upside))
 
-        # Remaining upside: fraction of original upside not yet captured
-        # Entry at 0.40, max payout 1.00 → original upside = 0.60
-        # Current at 0.70 → captured 0.30, remaining = 0.30/0.60 = 0.50
-        original_upside = 1.0 - entry
-        if original_upside <= 0:
-            return 0.0
-        remaining_upside = 1.0 - current
-        return max(0.0, min(1.0, remaining_upside / original_upside))
+        elif position.direction == Direction.BUY_NO:
+            # Bought NO at entry, profits as no_price → 1.0
+            current = market.no_price
+            if current <= 0:
+                return 0.0
+            if current < entry:
+                return 0.0  # underwater
+            original_upside = 1.0 - entry
+            if original_upside <= 0:
+                return 0.0
+            return max(0.0, min(1.0, (1.0 - current) / original_upside))
+
+        elif position.direction == Direction.SELL_YES:
+            # Sold YES at entry, profits as yes_price → 0.0
+            current = market.yes_price
+            if current <= 0:
+                return 0.0
+            if current > entry:
+                return 0.0  # underwater — price rose above our sell
+            original_upside = entry  # max gain = entry (price drops to 0)
+            if original_upside <= 0:
+                return 0.0
+            return max(0.0, min(1.0, current / original_upside))
+
+        else:  # SELL_NO
+            # Sold NO at entry, profits as no_price → 0.0
+            current = market.no_price
+            if current <= 0:
+                return 0.0
+            if current > entry:
+                return 0.0  # underwater — price rose above our sell
+            original_upside = entry  # max gain = entry (price drops to 0)
+            if original_upside <= 0:
+                return 0.0
+            return max(0.0, min(1.0, current / original_upside))
 
     async def sync_with_kalshi(self, kalshi, auto_correct: bool = True) -> int:
         """Reconcile local positions against Kalshi API positions.

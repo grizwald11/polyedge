@@ -446,8 +446,8 @@ class ClaudeForecaster:
 
         return ForecastResult(
             probability=probability,
-            confidence_low=max(0.0, min(1.0, float(data.get("confidence_low", max(0, probability - 0.15))))),
-            confidence_high=max(0.0, min(1.0, float(data.get("confidence_high", min(1, probability + 0.15))))),
+            confidence_low=max(0.0, min(1.0, float(data.get("confidence_low", max(0, probability - 0.25))))),
+            confidence_high=max(0.0, min(1.0, float(data.get("confidence_high", min(1, probability + 0.25))))),
             key_factors_for=data.get("key_factors_for", []),
             key_factors_against=data.get("key_factors_against", []),
             uncertainties=data.get("uncertainties", []),

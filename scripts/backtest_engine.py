@@ -391,8 +391,8 @@ class BacktestEngine:
                         t.pnl = pnl
                         t.resolved = True
                         t.outcome = outcome
-                        if t.price > 0:
-                            edges_realized.append(pnl / (t.size * t.price) if t.size > 0 else 0)
+                        if t.price > 0 and t.size > 0:
+                            edges_realized.append(pnl / (t.size * t.price))
                         equity_curve.append(equity_curve[-1] + pnl)
                         break
 

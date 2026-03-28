@@ -50,7 +50,9 @@ def ensemble_forecast(
         EnsembleForecast with final combined probability
     """
     # Adaptive weighting based on CI width AND divergence from market.
-    ci_width = abs(claude_forecast.confidence_high - claude_forecast.confidence_low)
+    # Don't use abs() — if bounds are still inverted despite validator, the
+    # negative width should produce a penalty of 0 (most conservative), not hide it.
+    ci_width = claude_forecast.confidence_high - claude_forecast.confidence_low
     ci_penalty = min(1.0, max(0.0, ci_width))
     effective_claude_weight = claude_weight * (1.0 - ci_penalty * 0.5)
 

@@ -163,14 +163,15 @@ class KellySizer:
                 contracts = 1
 
         # Apply calibration-based multiplier — reduce sizing when forecasting is poor.
-        # For multi-contract positions, scale down. For single-contract positions
-        # with very poor calibration (≤25%), skip entirely to protect capital.
+        # For multi-contract positions, scale down but floor at 1 contract.
+        # Only skip entirely when calibration is very poor (≤25%) AND the
+        # original Kelly sizing was already just 1 contract (minimal conviction).
         if self._calibration_multiplier < 1.0 and contracts > 0:
-            scaled = int(contracts * self._calibration_multiplier)
-            if scaled == 0 and self._calibration_multiplier <= 0.25:
-                # Very poor calibration — don't trade at all
+            if self._calibration_multiplier <= 0.25 and contracts == 1:
+                # Very poor calibration on a minimal-conviction trade — don't trade
                 return 0
-            contracts = max(1, scaled) if contracts > 1 else contracts
+            scaled = int(contracts * self._calibration_multiplier)
+            contracts = max(1, scaled)
 
         logger.debug(
             f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "
