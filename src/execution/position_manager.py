@@ -15,13 +15,13 @@ from src.core.models import (
 from src.storage.database import Database
 
 # Exit thresholds
-DEFAULT_STOP_LOSS_PCT = 0.30       # Exit if unrealized loss > 30% of cost basis
+DEFAULT_STOP_LOSS_PCT = 0.40       # Exit if unrealized loss > 40% of cost basis
 DEFAULT_MAX_HOLD_DAYS = 21         # Exit if held > 21 days — frees capital faster
-DEFAULT_EDGE_GONE_THRESHOLD = 0.20 # Exit if remaining edge < 20% of original
+DEFAULT_EDGE_GONE_THRESHOLD = 0.15 # Exit if remaining edge < 15% of original
 DEFAULT_TRAILING_STOP_ACTIVATE = 0.12  # Activate trailing stop after 12% gain
 DEFAULT_TRAILING_STOP_DISTANCE = 0.50  # Trail 50% of peak gain (e.g., peak +30% → exit at +15%)
 DEFAULT_TAKE_PROFIT_PCT = 0.80     # Take profit at 80% of max theoretical gain
-DEFAULT_CAPITAL_ROTATION_EDGE = 0.50  # When exposure >50%, exit profitable positions with <50% remaining edge
+DEFAULT_CAPITAL_ROTATION_EDGE = 0.40  # When exposure >50%, exit profitable positions with <40% remaining edge
 
 if __name__ != "__main__":
     from typing import TYPE_CHECKING

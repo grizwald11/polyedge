@@ -88,6 +88,16 @@ class KellySizer:
             )
             return 0
 
+        # Reject ultra-cheap contracts (<$0.05): tiny absolute moves wipe out
+        # the position, and Kelly produces huge contract counts that amplify losses.
+        cost_price_check = order_price if order_price and order_price > 0 else market_price
+        if cost_price_check < 0.05:
+            logger.debug(
+                f"Kelly: rejecting ultra-cheap contract @ ${cost_price_check:.2f} "
+                f"(prob={probability:.3f}, edge={edge:.3f})"
+            )
+            return 0
+
         # Payout if win: (1 - market_price) per contract
         # Risk if lose: market_price per contract
         b = (1.0 - market_price) / market_price  # odds
