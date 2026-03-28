@@ -100,18 +100,20 @@ class TestKalshiRequests:
         assert balance == 50.0
 
     @pytest.mark.asyncio
-    async def test_429_exhausts_retries_returns_none(self):
-        """Regression: 429 on all attempts should return None, not silently succeed."""
+    async def test_429_exhausts_retries_raises(self):
+        """Regression: 429 on all attempts should raise, not silently return None."""
+        import httpx
         client = KalshiClient()
         mock_http = AsyncMock()
         mock_http.is_closed = False
         mock_response = MagicMock()
         mock_response.status_code = 429
+        mock_response.request = MagicMock()
         mock_http.get = AsyncMock(return_value=mock_response)
         client._client = mock_http
 
-        result = await client._request("GET", "/markets")
-        assert result is None
+        with pytest.raises(httpx.HTTPStatusError):
+            await client._request("GET", "/markets")
         # Should have been called max_retries times (3)
         assert mock_http.get.call_count == 3
 

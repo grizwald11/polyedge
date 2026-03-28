@@ -118,7 +118,12 @@ class CalibrationTracker:
             try:
                 outcome = float(r["actual_outcome"])
                 predicted = float(r["predicted_probability"])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    f"Skipping calibration record with bad data: "
+                    f"market={r.get('market_id')}, outcome={r.get('actual_outcome')!r}, "
+                    f"predicted={r.get('predicted_probability')!r}: {e}"
+                )
                 continue
             total += (predicted - outcome) ** 2
             valid_count += 1
@@ -208,11 +213,11 @@ class CalibrationTracker:
         self,
         strategy: Optional[StrategyName] = None,
     ) -> Optional[float]:
-        """Calculate win rate: fraction of predictions where we were on the right side.
+        """Calculate win rate: fraction of predictions where we had edge AND were right.
 
-        A prediction "wins" if:
-        - We predicted >0.5 and outcome was YES
-        - We predicted <0.5 and outcome was NO
+        A prediction "wins" if our predicted probability was on the correct side
+        of the market price (i.e., we had a directionally correct edge).
+        Falls back to 0.5 threshold when market_price_at_prediction is unavailable.
         """
         records = self._get_resolved_records(strategy)
         if not records:
@@ -222,7 +227,11 @@ class CalibrationTracker:
         for r in records:
             predicted = r["predicted_probability"]
             actual = bool(r["actual_outcome"])
-            if (predicted > 0.5 and actual) or (predicted < 0.5 and not actual):
+            market_price = r.get("market_price_at_prediction")
+            # Use market price as threshold when available — this measures
+            # whether we added value beyond what the market already knew.
+            threshold = float(market_price) if market_price is not None else 0.5
+            if (predicted > threshold and actual) or (predicted < threshold and not actual):
                 wins += 1
 
         return wins / len(records)

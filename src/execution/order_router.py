@@ -48,6 +48,8 @@ class OrderRouter:
         self.db = db
         self.position_manager = position_manager
         self._session_confirmed = False  # Gate 3: first-trade confirmation
+        self._session_confirm_time: float | None = None  # When gate 3 was confirmed
+        self._session_confirm_ttl = 3600  # Gate 3 expires after 1 hour
         self._log_gate_status()
 
     def _log_gate_status(self):
@@ -202,7 +204,13 @@ class OrderRouter:
                 error="Live trading gates not passed"
             )
 
-        # Gate 3: Interactive confirmation on first live trade per session
+        # Gate 3: Interactive confirmation — expires after TTL to prevent stale session
+        if self._session_confirmed and self._session_confirm_time is not None:
+            import time as _time
+            if _time.time() - self._session_confirm_time > self._session_confirm_ttl:
+                logger.info("Gate 3 confirmation expired — re-prompting")
+                self._session_confirmed = False
+
         if not self._session_confirmed:
             confirmed = await self._request_confirmation(order)
             if not confirmed:
@@ -213,7 +221,9 @@ class OrderRouter:
                     success=False, order=order,
                     error="User declined live trade confirmation"
                 )
+            import time as _time
             self._session_confirmed = True
+            self._session_confirm_time = _time.time()
 
         # Determine Kalshi side and order type
         kalshi_side = "yes" if "yes" in order.token_id.lower() else "no"
@@ -330,6 +340,13 @@ class OrderRouter:
             self._log_order(order)
             return OrderResult(success=False, order=order, error="Live trading gates not passed")
 
+        # Gate 3 TTL check for Polymarket path
+        if self._session_confirmed and self._session_confirm_time is not None:
+            import time as _time
+            if _time.time() - self._session_confirm_time > self._session_confirm_ttl:
+                logger.info("Gate 3 confirmation expired — re-prompting")
+                self._session_confirmed = False
+
         if not self._session_confirmed:
             confirmed = await self._request_confirmation(order)
             if not confirmed:
@@ -337,7 +354,9 @@ class OrderRouter:
                 order.rejection_reason = "User declined live trade confirmation"
                 self._log_order(order)
                 return OrderResult(success=False, order=order, error="User declined")
+            import time as _time
             self._session_confirmed = True
+            self._session_confirm_time = _time.time()
 
         try:
             poly_side = order.side.value  # "BUY" or "SELL"

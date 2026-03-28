@@ -42,7 +42,7 @@ class PolymarketClient:
         if self._initialized:
             return
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._client = await loop.run_in_executor(
             None,
             partial(
@@ -72,7 +72,7 @@ class PolymarketClient:
         """Run a synchronous ClobClient method in the executor."""
         if not self._initialized:
             raise RuntimeError("PolymarketClient not initialized. Call initialize() first.")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
     async def health_check(self) -> bool:
@@ -96,10 +96,15 @@ class PolymarketClient:
         Returns balance in dollars.
         """
         result = await self._run(self._client.get_balance_allowance)
-        # Result has 'balance' in wei-like format; convert
-        balance = float(result.get("balance", 0))
-        # py-clob-client returns balance in USDC units (6 decimals)
-        return balance / 1e6 if balance > 1000 else balance
+        # py-clob-client returns balance as a string in USDC atomic units (6 decimals).
+        # Always divide by 1e6 — the >1000 heuristic was fragile and wrong for
+        # accounts with exactly $1000-$999999 in dollar-denominated balances.
+        raw_balance = float(result.get("balance", 0))
+        balance = raw_balance / 1e6
+        if balance < 0:
+            logger.warning(f"Polymarket returned negative balance: {balance}")
+            return 0.0
+        return balance
 
     async def get_order_book(self, token_id: str) -> dict:
         """Get the order book for a token."""
@@ -107,13 +112,21 @@ class PolymarketClient:
 
     async def get_midpoint(self, token_id: str) -> float:
         """Get the midpoint price for a token."""
-        result = await self._run(self._client.get_midpoint, token_id)
-        return float(result.get("mid", 0.0)) if isinstance(result, dict) else float(result)
+        try:
+            result = await self._run(self._client.get_midpoint, token_id)
+            return float(result.get("mid", 0.0)) if isinstance(result, dict) else float(result)
+        except (TypeError, ValueError, KeyError) as e:
+            logger.warning(f"Failed to parse midpoint for {token_id}: {e}")
+            return 0.0
 
     async def get_price(self, token_id: str, side: str = "buy") -> float:
         """Get the best price for a token on a given side."""
-        result = await self._run(self._client.get_price, token_id, side)
-        return float(result.get("price", 0.0)) if isinstance(result, dict) else float(result)
+        try:
+            result = await self._run(self._client.get_price, token_id, side)
+            return float(result.get("price", 0.0)) if isinstance(result, dict) else float(result)
+        except (TypeError, ValueError, KeyError) as e:
+            logger.warning(f"Failed to parse price for {token_id} ({side}): {e}")
+            return 0.0
 
     async def create_and_post_order(
         self,

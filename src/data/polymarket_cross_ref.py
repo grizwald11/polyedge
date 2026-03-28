@@ -77,10 +77,11 @@ class PolymarketCrossRef:
                 yes_price = float(outcome_prices[0])
 
             if yes_price is None:
-                # Try bestBid/bestAsk or other price fields
+                # Fallback to bestBid/lastTradePrice — these may be stale
                 yes_price = m.get("bestBid") or m.get("lastTradePrice")
                 if yes_price is not None:
                     yes_price = float(yes_price)
+                    logger.debug(f"Using fallback price for {question[:40]}: ${yes_price:.4f} (may be stale)")
 
             volume = float(m.get("volume", 0) or 0)
 

@@ -48,7 +48,18 @@ class KalshiClient:
             return None
         self._key_load_attempted = True
         try:
+            import os
+            import stat
             from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            # Check file permissions — private key should be owner-only (0o600)
+            key_stat = os.stat(self.private_key_path)
+            mode = key_stat.st_mode & 0o777
+            if mode & (stat.S_IRWXG | stat.S_IRWXO):
+                logger.warning(
+                    f"Private key file {self.private_key_path} has permissive mode "
+                    f"{oct(mode)} — should be 0o600. Fixing permissions."
+                )
+                os.chmod(self.private_key_path, 0o600)
             with open(self.private_key_path, "rb") as f:
                 self._private_key = load_pem_private_key(f.read(), password=None)
             logger.info("Loaded RSA private key for Kalshi auth")
@@ -142,7 +153,10 @@ class KalshiClient:
                         await asyncio.sleep(wait)
                         continue
                     logger.error(f"Rate limited on {path} after {max_retries} attempts — giving up")
-                    return None
+                    raise httpx.HTTPStatusError(
+                        f"Rate limited (429) on {path} after {max_retries} retries",
+                        request=resp.request, response=resp,
+                    )
                 resp.raise_for_status()
                 if resp.status_code == 204:
                     return {}
@@ -289,7 +303,11 @@ class KalshiClient:
             data = await self._request("GET", "/portfolio/balance")
             if data and "balance" in data:
                 # Kalshi returns balance in cents
-                return float(data["balance"]) / 100.0
+                balance = float(data["balance"]) / 100.0
+                if balance < 0:
+                    logger.warning(f"Kalshi returned negative balance: ${balance:.2f}")
+                    return 0.0
+                return balance
             return None
         except Exception as e:
             logger.error(f"Failed to get balance: {e}")

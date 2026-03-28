@@ -212,6 +212,7 @@ def generate_synthetic_snapshots(db: Database, limit: int = 500) -> int:
     drifting from a randomized starting point toward the final outcome.
     """
     import random
+    random.seed(42)  # Deterministic backtests for reproducibility
 
     conn = db._get_conn()
     rows = conn.execute("""

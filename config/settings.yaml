@@ -66,7 +66,7 @@ claude:
   cross_check_top_n: 3          # Cross-check only top N edge signals (saves API time)
   cross_check_temp_low: 0.2
   cross_check_temp_high: 0.5
-  cross_check_disagreement_threshold: 0.12  # Skip if temps disagree by more than this
+  cross_check_disagreement_threshold: 0.15  # Skip if temps disagree by more than this (matches config.py default)
 
 news:
   rss_feeds:

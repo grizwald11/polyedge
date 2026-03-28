@@ -216,6 +216,28 @@ def get_template(category: MarketCategory) -> str:
     return CATEGORY_TEMPLATES.get(category, GENERAL_TEMPLATE)
 
 
+def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
+    """Sanitize text from external sources (market descriptions, news) before prompt injection.
+
+    Strips prompt-injection patterns and truncates to prevent abuse.
+    """
+    import re
+    # Truncate to prevent oversized injections
+    text = text[:max_length]
+    # Strip common prompt injection patterns
+    injection_patterns = [
+        r"(?i)ignore\s+(all\s+)?previous\s+instructions",
+        r"(?i)you\s+are\s+now\s+",
+        r"(?i)system\s*:\s*",
+        r"(?i)assistant\s*:\s*",
+        r"(?i)human\s*:\s*",
+        r"(?i)<\s*/?system\s*>",
+    ]
+    for pattern in injection_patterns:
+        text = re.sub(pattern, "[FILTERED]", text)
+    return text
+
+
 def build_prompt(
     question: str,
     resolution_criteria: str,
@@ -225,13 +247,21 @@ def build_prompt(
     news_context: str = "No additional context available.",
     base_rate_context: str = "",
 ) -> str:
-    """Build a complete prompt for Claude from market data."""
+    """Build a complete prompt for Claude from market data.
+
+    All external text (question, resolution criteria, news) is sanitized
+    to mitigate prompt injection from untrusted API sources.
+    """
     template = get_template(category)
     return template.format(
-        question=question,
-        resolution_criteria=resolution_criteria or "Standard market resolution rules apply.",
+        question=_sanitize_external_text(question, 500),
+        resolution_criteria=_sanitize_external_text(
+            resolution_criteria or "Standard market resolution rules apply.", 2000
+        ),
         market_price=market_price,
         close_date=close_date or "Not specified",
-        news_context=news_context or "No additional context available.",
-        base_rate_context=base_rate_context,
+        news_context=_sanitize_external_text(
+            news_context or "No additional context available.", 5000
+        ),
+        base_rate_context=_sanitize_external_text(base_rate_context, 2000),
     )

@@ -58,6 +58,7 @@ class NewsIngestion:
         self.max_article_age_seconds = max_article_age_minutes * 60
         self.min_relevance = min_relevance
         self._seen_urls: set[str] = set()
+        self._max_seen_urls = 10000  # Cap to prevent unbounded memory growth
 
     async def poll_feeds(self) -> list[NewsItem]:
         """Poll all configured RSS feeds for new articles.
@@ -78,6 +79,12 @@ class NewsIngestion:
                     url = entry.get("link", "")
                     if url in self._seen_urls:
                         continue
+                    # Evict oldest entries when cap reached
+                    if len(self._seen_urls) >= self._max_seen_urls:
+                        # Remove ~20% of oldest (set is unordered, but clearing
+                        # a chunk is sufficient to bound memory)
+                        to_remove = list(self._seen_urls)[:self._max_seen_urls // 5]
+                        self._seen_urls -= set(to_remove)
                     self._seen_urls.add(url)
 
                     published = self._parse_date(entry)

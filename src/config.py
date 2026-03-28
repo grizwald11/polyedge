@@ -149,10 +149,25 @@ class DatabaseConfig(BaseModel):
     wal_mode: bool = True
     snapshot_retention_days: int = 30  # Cleanup snapshots older than this
 
+    @field_validator("path")
+    @classmethod
+    def path_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Database path cannot be empty")
+        return v
+
 
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     file: str = "data/logs/polyedge.log"
+
+    @field_validator("level")
+    @classmethod
+    def level_valid(cls, v: str) -> str:
+        import logging
+        if v.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            raise ValueError(f"Invalid logging level: {v}")
+        return v.upper()
 
 
 class Settings(BaseModel):
@@ -180,6 +195,21 @@ class Settings(BaseModel):
     metaculus_api_token: Optional[str] = None
     polymarket_private_key: Optional[str] = None
     live_enabled: bool = False
+
+    def validate_required_keys(self) -> list[str]:
+        """Check for missing required API keys at startup. Returns list of warnings."""
+        import logging
+        _logger = logging.getLogger(__name__)
+        warnings = []
+        if not self.anthropic_api_key:
+            warnings.append("ANTHROPIC_API_KEY not set — Claude forecasting will fail")
+        if not self.kalshi_api_key_id or not self.kalshi_private_key_path:
+            warnings.append("Kalshi API credentials not set — Kalshi trading disabled")
+        if self.polymarket.enabled and not self.polymarket_private_key:
+            warnings.append("Polymarket enabled but POLYMARKET_PRIVATE_KEY not set — PM trading will fail")
+        for w in warnings:
+            _logger.warning(w)
+        return warnings
 
 
 def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:

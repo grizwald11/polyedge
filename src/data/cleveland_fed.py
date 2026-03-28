@@ -102,7 +102,7 @@ class ClevelandFedNowcast:
             )
 
             if not cpi_match and not core_match:
-                logger.debug("Cleveland Fed: could not parse nowcast values from page")
+                logger.warning("Cleveland Fed: could not parse nowcast values from page — site format may have changed")
                 return None
 
             result = {

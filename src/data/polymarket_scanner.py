@@ -86,9 +86,10 @@ class PolymarketScanner:
                 reasons["no_price"] += 1
                 continue
 
-            # Polymarket price sums can deviate more than Kalshi
+            # Polymarket price sums should be close to 1.0
+            # Tightened from 10% to 5% tolerance to reject clearly broken prices
             price_sum = m.yes_price + m.no_price
-            if price_sum < 0.90 or price_sum > 1.10:
+            if price_sum < 0.95 or price_sum > 1.05:
                 reasons["invalid_prices"] += 1
                 continue
 

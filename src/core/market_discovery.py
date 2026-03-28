@@ -183,15 +183,21 @@ def parse_market(raw: dict[str, Any], event_category: str = "") -> Optional[Mark
         liquidity_dollars = _parse_dollar_str(raw.get("liquidity_dollars") or raw.get("liquidity"))
         liquidity = max(open_interest, liquidity_dollars)
 
-        # Spread
+        # Spread — negative spread (bid > ask) indicates stale/crossed orderbook
         spread = 0.0
         if yes_bid > 0 and yes_ask > 0:
             spread = round(yes_ask - yes_bid, 4)
+            if spread < 0:
+                logger.debug(f"Negative spread for {ticker}: bid={yes_bid}, ask={yes_ask} — orderbook crossed")
+                spread = 0.0
 
         # Status — Kalshi uses "active", "closed", "settled"
         status_str = raw.get("status", "active")
+        known_statuses = {"open", "active", "closed", "settled", "finalized"}
+        if status_str not in known_statuses:
+            logger.debug(f"Unknown market status '{status_str}' for {ticker} — treating as inactive")
         active = status_str in ("open", "active")
-        closed = status_str in ("closed", "settled")
+        closed = status_str in ("closed", "settled", "finalized")
 
         return Market(
             ticker=ticker,

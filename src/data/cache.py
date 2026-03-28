@@ -36,3 +36,11 @@ class TTLCache:
     def clear(self) -> None:
         """Clear all cached entries."""
         self._store.clear()
+
+    def cleanup_expired(self) -> int:
+        """Remove all expired entries. Returns count of entries removed."""
+        now = time.monotonic()
+        expired = [k for k, (exp, _) in self._store.items() if now > exp]
+        for k in expired:
+            del self._store[k]
+        return len(expired)

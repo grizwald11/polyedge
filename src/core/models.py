@@ -129,7 +129,7 @@ class MarketToken(BaseModel):
     """A single outcome token (YES or NO) within a market."""
     token_id: str
     outcome: TokenOutcome
-    price: float = 0.0  # In dollars (0.01-0.99)
+    price: float = 0.0  # In dollars (0.00-1.00). 0.0 means price unknown/not yet fetched.
     winner: Optional[bool] = None
 
 

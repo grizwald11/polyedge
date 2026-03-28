@@ -131,6 +131,8 @@ class ResolutionTracker:
                     prices = outcome_prices
                 if len(prices) >= 2:
                     yes_price = float(prices[0])
+                    if yes_price == 0.5:
+                        return None  # Ambiguous — can't determine resolution
                     return yes_price > 0.5  # Resolved YES if price → 1.0
 
             return None

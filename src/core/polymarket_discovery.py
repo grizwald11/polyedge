@@ -77,6 +77,9 @@ def _parse_outcome_prices(raw: dict) -> tuple[float, float]:
                 yes_price = float(last_trade)
                 no_price = 1.0 - yes_price
 
+    # Bounds-check: prices must be in [0, 1]
+    yes_price = max(0.0, min(1.0, yes_price))
+    no_price = max(0.0, min(1.0, no_price))
     return yes_price, no_price
 
 

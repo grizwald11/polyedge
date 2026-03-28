@@ -82,15 +82,24 @@ class TestPolymarketFilter:
         result = scanner.filter_markets(markets)
         assert len(result) == 0
 
-    def test_wider_price_sum_tolerance(self, scanner):
-        """Polymarket allows wider sum tolerance (0.90-1.10)."""
-        # Sum = 1.08 — should pass for Polymarket
+    def test_price_sum_within_tolerance(self, scanner):
+        """Polymarket allows 5% tolerance (0.95-1.05)."""
+        # Sum = 1.04 — should pass within 5% tolerance
+        markets = [_poly_market(tokens=[
+            MarketToken(token_id="tok_yes", outcome=TokenOutcome.YES, price=0.55),
+            MarketToken(token_id="tok_no", outcome=TokenOutcome.NO, price=0.49),
+        ])]
+        result = scanner.filter_markets(markets)
+        assert len(result) == 1
+
+    def test_rejects_excessive_price_deviation(self, scanner):
+        """Sum > 1.05 should be rejected (tightened from 1.10)."""
         markets = [_poly_market(tokens=[
             MarketToken(token_id="tok_yes", outcome=TokenOutcome.YES, price=0.60),
             MarketToken(token_id="tok_no", outcome=TokenOutcome.NO, price=0.48),
         ])]
         result = scanner.filter_markets(markets)
-        assert len(result) == 1
+        assert len(result) == 0
 
 
 class TestPolymarketRank:

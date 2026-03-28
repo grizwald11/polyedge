@@ -155,6 +155,8 @@ class KalshiWebSocket:
 
         self._running = True
         backoff = INITIAL_BACKOFF
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 10  # Stop after 10 consecutive failures (likely permanent)
 
         while self._running:
             try:
@@ -170,6 +172,7 @@ class KalshiWebSocket:
                 ) as ws:
                     self._ws = ws
                     backoff = INITIAL_BACKOFF
+                    consecutive_failures = 0
                     logger.info(f"WebSocket connected to {self.host}")
 
                     # Resubscribe to all tickers
@@ -185,6 +188,16 @@ class KalshiWebSocket:
             except Exception as e:
                 self._ws = None
                 if not self._running:
+                    break
+                consecutive_failures += 1
+                # Detect permanent auth failures (401/403-like errors)
+                err_str = str(e).lower()
+                is_auth_error = any(code in err_str for code in ("401", "403", "authentication", "unauthorized"))
+                if is_auth_error or consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.error(
+                        f"WebSocket permanently failed after {consecutive_failures} attempts: {e}. "
+                        f"Stopping reconnect loop."
+                    )
                     break
                 logger.warning(f"WebSocket disconnected: {e}. Reconnecting in {backoff:.0f}s")
                 await asyncio.sleep(backoff)
@@ -222,6 +235,18 @@ class KalshiWebSocket:
 
     # ── Internal ───────────────────────────────────
 
+    async def _run_callbacks(self, callbacks, update, label: str):
+        """Run callbacks concurrently instead of sequentially."""
+        if not callbacks:
+            return
+        results = await asyncio.gather(
+            *(cb(update) for cb in callbacks),
+            return_exceptions=True,
+        )
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"{label} callback error: {result}")
+
     async def _message_loop(self, ws):
         """Process incoming WebSocket messages."""
         async for raw in ws:
@@ -240,29 +265,17 @@ class KalshiWebSocket:
         if msg_type == "ticker":
             update = self._parse_ticker(msg)
             if update:
-                for cb in self._price_callbacks:
-                    try:
-                        await cb(update)
-                    except Exception as e:
-                        logger.error(f"Price callback error: {e}")
+                await self._run_callbacks(self._price_callbacks, update, "Price")
 
         elif msg_type == "fill":
             update = self._parse_fill(msg)
             if update:
-                for cb in self._fill_callbacks:
-                    try:
-                        await cb(update)
-                    except Exception as e:
-                        logger.error(f"Fill callback error: {e}")
+                await self._run_callbacks(self._fill_callbacks, update, "Fill")
 
         elif msg_type == "market_lifecycle_v2":
             update = self._parse_lifecycle(msg)
             if update:
-                for cb in self._lifecycle_callbacks:
-                    try:
-                        await cb(update)
-                    except Exception as e:
-                        logger.error(f"Lifecycle callback error: {e}")
+                await self._run_callbacks(self._lifecycle_callbacks, update, "Lifecycle")
 
         elif msg_type in ("subscribed", "unsubscribed", "error"):
             if msg_type == "error":
@@ -356,10 +369,12 @@ class KalshiWebSocket:
     def _auth_headers(self) -> dict[str, str]:
         """Generate authentication headers for the WebSocket handshake."""
         if not self.api_key_id or not self.private_key_path:
+            logger.warning("WebSocket auth: missing api_key_id or private_key_path — connecting without auth (no fills)")
             return {}
 
         key = self._load_private_key()
         if key is None:
+            logger.error("WebSocket auth: failed to load private key — fills will NOT be received")
             return {}
 
         timestamp = str(int(time.time() * 1000))

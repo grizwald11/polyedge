@@ -108,6 +108,17 @@ async def scan_and_trade(
     _cycle_start = time.time()
     bankroll = settings.trading.bankroll
 
+    # Re-sync bankroll from Kalshi balance in live mode (every cycle)
+    if settings.trading.mode == "live":
+        try:
+            live_balance = await kalshi.get_balance()
+            if live_balance is not None and live_balance > 0:
+                if abs(live_balance - bankroll) > 1.0:  # Only log if >$1 drift
+                    logger.info(f"Bankroll sync: config=${bankroll:.2f} → live=${live_balance:.2f}")
+                bankroll = live_balance
+        except Exception as e:
+            logger.warning(f"Failed to sync live balance: {e} — using config bankroll")
+
     # Check for fills on pending live orders
     try:
         new_fills = await fill_tracker.check_fills()
@@ -214,6 +225,10 @@ async def scan_and_trade(
                         yes_ask = float(raw.get("yes_ask_dollars") or raw.get("yes_ask") or 0)
                         yes_price = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else max(yes_bid, yes_ask)
                         no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
+                        # Skip if we got no valid price — don't create a Market with price=0
+                        if yes_price <= 0 and no_price <= 0:
+                            logger.warning(f"No valid price data for {ticker} — skipping")
+                            continue
                         position_manager.update_price(ticker, yes_price, no_price)
                         # Build minimal Market so exit logic can process this position
                         minimal_market = Market(
@@ -279,6 +294,13 @@ async def scan_and_trade(
             paper=position.paper,
             created_at=datetime.now(timezone.utc),
         )
+
+        # Exit orders skip full risk checks (we WANT to close), but still
+        # verify circuit breaker isn't halted (prevents panic selling) and
+        # validate the order is sane.
+        if circuit_breaker.is_halted() and "stop_loss" not in exit_reason.lower():
+            logger.warning(f"Skipping exit for {position.market_id}: circuit breaker active (non-stop-loss)")
+            continue
 
         result = await order_router.route_order(exit_order)
         if result is not None and result.success and result.trade is None:
@@ -643,7 +665,7 @@ async def run_trading_loop(
             logger.info("Shutting down...")
             break
         except asyncio.TimeoutError:
-            logger.error("Trade cycle timed out (>5 minutes) — skipping")
+            logger.error(f"Trade cycle timed out (>{settings.execution.cycle_timeout_seconds}s) — skipping")
         except Exception as e:
             logger.error(f"Trade cycle failed: {e}", exc_info=True)
 
@@ -656,6 +678,9 @@ async def main():
     settings = load_settings()
     setup_logging(settings.logging.level, settings.logging.file)
     logger = logging.getLogger("polyedge.main")
+
+    # Validate required API keys early
+    settings.validate_required_keys()
 
     logger.info("=" * 60)
     logger.info("PolyEdge Starting — Phase 3: Paper Trading")

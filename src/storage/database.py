@@ -241,7 +241,10 @@ class Database:
             conn.execute("PRAGMA journal_mode=WAL")
         # FK enforcement disabled: v6 migration changed markets to composite PK
         # (ticker, platform) but child tables still reference single-column ticker.
-        # App logic enforces referential integrity.
+        # Enabling FKs would break DELETE/UPDATE on signals/orders/trades because
+        # SQLite requires the parent to have a UNIQUE constraint on the referenced
+        # column(s), and composite PK (ticker, platform) doesn't satisfy FK refs
+        # to markets(ticker) alone. App logic enforces referential integrity.
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
@@ -1113,7 +1116,14 @@ class Database:
         expired: list[str] = []
 
         for row in rows:
-            exit_time = datetime.fromisoformat(row["exit_time"])
+            try:
+                exit_time = datetime.fromisoformat(row["exit_time"])
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid cooldown datetime for {row['market_id']}: {row['exit_time']!r} — removing")
+                expired.append(row["market_id"])
+                continue
+            if exit_time.tzinfo is None:
+                exit_time = exit_time.replace(tzinfo=timezone.utc)
             if (now - exit_time).total_seconds() < max_age_seconds:
                 active[row["market_id"]] = exit_time
             else:

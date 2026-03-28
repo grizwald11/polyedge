@@ -101,13 +101,22 @@ class MetaculusClient:
         'forecasters_count', and 'url' keys.
         """
         if self._disabled:
-            return []
+            # Allow retry after 30 minutes (don't permanently disable on transient failures)
+            import time as _time
+            if hasattr(self, '_disabled_at') and _time.time() - self._disabled_at > 1800:
+                logger.info("Metaculus: re-enabling after 30min cooldown")
+                self._disabled = False
+                self._probe_done = False
+            else:
+                return []
 
         # One-time probe: check if predictions are actually available
         if not self._probe_done:
             self._probe_done = True
             if not await self._probe_api():
                 self._disabled = True
+                import time as _time
+                self._disabled_at = _time.time()
                 return []
 
         cache_key = f"metaculus_search_{query[:80]}"

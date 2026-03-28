@@ -8,6 +8,14 @@ Usage:
 Unlike run_backtest.py (which is a post-hoc trade analyzer), this engine
 replays strategies from scratch using historical price snapshots, the real
 RiskEngine, KellySizer, and CircuitBreaker via dependency injection.
+
+KNOWN BIASES (do NOT use results for live trading decisions):
+- Lookahead bias: MockForecaster outcome-derived mode uses known outcomes
+  to generate synthetic forecasts — real-time accuracy will be lower.
+- Survivorship bias: Only settled markets are included. Active/abandoned
+  markets that would have caused losses are excluded.
+- Fee omission: Trading fees are not simulated — actual returns will be lower
+  for fee-enabled market categories.
 """
 
 from __future__ import annotations
@@ -381,9 +389,11 @@ class BacktestEngine:
                 timestamp=timestamp,
             ))
 
-        # Resolve all open positions at settlement
+        # Resolve remaining open positions at settlement (skip already-resolved ones)
         for market_id, outcome in outcomes.items():
-            if portfolio.has_position(market_id):
+            if portfolio.has_position(market_id) and not any(
+                t.market_id == market_id and t.resolved for t in trades
+            ):
                 pnl = portfolio.resolve_position(market_id, outcome)
                 # Find corresponding trade and update
                 for t in trades:

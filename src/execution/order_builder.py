@@ -167,7 +167,10 @@ class OrderBuilder:
     @staticmethod
     def _clamp_price(price: float) -> float:
         """Clamp price to valid Kalshi range (0.01-0.99)."""
-        return max(0.01, min(0.99, round(price, 2)))
+        clamped = max(0.01, min(0.99, round(price, 2)))
+        if clamped != round(price, 2):
+            logger.debug(f"Price clamped: ${price:.4f} → ${clamped:.2f}")
+        return clamped
 
     @staticmethod
     def _generate_order_id() -> str:

@@ -43,9 +43,9 @@ class MarketGraph:
             self._available = True
             logger.info(f"Market graph initialized at {self.persist_dir}")
         except ImportError:
-            logger.info("ChromaDB not installed — market graph using keyword fallback")
+            logger.warning("ChromaDB not installed — market graph using keyword fallback (reduced accuracy for arb detection)")
         except Exception as e:
-            logger.warning(f"ChromaDB init failed: {e} — using keyword fallback")
+            logger.warning(f"ChromaDB init failed: {e} — using keyword fallback (reduced accuracy for arb detection)")
 
     def index_markets(self, markets: list[Market]):
         """Index all markets into the vector store."""
@@ -190,9 +190,10 @@ class MarketGraph:
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:
-        """Tokenize text into a set of lowercase words (3+ chars)."""
+        """Tokenize text into a set of lowercase words (3+ chars), including hyphenated terms."""
         import re
-        words = set(re.findall(r'\b[a-z]{3,}\b', text.lower()))
+        # Match words and hyphenated compounds (e.g., "anti-trust", "re-election")
+        words = set(re.findall(r'\b[a-z]{3,}(?:-[a-z]{3,})*\b', text.lower()))
         # Remove common stop words
         stop_words = {
             "the", "and", "for", "that", "this", "will", "with", "from",

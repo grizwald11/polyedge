@@ -74,7 +74,7 @@ class FedWatchClient:
             )
 
             if not meeting_pattern:
-                logger.debug("FedWatch: could not parse meeting probabilities from page")
+                logger.warning("FedWatch: could not parse meeting probabilities from page — CME page format may have changed")
                 return None
 
             seen_meetings: set[str] = set()
