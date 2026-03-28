@@ -157,7 +157,12 @@ def multi_model_ensemble(
     variance = sum((p - mean_prob) ** 2 for p in probs) / len(probs)
     disagreement = variance ** 0.5  # std dev
 
-    confidence = max(0.1, min(0.95, 1.0 - avg_ci - disagreement))
+    # Multiplicative penalty: disagreement scales down confidence rather than
+    # subtracting a fixed amount, which was overly punitive (e.g., 0.15 std dev
+    # would wipe 15pp of confidence).  A disagreement of 0.25 now reduces
+    # confidence by ~25% instead of a flat 25pp subtraction.
+    disagreement_factor = max(0.3, 1.0 - disagreement)
+    confidence = max(0.1, min(0.95, (1.0 - avg_ci) * disagreement_factor))
 
     weight_strs = [f"{mw.name}={mw.weight:.2f}" for mw in model_weights]
     logger.debug(

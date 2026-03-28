@@ -141,11 +141,15 @@ class KellySizer:
 
         # Account for estimated fee so total cost stays within cap.
         # Fee formula returns cents: ceil(fee_rate * contracts * price * (1 - price))
-        # Convert to dollars before comparing.
+        # Convert to dollars before comparing.  Loop because removing one
+        # contract changes the fee, and a single decrement may not suffice
+        # for high-fee expensive contracts.
         if contracts > 0 and 0 < cost_price < 1:
-            fee_cents = math.ceil(self.fee_rate * contracts * cost_price * (1.0 - cost_price))
-            fee_dollars = fee_cents / 100.0
-            if contracts * cost_price + fee_dollars > kelly_dollars:
+            while contracts > 0:
+                fee_cents = math.ceil(self.fee_rate * contracts * cost_price * (1.0 - cost_price))
+                fee_dollars = fee_cents / 100.0
+                if contracts * cost_price + fee_dollars <= kelly_dollars:
+                    break
                 contracts -= 1
 
         # Minimum 1 contract if we have any edge and room,

@@ -267,7 +267,11 @@ class AIProbabilityStrategy:
         # Divergence gate: reject extreme disagreement with the market.
         # When Claude diverges by >40% from the market price, it's far more
         # likely a hallucination than a genuine edge (e.g., Venezuela 80% vs 2%).
+        # For extreme-price markets (<15¢ or >85¢), widen the threshold since
+        # small absolute probability differences create large divergences.
         max_div = self.settings.claude.max_divergence_from_market
+        if market.yes_price < 0.15 or market.yes_price > 0.85:
+            max_div = min(0.60, max_div + 0.15)
         divergence = abs(forecast.probability - market.yes_price)
         if divergence > max_div:
             logger.warning(
