@@ -100,7 +100,10 @@ class CrossArbStrategy:
             market_question=market.question,
             direction=direction,
             edge=edge,
-            probability_estimate=min(0.99, price + edge),  # Ensure Kelly derives correct market_price
+            # For arb, "true probability" is irrelevant — we're exploiting math,
+            # not prediction. Set probability = price + edge so Kelly derives
+            # the correct market_price (probability - edge = price).
+            probability_estimate=min(0.99, price + edge),
             market_price=price,
             confidence=0.9,  # High confidence — mathematical
             reasoning=f"Intra-market arb: YES({market.yes_price:.2f}) + NO({market.no_price:.2f}) = {total:.2f} < 1.00",

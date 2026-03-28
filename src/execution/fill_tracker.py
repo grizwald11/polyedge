@@ -44,8 +44,9 @@ class FillTracker:
         self._processed_fills: set[str] = self._load_filled_order_ids()
         # Track cumulative recorded fill count per order for partial fills.
         # This allows recording the delta when subsequent partials or the
-        # final execution arrive.
-        self._partial_recorded: dict[str, int] = {}
+        # final execution arrive. Load from DB on restart to prevent
+        # duplicate trade records after crash during partial fill.
+        self._partial_recorded: dict[str, int] = self._load_partial_recorded_counts()
 
     def track(self, order: Order):
         """Register an order for fill tracking."""
@@ -352,6 +353,32 @@ class FillTracker:
         except Exception as e:
             logger.warning(f"Failed to load filled order IDs: {e}")
             return set()
+
+    def _load_partial_recorded_counts(self) -> dict[str, int]:
+        """Load cumulative fill counts per order from the database.
+
+        On restart, this prevents re-recording partial fills that were already
+        saved. Without this, a crash during partial fill processing would
+        create duplicate trade records on the next poll.
+        """
+        try:
+            conn = self.db._get_conn()
+            rows = conn.execute(
+                "SELECT order_id, CAST(SUM(size) AS INTEGER) as filled "
+                "FROM trades WHERE order_id IS NOT NULL "
+                "GROUP BY order_id"
+            ).fetchall()
+            counts = {
+                row["order_id"]: row["filled"]
+                for row in rows
+                if row["order_id"] and row["order_id"] not in self._processed_fills
+            }
+            if counts:
+                logger.info(f"Fill tracker: loaded {len(counts)} partial fill counts")
+            return counts
+        except Exception as e:
+            logger.warning(f"Failed to load partial fill counts: {e}")
+            return {}
 
     @property
     def pending_count(self) -> int:

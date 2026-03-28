@@ -87,7 +87,15 @@ class OrderRouter:
                     f"for {order.market_id}"
                 )
                 order.size = position.size
-                order.cost = order.price * order.size
+                # Recalculate cost including fees (not just price * size)
+                price_cents = dollars_to_cents(order.price)
+                if order.platform == Platform.POLYMARKET:
+                    fee_dollars = 0.0
+                elif order.order_type == OrderType.GTC:
+                    fee_dollars = kalshi_maker_fee(int(order.size), price_cents) / 100.0
+                else:
+                    fee_dollars = kalshi_taker_fee(int(order.size), price_cents) / 100.0
+                order.cost = order.price * order.size + fee_dollars
 
         if order.paper or self.settings.trading.mode == "paper":
             return await self._paper_fill(order)

@@ -188,7 +188,9 @@ class CircuitBreaker:
         self._last_day_checked = today
         # State is maintained via record_daily_result() called at day boundary.
         # If we missed a day boundary (e.g., restart), check yesterday's P&L.
-        yesterday_pnl = self.db.get_daily_pnl()
+        from datetime import timedelta
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday_pnl = self.db.get_daily_pnl(yesterday)
         if yesterday_pnl != 0.0 and self._consecutive_losing_days == 0 and yesterday_pnl < 0:
             logger.info(f"Detected unreported losing day (P&L=${yesterday_pnl:.2f})")
             self.record_daily_result(yesterday_pnl)

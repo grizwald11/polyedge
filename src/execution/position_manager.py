@@ -21,7 +21,7 @@ DEFAULT_EDGE_GONE_THRESHOLD = 0.20 # Exit if remaining edge < 20% of original
 DEFAULT_TRAILING_STOP_ACTIVATE = 0.12  # Activate trailing stop after 12% gain
 DEFAULT_TRAILING_STOP_DISTANCE = 0.50  # Trail 50% of peak gain (e.g., peak +30% → exit at +15%)
 DEFAULT_TAKE_PROFIT_PCT = 0.80     # Take profit at 80% of max theoretical gain
-DEFAULT_CAPITAL_ROTATION_EDGE = 0.40  # When exposure >50%, exit profitable positions with <40% remaining edge
+DEFAULT_CAPITAL_ROTATION_EDGE = 0.40  # When exposure >35%, exit profitable positions with <40% remaining edge
 
 if __name__ != "__main__":
     from typing import TYPE_CHECKING
@@ -289,7 +289,7 @@ class PositionManager:
         if market is not None and position.unrealized_pnl > 0:
             exposure_pct = self.get_total_exposure_pct()
             remaining = self._calculate_remaining_edge(position, market)
-            if exposure_pct > 0.50 and remaining < DEFAULT_CAPITAL_ROTATION_EDGE:
+            if exposure_pct > 0.35 and remaining < DEFAULT_CAPITAL_ROTATION_EDGE:
                 return True, (
                     f"capital_rotation: edge {remaining:.1%} < {DEFAULT_CAPITAL_ROTATION_EDGE:.0%} "
                     f"threshold with portfolio at {exposure_pct:.0%} exposure"
@@ -321,15 +321,14 @@ class PositionManager:
     def _calculate_remaining_edge(self, position: Position, market: Market) -> float:
         """Calculate remaining edge for a position given current market prices.
 
-        Edge is measured as the difference between where we think the market
-        should resolve and the current price. For a BUY_YES position, our entry
-        price implies we believed the true probability was >= entry price.
-        If the market price has moved toward 1.0 (our thesis), edge shrinks
-        because there's less upside. If price moved away, we still have edge
-        but are underwater.
+        For a BUY_YES position at entry E, the upside was (1 - E). As the
+        market price moves toward 1.0 (our thesis), less upside remains.
+        If price drops below entry, the position is underwater and edge = 0.
 
-        Returns a positive fraction if the position still has favorable risk/reward,
-        zero or negative if the edge has evaporated.
+        Returns a fraction in [0, 1]:
+        - 1.0 = all original upside remains (price hasn't moved from entry)
+        - 0.5 = half the upside captured
+        - 0.0 = price moved against us (underwater) or fully captured
         """
         if position.direction in (Direction.BUY_YES, Direction.SELL_NO):
             current = market.yes_price
@@ -338,17 +337,19 @@ class PositionManager:
         entry = position.avg_entry_price
         if current <= 0 or entry <= 0:
             return 0.0
-        # Edge at entry: (1 - entry) / entry
-        # Edge now: (1 - current) / current
-        # Remaining = current edge as fraction of entry edge
-        entry_edge = (1.0 - entry) / entry
-        current_edge = (1.0 - current) / current
-        if entry_edge <= 0:
+
+        # If price moved AGAINST us, edge is gone (position is underwater)
+        if current < entry:
             return 0.0
-        # Linear ratio: exit when remaining edge drops below threshold fraction
-        # of original edge. Less aggressive than squared — holds winners longer.
-        ratio = max(0.0, min(1.0, current_edge / entry_edge))
-        return ratio
+
+        # Remaining upside: fraction of original upside not yet captured
+        # Entry at 0.40, max payout 1.00 → original upside = 0.60
+        # Current at 0.70 → captured 0.30, remaining = 0.30/0.60 = 0.50
+        original_upside = 1.0 - entry
+        if original_upside <= 0:
+            return 0.0
+        remaining_upside = 1.0 - current
+        return max(0.0, min(1.0, remaining_upside / original_upside))
 
     async def sync_with_kalshi(self, kalshi, auto_correct: bool = True) -> int:
         """Reconcile local positions against Kalshi API positions.
