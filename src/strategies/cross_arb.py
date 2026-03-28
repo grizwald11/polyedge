@@ -433,7 +433,7 @@ class CrossArbStrategy:
                     from datetime import datetime, timedelta, timezone
                     try:
                         cached_time = datetime.fromisoformat(validated_at)
-                        if datetime.now(timezone.utc) - cached_time > timedelta(hours=1):
+                        if datetime.now(timezone.utc) - cached_time > timedelta(minutes=30):
                             logger.debug(f"Arb cache expired for {ticker_a}/{ticker_b}")
                             return None
                     except (ValueError, TypeError):

@@ -64,7 +64,7 @@ class ObviousNoStrategy:
         if no_price <= 0 or no_price >= 1.0:
             return None
 
-        # Event/political markets on Kalshi are fee-free for maker orders.
+        # Event/political markets on Kalshi/Polymarket are fee-free for maker orders.
         # Only apply fees for fee-enabled categories (crypto, sports).
         fee_per_contract = 0.0
         category = getattr(market, "category", None)

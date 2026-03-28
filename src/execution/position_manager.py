@@ -38,6 +38,7 @@ class PositionManager:
         self.db = db
         self.bankroll = bankroll
         self._positions: dict[str, Position] = {}  # market_id -> Position
+        self._pending_exits: set[str] = set()  # market_ids with resting exit orders
         self._load_positions_from_db()
 
     def update_from_trade(self, trade: Trade, market_question: str = "") -> Position:
@@ -98,6 +99,7 @@ class PositionManager:
                         f"for {trade.market_id} — clamping to position size"
                     )
                     sell_size = existing.size
+                    trade.size = sell_size  # Persist clamped size for DB consistency
 
                 # Proportional buy fee for the contracts being sold
                 proportional_buy_fee = (
@@ -207,6 +209,18 @@ class PositionManager:
     def has_position(self, market_id: str) -> bool:
         """Check if we already have a position in this market."""
         return market_id in self._positions
+
+    def mark_pending_exit(self, market_id: str) -> None:
+        """Mark a position as having a resting exit order in flight."""
+        self._pending_exits.add(market_id)
+
+    def clear_pending_exit(self, market_id: str) -> None:
+        """Clear pending exit flag (order filled or cancelled)."""
+        self._pending_exits.discard(market_id)
+
+    def has_pending_exit(self, market_id: str) -> bool:
+        """Check if a position has a resting exit order already submitted."""
+        return market_id in self._pending_exits
 
     def get_position_count(self) -> int:
         """Number of open positions."""

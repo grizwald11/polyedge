@@ -89,6 +89,10 @@ class WhaleTrackerStrategy:
         If whales bought YES at $0.55 and market is now $0.50, edge = $0.05
         (we can buy cheaper than proven profitable traders did).
         """
+        if consensus.direction not in (Direction.BUY_YES, Direction.BUY_NO):
+            logger.debug(f"Ignoring non-BUY whale consensus for {market.ticker}: {consensus.direction}")
+            return None
+
         if consensus.direction == Direction.BUY_YES:
             current_price = market.yes_price
             avg_entry = consensus.avg_entry_price

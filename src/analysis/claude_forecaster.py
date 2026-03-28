@@ -166,8 +166,8 @@ class ClaudeForecaster:
             logger.warning("Claude API call timed out after 60s")
             return ForecastResult(
                 probability=market.yes_price,
-                confidence_low=max(0, market.yes_price - 0.20),
-                confidence_high=min(1, market.yes_price + 0.20),
+                confidence_low=max(0, market.yes_price - 0.25),
+                confidence_high=min(1, market.yes_price + 0.25),
                 reasoning="API call timed out after 60s",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
@@ -177,8 +177,8 @@ class ClaudeForecaster:
             logger.warning("Claude API rate limited, returning market price as fallback")
             return ForecastResult(
                 probability=market.yes_price,
-                confidence_low=max(0, market.yes_price - 0.15),
-                confidence_high=min(1, market.yes_price + 0.15),
+                confidence_low=max(0, market.yes_price - 0.25),
+                confidence_high=min(1, market.yes_price + 0.25),
                 reasoning="Rate limited — using market price as fallback",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
@@ -188,8 +188,8 @@ class ClaudeForecaster:
             logger.error(f"Claude assessment failed: {e}")
             return ForecastResult(
                 probability=market.yes_price,
-                confidence_low=max(0, market.yes_price - 0.20),
-                confidence_high=min(1, market.yes_price + 0.20),
+                confidence_low=max(0, market.yes_price - 0.25),
+                confidence_high=min(1, market.yes_price + 0.25),
                 reasoning=f"Assessment failed: {e}",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),

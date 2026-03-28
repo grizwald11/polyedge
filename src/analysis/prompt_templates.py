@@ -10,7 +10,11 @@ Each template is tailored to a market category and includes:
 
 from __future__ import annotations
 
+import logging
+
 from src.core.models import MarketCategory
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You are a calibrated probability forecaster. Your job is to estimate the true probability of events resolving YES or NO.
@@ -223,18 +227,25 @@ def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
     """
     import re
     # Truncate to prevent oversized injections
+    original_len = len(text)
     text = text[:max_length]
-    # Strip common prompt injection patterns
-    injection_patterns = [
-        r"(?i)ignore\s+(all\s+)?previous\s+instructions",
-        r"(?i)you\s+are\s+now\s+",
-        r"(?i)system\s*:\s*",
-        r"(?i)assistant\s*:\s*",
-        r"(?i)human\s*:\s*",
-        r"(?i)<\s*/?system\s*>",
+    if original_len > max_length:
+        logger.debug(f"Sanitize: truncated text from {original_len} to {max_length} chars")
+    # Detect and warn about suspicious prompt injection patterns
+    warning_patterns = [
+        (r"(?i)ignore\s+(all\s+)?previous\s+instructions", "ignore previous instructions"),
+        (r"(?i)you\s+are\s+now\s+", "role override attempt"),
+        (r"(?i)system\s*:\s*", "system: prefix"),
+        (r"(?i)assistant\s*:\s*", "assistant: prefix"),
+        (r"(?i)human\s*:\s*", "human: prefix"),
+        (r"(?i)<\s*/?system\s*>", "system tag"),
     ]
-    for pattern in injection_patterns:
-        text = re.sub(pattern, "[FILTERED]", text)
+    for pattern, description in warning_patterns:
+        if re.search(pattern, text):
+            logger.warning(
+                f"Suspicious prompt injection pattern detected ({description}) "
+                f"in external text: {text[:100]!r}..."
+            )
     return text
 
 

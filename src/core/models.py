@@ -254,8 +254,8 @@ class Signal(BaseModel):
     @field_validator("market_price")
     @classmethod
     def market_price_in_range(cls, v: float) -> float:
-        if not (0.0 < v < 1.0):
-            raise ValueError(f"market_price must be in (0, 1), got {v}")
+        if not (0.0 < v <= 0.99):
+            raise ValueError(f"market_price must be in (0, 0.99], got {v}")
         return v
 
     @field_validator("confidence")

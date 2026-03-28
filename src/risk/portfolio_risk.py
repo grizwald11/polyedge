@@ -22,6 +22,11 @@ class PortfolioRisk:
     def __init__(self, position_manager: PositionManager, db: Database):
         self.positions = position_manager
         self.db = db
+        self._event_ticker_cache: dict[str, Optional[str]] = {}
+
+    def refresh_cache(self) -> None:
+        """Clear the event ticker cache. Call once per scan cycle."""
+        self._event_ticker_cache.clear()
 
     def get_correlated_exposure(self, market_id: str) -> float:
         """Get total exposure correlated with a market.
@@ -110,8 +115,10 @@ class PortfolioRisk:
         return warnings
 
     def _get_event_ticker(self, market_id: str) -> Optional[str]:
-        """Look up the event_ticker for a market from the database."""
+        """Look up the event_ticker for a market from the database (cached)."""
+        if market_id in self._event_ticker_cache:
+            return self._event_ticker_cache[market_id]
         market_data = self.db.get_market(market_id)
-        if market_data:
-            return market_data.get("event_ticker") or None
-        return None
+        result = market_data.get("event_ticker") or None if market_data else None
+        self._event_ticker_cache[market_id] = result
+        return result

@@ -213,18 +213,20 @@ class FillTracker:
             timestamp=now,
         )
 
-        # Track cumulative recorded count (do NOT add to _processed_fills —
-        # the order may receive more fills or transition to "executed")
-        self._partial_recorded[order.id] = filled_count
-
         # Update order status but do NOT mutate order.size — the original
         # size is needed for fee calculations and DB consistency. Track
         # remaining count via the API, not by mutating local state.
         remaining = kalshi_data.get("remaining_count", 0)
         order.status = OrderStatus.PARTIAL if remaining > 0 else OrderStatus.FILLED
 
+        # Write to DB FIRST, then update in-memory tracker. If we crash
+        # after DB write but before memory update, restart will re-read
+        # from DB via _load_partial_recorded_counts() and be correct.
+        # If we crash before DB write, the in-memory tracker won't have
+        # advanced, so we'll correctly re-record on restart.
         self.db.log_trade(trade)
         self._log_order(order)
+        self._partial_recorded[order.id] = filled_count
 
         logger.info(
             f"[PARTIAL FILL] {order.side.value} {delta}x "

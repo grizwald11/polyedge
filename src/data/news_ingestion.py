@@ -33,6 +33,7 @@ class NewsItem:
     @property
     def age_seconds(self) -> float:
         if self.published is None:
+            logger.debug(f"NewsItem missing published timestamp: {self.title[:80]}")
             return float("inf")
         now = datetime.now(timezone.utc)
         pub = self.published

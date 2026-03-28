@@ -63,6 +63,8 @@ def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log")
 
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # Clear any existing handlers to prevent duplicates on restart
+    root.handlers.clear()
 
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(logging.Formatter(log_format, datefmt=date_format))
@@ -116,6 +118,9 @@ async def scan_and_trade(
                 if abs(live_balance - bankroll) > 1.0:  # Only log if >$1 drift
                     logger.info(f"Bankroll sync: config=${bankroll:.2f} → live=${live_balance:.2f}")
                 bankroll = live_balance
+                # Propagate to all components that use bankroll
+                risk_engine.update_bankroll(live_balance)
+                position_manager.bankroll = live_balance
         except Exception as e:
             logger.warning(f"Failed to sync live balance: {e} — using config bankroll")
 
@@ -123,6 +128,7 @@ async def scan_and_trade(
     try:
         new_fills = await fill_tracker.check_fills()
         for fill in new_fills:
+            position_manager.clear_pending_exit(fill.market_id)
             position_manager.update_from_trade(fill)
     except Exception as e:
         logger.error(f"Fill tracker check failed: {e}")
@@ -263,13 +269,39 @@ async def scan_and_trade(
         if market is None:
             continue
 
+        # Skip if there's already a resting exit order for this position
+        if position_manager.has_pending_exit(position.market_id):
+            logger.debug(f"Skipping exit for {position.market_id}: resting exit order already in flight")
+            continue
+
         # Dedup: skip if we already sold this market recently (prevents duplicate
         # exits from overlapping scan cycles or pm2 restart races)
         if scanner.db.has_recent_exit(position.market_id):
             logger.info(f"Skipping exit for {position.market_id}: recent exit exists (dedup)")
             continue
 
-        # Determine exit price from current market
+        # Determine exit price — re-fetch in live mode for freshness
+        if settings.trading.mode == "live":
+            try:
+                pos_platform = getattr(position, "platform", Platform.KALSHI)
+                if pos_platform == Platform.POLYMARKET and poly_scanner is not None:
+                    from src.core.polymarket_discovery import parse_polymarket_market
+                    raw = await poly_scanner.discovery.get_market_by_condition_id(position.market_id)
+                    if raw:
+                        pm = parse_polymarket_market(raw)
+                        if pm:
+                            market = pm  # Use fresh data
+                else:
+                    raw = await kalshi.get_market(position.market_id)
+                    if raw:
+                        yb = float(raw.get("yes_bid_dollars") or raw.get("yes_bid") or 0)
+                        ya = float(raw.get("yes_ask_dollars") or raw.get("yes_ask") or 0)
+                        if yb > 0 and ya > 0:
+                            fresh_yes = (yb + ya) / 2
+                            position_manager.update_price(position.market_id, fresh_yes, 1.0 - fresh_yes)
+            except Exception as e:
+                logger.debug(f"Live exit price refresh failed for {position.market_id}: {e}")
+
         if position.direction in (Direction.BUY_YES, Direction.SELL_NO):
             exit_price = market.yes_price
         else:
@@ -306,11 +338,26 @@ async def scan_and_trade(
         if result is not None and result.success and result.trade is None:
             # Resting live order — register with fill tracker for polling
             fill_tracker.track(exit_order)
+            position_manager.mark_pending_exit(position.market_id)
         if result is not None and result.success and result.trade:
+            position_manager.clear_pending_exit(position.market_id)
             position_manager.update_from_trade(result.trade)
             # Record cooldown to prevent immediate re-entry
             risk_engine.record_exit(position.market_id)
             logger.info(f"[EXIT] {position.market_id} — {exit_reason}")
+            # Log exit reason to DB for post-hoc analysis
+            try:
+                scanner.db.log_exit_reason(
+                    market_id=position.market_id,
+                    exit_reason=exit_reason,
+                    exit_price=exit_price,
+                    position_size=position.size,
+                    realized_pnl=result.trade.realized_pnl if result.trade else 0.0,
+                    strategy=position.strategy.value if hasattr(position.strategy, 'value') else str(position.strategy),
+                    platform=position.platform.value if hasattr(position.platform, 'value') else str(getattr(position, 'platform', 'kalshi')),
+                )
+            except Exception as e:
+                logger.debug(f"Failed to log exit reason for {position.market_id}: {e}")
             if settings.alerts.alert_on_trade:
                 try:
                     await alert_manager.send_trade_alert(
@@ -587,6 +634,15 @@ async def scan_and_trade(
                 logger.info("Calibration: no resolved predictions yet")
         except Exception as e:
             logger.error(f"Calibration report failed: {e}")
+
+    # Periodic position sync with Kalshi (every 10 cycles, live mode only)
+    if settings.trading.mode == "live" and cycle_count % 10 == 0:
+        try:
+            mismatches = await position_manager.sync_with_kalshi(kalshi)
+            if mismatches:
+                logger.warning(f"Periodic sync found {mismatches} position mismatches")
+        except Exception as e:
+            logger.debug(f"Periodic position sync failed: {e}")
 
 
 async def run_trading_loop(

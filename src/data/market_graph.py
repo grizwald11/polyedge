@@ -92,12 +92,16 @@ class MarketGraph:
                 n_results=n + 1,  # +1 to exclude self
             )
 
+            ids = results["ids"][0] if results["ids"] else []
+            metadatas = results["metadatas"][0] if results.get("metadatas") else []
+            distances = results["distances"][0] if results.get("distances") else []
+
             related = []
-            for i, ticker in enumerate(results["ids"][0]):
+            for i, ticker in enumerate(ids):
                 if ticker == market.ticker:
                     continue
-                metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-                distance = results["distances"][0][i] if results["distances"] else 1.0
+                metadata = metadatas[i] if i < len(metadatas) else {}
+                distance = distances[i] if i < len(distances) else 1.0
                 related.append({
                     "ticker": ticker,
                     "score": 1.0 - distance,  # Convert distance to similarity

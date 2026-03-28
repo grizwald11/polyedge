@@ -131,9 +131,19 @@ class ResolutionTracker:
                     prices = outcome_prices
                 if len(prices) >= 2:
                     yes_price = float(prices[0])
-                    if yes_price == 0.5:
-                        return None  # Ambiguous — can't determine resolution
-                    return yes_price > 0.5  # Resolved YES if price → 1.0
+                    # Only accept price-based resolution when prices are near
+                    # terminal values (1.0/0.0). Intermediate prices like 0.75
+                    # could be incomplete settlement or API lag.
+                    if yes_price >= 0.95:
+                        return True
+                    elif yes_price <= 0.05:
+                        return False
+                    else:
+                        logger.debug(
+                            f"Polymarket {condition_id}: resolved=True but "
+                            f"outcomePrices not terminal (yes={yes_price:.2f}) — skipping"
+                        )
+                        return None
 
             return None
         except Exception as e:

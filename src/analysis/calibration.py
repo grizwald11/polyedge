@@ -188,7 +188,7 @@ class CalibrationTracker:
             SELECT cr.strategy, m.category,
                    cr.predicted_probability, cr.actual_outcome
             FROM calibration_records cr
-            JOIN markets m ON cr.market_id = m.ticker
+            JOIN markets m ON cr.market_id = m.ticker AND cr.platform = m.platform
             WHERE cr.actual_outcome IS NOT NULL
         """).fetchall()
 
@@ -224,17 +224,23 @@ class CalibrationTracker:
             return None
 
         wins = 0
+        total = 0
         for r in records:
+            if r["actual_outcome"] is None:
+                continue
             predicted = r["predicted_probability"]
-            actual = bool(r["actual_outcome"])
+            actual = int(r["actual_outcome"]) == 1
             market_price = r.get("market_price_at_prediction")
             # Use market price as threshold when available — this measures
             # whether we added value beyond what the market already knew.
             threshold = float(market_price) if market_price is not None else 0.5
+            total += 1
             if (predicted > threshold and actual) or (predicted < threshold and not actual):
                 wins += 1
 
-        return wins / len(records)
+        if total == 0:
+            return None
+        return wins / total
 
     def get_summary(self) -> dict:
         """Get a full calibration summary."""

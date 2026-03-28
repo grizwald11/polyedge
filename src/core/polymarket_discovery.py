@@ -40,15 +40,33 @@ POLYMARKET_TAG_MAP: dict[str, MarketCategory] = {
 }
 
 
+def _is_binary_market(raw: dict) -> bool:
+    """Check if a market has exactly 2 tokens (binary YES/NO)."""
+    clob_token_ids = raw.get("clobTokenIds")
+    if isinstance(clob_token_ids, str):
+        try:
+            ids = json.loads(clob_token_ids)
+            return len(ids) == 2
+        except (ValueError, json.JSONDecodeError):
+            pass
+    elif isinstance(clob_token_ids, list):
+        return len(clob_token_ids) == 2
+    # If we can't determine token count, assume binary for backward compat
+    return True
+
+
 def _parse_outcome_prices(raw: dict) -> tuple[float, float]:
     """Extract YES and NO prices from Gamma API response.
 
     outcomePrices can be a JSON string like '["0.65","0.35"]' or a list.
     Falls back to bestBid/lastTradePrice if unavailable.
+    Only uses the binary fallback (no_price = 1.0 - yes_price) when the
+    market has exactly 2 tokens.
     """
     outcome_prices = raw.get("outcomePrices")
     yes_price = 0.0
     no_price = 0.0
+    is_binary = _is_binary_market(raw)
 
     if isinstance(outcome_prices, str):
         try:
@@ -58,24 +76,30 @@ def _parse_outcome_prices(raw: dict) -> tuple[float, float]:
                 no_price = float(prices[1])
             elif len(prices) == 1:
                 yes_price = float(prices[0])
-                no_price = 1.0 - yes_price
+                if is_binary:
+                    no_price = 1.0 - yes_price
         except (ValueError, IndexError, json.JSONDecodeError):
             pass
     elif isinstance(outcome_prices, list) and outcome_prices:
         yes_price = float(outcome_prices[0])
-        no_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 1.0 - yes_price
+        if len(outcome_prices) > 1:
+            no_price = float(outcome_prices[1])
+        elif is_binary:
+            no_price = 1.0 - yes_price
 
     if yes_price == 0.0:
-        # Fallback to other price fields
+        # Fallback to other price fields — only derive no_price for binary markets
         best_bid = raw.get("bestBid")
         if best_bid is not None:
             yes_price = float(best_bid)
-            no_price = 1.0 - yes_price
+            if is_binary:
+                no_price = 1.0 - yes_price
         else:
             last_trade = raw.get("lastTradePrice")
             if last_trade is not None:
                 yes_price = float(last_trade)
-                no_price = 1.0 - yes_price
+                if is_binary:
+                    no_price = 1.0 - yes_price
 
     # Bounds-check: prices must be in [0, 1]
     yes_price = max(0.0, min(1.0, yes_price))

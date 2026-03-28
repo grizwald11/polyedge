@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -220,12 +221,13 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 
 class Database:
-    """SQLite database manager with WAL mode."""
+    """SQLite database manager with WAL mode and write serialization."""
 
     def __init__(self, db_path: str = "data/markets.db", wal_mode: bool = True):
         self.db_path = db_path
         self.wal_mode = wal_mode
         self._conn: Optional[sqlite3.Connection] = None
+        self._write_lock = threading.Lock()
         self._ensure_directory()
         self._init_db()
 
@@ -387,6 +389,7 @@ class Database:
         if "platform" not in market_cols:
             conn.executescript("""
                 PRAGMA foreign_keys=OFF;
+                BEGIN;
                 DROP TABLE IF EXISTS markets_new;
                 CREATE TABLE markets_new (
                     ticker TEXT NOT NULL,
@@ -420,6 +423,7 @@ class Database:
                 FROM markets;
                 DROP TABLE markets;
                 ALTER TABLE markets_new RENAME TO markets;
+                COMMIT;
                 PRAGMA foreign_keys=ON;
             """)
             logger.info("Migration v6: migrated markets to composite PK (ticker, platform)")
@@ -439,6 +443,61 @@ class Database:
                 )
             """)
             logger.info("Migration v6: created cross_platform_pairs table")
+
+        # Migration v7: add unique constraint on trades to prevent duplicate recording
+        existing_indices = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(trades)").fetchall()
+        }
+        if "idx_trades_unique_order" not in existing_indices:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_unique_order "
+                "ON trades(order_id, side)"
+            )
+            logger.info("Migration v7: added unique constraint on trades(order_id, side)")
+
+        # Migration v7: add unique constraint on market_snapshots
+        if "idx_snapshots_unique" not in {
+            row[1] for row in conn.execute("PRAGMA index_list(market_snapshots)").fetchall()
+        }:
+            # Remove exact duplicates first before creating unique index
+            conn.execute("""
+                DELETE FROM market_snapshots WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM market_snapshots
+                    GROUP BY market_id, timestamp
+                )
+            """)
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_unique "
+                "ON market_snapshots(market_id, timestamp)"
+            )
+            logger.info("Migration v7: added unique constraint on market_snapshots")
+
+        # Migration v8: position_exits table for tracking exit reasons
+        if "position_exits" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS position_exits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    market_id TEXT NOT NULL,
+                    platform TEXT DEFAULT 'kalshi',
+                    strategy TEXT DEFAULT '',
+                    exit_reason TEXT NOT NULL,
+                    exit_price REAL DEFAULT 0,
+                    position_size REAL DEFAULT 0,
+                    realized_pnl REAL DEFAULT 0,
+                    timestamp TEXT NOT NULL,
+                    FOREIGN KEY (market_id) REFERENCES markets(ticker)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_position_exits_market "
+                "ON position_exits(market_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_position_exits_reason "
+                "ON position_exits(exit_reason)"
+            )
+            logger.info("Migration v8: created position_exits table")
 
         conn.commit()
 
@@ -582,10 +641,10 @@ class Database:
     # ──────────────────────────────────────
 
     def log_snapshot(self, snapshot: MarketSnapshot):
-        """Log a market price snapshot."""
+        """Log a market price snapshot. Replaces if same market+timestamp exists."""
         conn = self._get_conn()
         conn.execute("""
-            INSERT INTO market_snapshots (market_id, timestamp, yes_price, no_price, spread, volume_1h, liquidity)
+            INSERT OR REPLACE INTO market_snapshots (market_id, timestamp, yes_price, no_price, spread, volume_1h, liquidity)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             snapshot.market_id,
@@ -652,28 +711,54 @@ class Database:
     # ──────────────────────────────────────
 
     def log_trade(self, trade: Trade) -> int:
-        """Log a completed trade."""
+        """Log a completed trade. Ignores duplicates (same order_id + side)."""
         conn = self._get_conn()
         platform = trade.platform.value if hasattr(trade.platform, 'value') else str(trade.platform)
-        cursor = conn.execute("""
-            INSERT INTO trades (order_id, market_id, platform, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            trade.order_id,
-            trade.market_id,
-            platform,
-            trade.token_id,
-            trade.side.value,
-            trade.price,
-            trade.size,
-            trade.fee,
-            trade.realized_pnl,
-            trade.strategy.value,
-            int(trade.paper),
-            trade.timestamp.isoformat(),
-        ))
-        conn.commit()
-        return cursor.lastrowid
+        with self._write_lock:
+            cursor = conn.execute("""
+                INSERT OR IGNORE INTO trades (order_id, market_id, platform, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade.order_id,
+                trade.market_id,
+                platform,
+                trade.token_id,
+                trade.side.value,
+                trade.price,
+                trade.size,
+                trade.fee,
+                trade.realized_pnl,
+                trade.strategy.value,
+                int(trade.paper),
+                trade.timestamp.isoformat(),
+            ))
+            conn.commit()
+            return cursor.lastrowid
+
+    def log_exit_reason(
+        self,
+        market_id: str,
+        exit_reason: str,
+        exit_price: float = 0.0,
+        position_size: float = 0.0,
+        realized_pnl: float = 0.0,
+        strategy: str = "",
+        platform: str = "kalshi",
+    ):
+        """Log the reason a position was exited."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._write_lock:
+            conn.execute("""
+                INSERT INTO position_exits
+                    (market_id, platform, strategy, exit_reason, exit_price,
+                     position_size, realized_pnl, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                market_id, platform, strategy, exit_reason,
+                exit_price, position_size, realized_pnl, now,
+            ))
+            conn.commit()
 
     def has_recent_trade(self, market_id: str, seconds: int = 300) -> bool:
         """Check if a BUY trade was placed on this market within the last N seconds.

@@ -169,6 +169,11 @@ class CircuitBreaker:
                 f"reduced_sizing={self._reduced_sizing}"
             )
 
+        # Auto-reset daily halt if we restarted on a new day
+        if self._halted and self._halt_time:
+            if datetime.now(timezone.utc).date() > self._halt_time.date():
+                self.reset_daily()
+
     def _persist_state(self):
         """Save current state to database."""
         self.db.save_circuit_breaker_state(
@@ -191,6 +196,6 @@ class CircuitBreaker:
         from datetime import timedelta
         yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
         yesterday_pnl = self.db.get_daily_pnl(yesterday)
-        if yesterday_pnl != 0.0 and self._consecutive_losing_days == 0 and yesterday_pnl < 0:
-            logger.info(f"Detected unreported losing day (P&L=${yesterday_pnl:.2f})")
+        if yesterday_pnl != 0.0:
+            logger.info(f"Auto-recording missed day result: P&L=${yesterday_pnl:.2f}")
             self.record_daily_result(yesterday_pnl)

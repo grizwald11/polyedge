@@ -10,8 +10,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from typing import Optional as _Optional
-
 from src.config import Settings
 from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.ensemble import ensemble_forecast, multi_model_ensemble
@@ -30,8 +28,8 @@ class AIProbabilityStrategy:
         self,
         forecaster: ClaudeForecaster,
         settings: Settings,
-        db: _Optional[Database] = None,
-        calibration_analyzer: _Optional[CalibrationAnalyzer] = None,
+        db: Optional[Database] = None,
+        calibration_analyzer: Optional[CalibrationAnalyzer] = None,
         data_enricher=None,
     ):
         self.forecaster = forecaster
@@ -271,9 +269,19 @@ class AIProbabilityStrategy:
         # a 10% absolute divergence on a $0.05 market is a 200% relative
         # disagreement — almost certainly a hallucination, not edge.
         max_div = self.settings.claude.max_divergence_from_market
+        divergence = abs(forecast.probability - market.yes_price)
         if market.yes_price < 0.15 or market.yes_price > 0.85:
             max_div = min(max_div, 0.25)
-        divergence = abs(forecast.probability - market.yes_price)
+            # Also check relative divergence: on extreme-price markets, even small
+            # absolute divergences can be huge relative to the price.
+            base_price = max(market.yes_price, 1.0 - market.yes_price)
+            relative_div = divergence / base_price if base_price > 0 else 0
+            if relative_div > 1.5:
+                logger.warning(
+                    f"Rejecting {market.ticker}: relative divergence {relative_div:.1f}x "
+                    f"on extreme-price market ({market.yes_price:.0%})"
+                )
+                return None
         if divergence > max_div:
             logger.warning(
                 f"Rejecting {market.ticker}: Claude ({forecast.probability:.0%}) diverges "

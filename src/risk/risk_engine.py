@@ -35,6 +35,7 @@ class RiskEngine:
         self.circuit_breaker = circuit_breaker
         self.db = db
         self.portfolio_risk = portfolio_risk
+        self._bankroll_override: float | None = None  # Live-synced bankroll
         self.cooldown_seconds = 3600  # 1 hour cooldown after exit
         # Load persisted cooldowns if DB available, otherwise start empty
         if db is not None:
@@ -43,6 +44,17 @@ class RiskEngine:
                 logger.info(f"Loaded {len(self._cooldowns)} active cooldowns from DB")
         else:
             self._cooldowns = {}
+
+    @property
+    def bankroll(self) -> float:
+        """Current bankroll — uses live-synced value if available, else config."""
+        if self._bankroll_override is not None:
+            return self._bankroll_override
+        return self.settings.trading.bankroll
+
+    def update_bankroll(self, live_balance: float) -> None:
+        """Update bankroll from live balance sync."""
+        self._bankroll_override = live_balance
 
     def check_all(
         self,
@@ -64,7 +76,7 @@ class RiskEngine:
         """
         failed = []
         warnings = []
-        bankroll = self.settings.trading.bankroll
+        bankroll = self.bankroll
 
         # 1. Balance check
         total_exposure = self.positions.get_total_exposure()

@@ -112,7 +112,7 @@ class OrderBuilder:
             price = market.no_price
 
         # Reject if price is missing/zero — don't silently clamp to $0.01
-        if price <= 0:
+        if price < 0.01:
             raise ValueError(
                 f"Cannot build market order: {signal.direction.value} price is "
                 f"${price:.4f} for {market.ticker} (missing market token data)"
@@ -153,16 +153,36 @@ class OrderBuilder:
         """Map a Direction to Kalshi side + token_id."""
         if direction == Direction.BUY_YES:
             token = market.yes_token
-            return Side.BUY, token.token_id if token else f"{market.ticker}_yes"
+            if token:
+                return Side.BUY, token.token_id
+            else:
+                synthetic = f"{market.ticker}_yes"
+                logger.warning(f"Missing YES token for {market.ticker} ({market.platform.value}) — using synthetic ID '{synthetic}'")
+                return Side.BUY, synthetic
         elif direction == Direction.BUY_NO:
             token = market.no_token
-            return Side.BUY, token.token_id if token else f"{market.ticker}_no"
+            if token:
+                return Side.BUY, token.token_id
+            else:
+                synthetic = f"{market.ticker}_no"
+                logger.warning(f"Missing NO token for {market.ticker} ({market.platform.value}) — using synthetic ID '{synthetic}'")
+                return Side.BUY, synthetic
         elif direction == Direction.SELL_YES:
             token = market.yes_token
-            return Side.SELL, token.token_id if token else f"{market.ticker}_yes"
+            if token:
+                return Side.SELL, token.token_id
+            else:
+                synthetic = f"{market.ticker}_yes"
+                logger.warning(f"Missing YES token for {market.ticker} ({market.platform.value}) — using synthetic ID '{synthetic}'")
+                return Side.SELL, synthetic
         else:  # SELL_NO
             token = market.no_token
-            return Side.SELL, token.token_id if token else f"{market.ticker}_no"
+            if token:
+                return Side.SELL, token.token_id
+            else:
+                synthetic = f"{market.ticker}_no"
+                logger.warning(f"Missing NO token for {market.ticker} ({market.platform.value}) — using synthetic ID '{synthetic}'")
+                return Side.SELL, synthetic
 
     @staticmethod
     def _clamp_price(price: float) -> float:
