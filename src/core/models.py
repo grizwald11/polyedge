@@ -234,6 +234,16 @@ class Signal(BaseModel):
     acted_on: bool = False
     order_id: Optional[str] = None
 
+    @field_validator("edge")
+    @classmethod
+    def edge_finite(cls, v: float) -> float:
+        import math
+        if not math.isfinite(v):
+            raise ValueError(f"edge must be finite, got {v}")
+        if v < -1.0 or v > 1.0:
+            raise ValueError(f"edge must be in [-1, 1], got {v}")
+        return v
+
     @field_validator("probability_estimate")
     @classmethod
     def probability_in_range(cls, v: float) -> float:
@@ -244,8 +254,8 @@ class Signal(BaseModel):
     @field_validator("market_price")
     @classmethod
     def market_price_in_range(cls, v: float) -> float:
-        if not (0.0 <= v <= 1.0):
-            raise ValueError(f"market_price must be in [0, 1], got {v}")
+        if not (0.0 < v < 1.0):
+            raise ValueError(f"market_price must be in (0, 1), got {v}")
         return v
 
     @field_validator("confidence")
@@ -285,8 +295,8 @@ class Order(BaseModel):
     @field_validator("price")
     @classmethod
     def price_valid(cls, v: float) -> float:
-        if v < 0 or v > 0.99:
-            raise ValueError(f"price must be in [0, 0.99], got {v}")
+        if v <= 0 or v > 0.99:
+            raise ValueError(f"price must be in (0, 0.99], got {v}")
         return v
 
     @field_validator("size")
@@ -405,12 +415,16 @@ class ForecastResult(BaseModel):
     @field_validator("confidence_high")
     @classmethod
     def ci_high_valid(cls, v: float, info) -> float:
+        import logging
         v = max(0.0, min(1.0, v))
         # Re-clamp ci_low defensively in case field validation order varies
         ci_low = max(0.0, min(1.0, info.data.get("confidence_low", 0.0)))
         if v < ci_low:
             # Auto-correct inverted CI bounds rather than rejecting
             # (Claude occasionally returns them swapped)
+            logging.getLogger(__name__).warning(
+                f"Inverted CI bounds: low={ci_low}, high={v} — swapping"
+            )
             v = ci_low
         return v
 
@@ -422,6 +436,14 @@ class EnsembleForecast(BaseModel):
     market_price: float = 0.0
     edge: float = 0.0  # final_probability - market_price
     confidence: float = 0.5
+
+    @field_validator("edge")
+    @classmethod
+    def edge_finite(cls, v: float) -> float:
+        import math
+        if not math.isfinite(v):
+            raise ValueError(f"edge must be finite, got {v}")
+        return v
 
 
 # ──────────────────────────────────────────────

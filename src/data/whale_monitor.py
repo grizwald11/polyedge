@@ -140,7 +140,7 @@ class WhaleMonitor:
                     earliest_entry = pos.detected_at
 
         total = yes_count + no_count
-        if total == 0:
+        if total == 0 or len(self._basket) == 0:
             return None
 
         threshold = self.settings.whales.consensus_threshold

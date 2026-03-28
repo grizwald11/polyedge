@@ -233,6 +233,12 @@ def _compute_model_weights(
         if total > 0:
             for w, r in zip(has_scores, raw):
                 w.weight = r / total
+        else:
+            # All models have worst-possible calibration (brier=1.0);
+            # fall back to equal weighting rather than leaving weights at 1.0
+            equal = 1.0 / len(has_scores)
+            for w in has_scores:
+                w.weight = equal
         # Models without scores get average of scored weights
         if has_scores:
             avg_weight = sum(w.weight for w in has_scores) / len(has_scores)
