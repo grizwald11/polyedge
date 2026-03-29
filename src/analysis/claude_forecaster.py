@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 class ClaudeForecaster:
     """Calls Claude to assess market probabilities."""
 
+    # Cache TTL in seconds — avoid re-assessing same market within 5 minutes
+    _CACHE_TTL_SECONDS = 300
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self._client: Optional[anthropic.AsyncAnthropic] = None
@@ -43,6 +46,9 @@ class ClaudeForecaster:
             "claude-sonnet-4-6": (3.0, 15.0),
             "claude-opus-4-6": (15.0, 60.0),
         }
+        # Forecast cache: avoids duplicate Claude calls for same market in a cycle
+        from src.data.cache import TTLCache
+        self._forecast_cache = TTLCache(ttl_seconds=self._CACHE_TTL_SECONDS)
 
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
@@ -145,6 +151,13 @@ class ClaudeForecaster:
         Returns:
             ForecastResult with probability estimate and reasoning
         """
+        # Check forecast cache — avoid re-calling Claude for same market
+        cache_key = f"assess:{market.ticker}"
+        cached = self._forecast_cache.get(cache_key)
+        if cached is not None:
+            logger.debug(f"Forecast cache hit for {market.ticker}")
+            return cached
+
         model = self._select_model(position_value)
         category = classify_market(market)
         temperature = self._select_temperature(category)
@@ -217,6 +230,20 @@ class ClaudeForecaster:
                 f"Claude [{model}] assessed '{market.question[:50]}...' → "
                 f"{forecast.probability:.0%} (temp={temperature}, latency: {latency_ms}ms, tokens: {tokens_used})"
             )
+            # Flag extreme divergence from market price at the forecaster level
+            # so downstream callers can make informed decisions.
+            max_div = self.settings.claude.max_divergence_from_market
+            divergence = abs(forecast.probability - market.yes_price)
+            if divergence > max_div:
+                logger.warning(
+                    f"High divergence: Claude ({forecast.probability:.0%}) vs market "
+                    f"({market.yes_price:.0%}) = {divergence:.0%} for '{market.question[:50]}...'"
+                )
+                forecast.high_divergence = True
+
+            # Cache successful forecasts to avoid redundant API calls
+            if not forecast.parse_failed:
+                self._forecast_cache.set(cache_key, forecast)
             return forecast
 
         except asyncio.TimeoutError:
@@ -275,7 +302,8 @@ class ClaudeForecaster:
                     return forecast
                 except anthropic.RateLimitError:
                     continue
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Non-rate-limit error during retry: {e}")
                     break
 
             logger.warning("Claude API rate limit retries exhausted, returning market price as fallback")
@@ -289,7 +317,7 @@ class ClaudeForecaster:
                 parse_failed=True,
             )
         except Exception as e:
-            logger.error(f"Claude assessment failed: {e}", exc_info=True)
+            logger.exception(f"Claude assessment failed: {e}")
             return ForecastResult(
                 probability=market.yes_price,
                 confidence_low=max(0, market.yes_price - 0.25),

@@ -51,7 +51,7 @@ class OrderRouter:
         self._pending_orders: dict[str, float] = {}  # order_id -> cost
         self._session_confirmed = False  # Gate 3: first-trade confirmation
         self._session_confirm_time: float | None = None  # When gate 3 was confirmed
-        self._session_confirm_ttl = 3600  # Gate 3 expires after 1 hour
+        self._session_confirm_ttl = self.GATE3_CONFIRMATION_TTL_SECONDS
         self._polymarket_residency_confirmed = False  # Polymarket jurisdiction gate
         self._log_gate_status()
 
@@ -124,6 +124,11 @@ class OrderRouter:
         else:
             return await self._live_fill(order)
 
+    # Paper trading simulation constants
+    PAPER_LIMIT_ORDER_MISS_RATE = 0.15  # 15% of limit orders don't fill
+    PAPER_MAX_SLIPPAGE = 0.01           # 0-1 cent adverse slippage
+    GATE3_CONFIRMATION_TTL_SECONDS = 3600  # Gate 3 expires after 1 hour
+
     def _simulate_slippage(self, order: Order) -> tuple[bool, float]:
         """Simulate realistic fill behavior for paper trading.
 
@@ -136,12 +141,11 @@ class OrderRouter:
         seed_str = f"{order.id}:{order.market_id}:{order.price}:{order.size}:{order.side.value}"
         rng = _random.Random(seed_str)
 
-        # 15% chance limit order doesn't fill
-        if rng.random() < 0.15:
+        if rng.random() < self.PAPER_LIMIT_ORDER_MISS_RATE:
             return False, order.price
 
-        # Adverse slippage: 0-1 cent
-        slippage = rng.random() * 0.01
+        # Adverse slippage: 0 to PAPER_MAX_SLIPPAGE
+        slippage = rng.random() * self.PAPER_MAX_SLIPPAGE
         if order.side == Side.BUY:
             fill_price = min(0.99, order.price + slippage)
         else:
@@ -393,9 +397,17 @@ class OrderRouter:
             self._log_order(order)
             self.db.log_trade(trade)
 
+            # Post-fill slippage monitoring: warn if actual fill diverges from expected
+            slippage = abs(fill_price - order.price)
+            if slippage > 0.01:
+                logger.warning(
+                    f"[LIVE] Slippage alert: expected ${order.price:.2f}, "
+                    f"filled ${fill_price:.2f} (slippage=${slippage:.3f})"
+                )
+
             logger.info(
                 f"[LIVE] Filled: {order.side.value} {int(order.size)}x "
-                f"{order.token_id} @ ${order.price:.2f}"
+                f"{order.token_id} @ ${fill_price:.2f}"
             )
 
             return OrderResult(success=True, order=order, trade=trade)
@@ -404,7 +416,7 @@ class OrderRouter:
             order.status = OrderStatus.REJECTED
             order.rejection_reason = str(e)
             self._log_order(order)
-            logger.error(f"Live order failed: {e}", exc_info=True)
+            logger.exception(f"Live order failed: {e}")
             return OrderResult(success=False, order=order, error=str(e))
 
     async def _poly_live_fill(self, order: Order) -> OrderResult:

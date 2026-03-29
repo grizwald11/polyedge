@@ -37,6 +37,12 @@ class DataEnricher:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        # Cache slow-changing data sources to avoid redundant API calls.
+        # TTLs: news (5 min), economic data (60 min), community forecasts (30 min).
+        from src.data.cache import TTLCache
+        self._news_cache = TTLCache(ttl_seconds=300)       # 5 min
+        self._econ_cache = TTLCache(ttl_seconds=3600)       # 60 min
+        self._community_cache = TTLCache(ttl_seconds=1800)  # 30 min
         self.news_researcher = NewsResearcher(
             serper_api_key=settings.serper_api_key,
             searxng_url=settings.searxng_url,
@@ -64,56 +70,86 @@ class DataEnricher:
         """
         category = classify_market(market)
 
-        # Build list of coroutines based on category
+        # Build list of coroutines based on category, checking caches first
         tasks: dict[str, asyncio.Task] = {}
-
-        # News — always
-        tasks["news"] = self.news_researcher.get_context(market.question)
-
-        # Economic data — FED_MACRO and EARNINGS
-        if category in (MarketCategory.FED_MACRO, MarketCategory.EARNINGS):
-            tasks["fred"] = self.fred.get_macro_summary()
-
-        # Cleveland Fed + FedWatch — FED_MACRO only
-        if category == MarketCategory.FED_MACRO:
-            tasks["cleveland_fed"] = self.cleveland_fed.get_context()
-            tasks["fedwatch"] = self.fedwatch.get_context()
-
-        # Community forecasts and cross-platform — all categories
-        tasks["manifold"] = self.manifold.get_context(market.question)
-        tasks["metaculus"] = self.metaculus.get_context(market.question)
-        tasks["polymarket"] = self.polymarket.get_context(
-            market.question, market.yes_price
-        )
-
-        # Run all concurrently with a hard timeout, preserving partial results
         results: dict[str, str] = {}
-        wrapped_tasks = [
-            asyncio.create_task(self._safe_fetch(name, coro))
-            for name, coro in tasks.items()
-        ]
-        done, pending = await asyncio.wait(wrapped_tasks, timeout=15)
 
-        # Collect results from completed tasks, logging any failures
-        for task in done:
-            try:
-                name, result = task.result()
-                results[name] = result
-            except Exception as e:
-                # Extract source name from the exception or task for diagnostics
-                logger.warning(f"Data enrichment source failed: {e}")
+        def _check_or_fetch(name: str, cache: 'TTLCache', cache_key: str, coro):
+            """Use cache if available, otherwise schedule the coroutine."""
+            cached = cache.get(cache_key)
+            if cached is not None:
+                results[name] = cached
+            else:
+                tasks[name] = coro
 
-        # Cancel any still-pending tasks and await them to ensure cleanup
-        if pending:
-            for task in pending:
-                task.cancel()
-            # Gather with return_exceptions to suppress CancelledError and
-            # ensure underlying HTTP connections are properly released.
-            await asyncio.gather(*pending, return_exceptions=True)
-            logger.warning(
-                f"Data enrichment: {len(pending)} sources timed out after 15s, "
-                f"{len(done)} completed"
-            )
+        # News — always (short cache)
+        _check_or_fetch("news", self._news_cache, f"news:{market.question[:80]}",
+                        self.news_researcher.get_context(market.question))
+
+        # Economic data — FED_MACRO and EARNINGS (long cache)
+        if category in (MarketCategory.FED_MACRO, MarketCategory.EARNINGS):
+            _check_or_fetch("fred", self._econ_cache, "fred:macro",
+                            self.fred.get_macro_summary())
+
+        # Cleveland Fed + FedWatch — FED_MACRO only (long cache)
+        if category == MarketCategory.FED_MACRO:
+            _check_or_fetch("cleveland_fed", self._econ_cache, "cleveland_fed",
+                            self.cleveland_fed.get_context())
+            _check_or_fetch("fedwatch", self._econ_cache, "fedwatch",
+                            self.fedwatch.get_context())
+
+        # Community forecasts and cross-platform — all categories (medium cache)
+        _check_or_fetch("manifold", self._community_cache, f"manifold:{market.question[:80]}",
+                        self.manifold.get_context(market.question))
+        _check_or_fetch("metaculus", self._community_cache, f"metaculus:{market.question[:80]}",
+                        self.metaculus.get_context(market.question))
+        _check_or_fetch("polymarket", self._community_cache,
+                        f"polymarket:{market.question[:80]}",
+                        self.polymarket.get_context(market.question, market.yes_price))
+
+        # Run remaining (non-cached) tasks concurrently with hard timeout
+        if not tasks:
+            # Everything was cached
+            pass
+        else:
+            wrapped_tasks = [
+                asyncio.create_task(self._safe_fetch(name, coro))
+                for name, coro in tasks.items()
+            ]
+            done, pending = await asyncio.wait(wrapped_tasks, timeout=15)
+
+        # Collect results from completed tasks and store in cache
+        if tasks:
+            # Cache key mapping for storing results
+            _cache_map = {
+                "news": (self._news_cache, f"news:{market.question[:80]}"),
+                "fred": (self._econ_cache, "fred:macro"),
+                "cleveland_fed": (self._econ_cache, "cleveland_fed"),
+                "fedwatch": (self._econ_cache, "fedwatch"),
+                "manifold": (self._community_cache, f"manifold:{market.question[:80]}"),
+                "metaculus": (self._community_cache, f"metaculus:{market.question[:80]}"),
+                "polymarket": (self._community_cache, f"polymarket:{market.question[:80]}"),
+            }
+            for task in done:
+                try:
+                    name, result = task.result()
+                    results[name] = result
+                    # Cache non-empty results for future calls
+                    if result and name in _cache_map:
+                        cache, key = _cache_map[name]
+                        cache.set(key, result)
+                except Exception as e:
+                    logger.warning(f"Data enrichment source failed: {e}")
+
+            # Cancel any still-pending tasks and await them to ensure cleanup
+            if pending:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                logger.warning(
+                    f"Data enrichment: {len(pending)} sources timed out after 15s, "
+                    f"{len(done)} completed"
+                )
 
         # Assemble in priority order
         sections: list[str] = []
@@ -158,14 +194,18 @@ class DataEnricher:
         return context
 
     def _truncate(self, sections: list[str]) -> str:
-        """Truncate context by removing lowest-priority sections first.
+        """Truncate context by removing shortest (least informative) sections first.
 
-        Priority (highest to lowest): news, fred, cleveland_fed, fedwatch,
-        metaculus, polymarket. Removes from the end until under limit.
+        Previously removed from the end (lowest priority), but this could
+        drop cross-platform pricing data that is the strongest mispricing evidence.
+        Now removes the shortest section first to preserve the meatiest content.
         """
         result_sections = list(sections)
         while result_sections and len("\n\n".join(result_sections)) > MAX_CONTEXT_CHARS:
-            result_sections.pop()  # Remove lowest priority
+            # Remove shortest section (least informative)
+            shortest_idx = min(range(len(result_sections)), key=lambda i: len(result_sections[i]))
+            removed = result_sections.pop(shortest_idx)
+            logger.debug(f"Truncated section ({len(removed)} chars) to fit context limit")
 
         if not result_sections:
             # Even a single section is too long — hard truncate

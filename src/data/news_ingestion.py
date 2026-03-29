@@ -167,5 +167,6 @@ class NewsIngestion:
             if host.startswith("www."):
                 host = host[4:]
             return host
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to extract source from {feed_url}: {e}")
             return feed_url

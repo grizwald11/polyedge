@@ -205,38 +205,60 @@ class NewsResearcher:
             return results
 
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _do_search)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _do_search),
+                timeout=8.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"DDG search timed out after 8s for '{query[:50]}'")
+            return []
 
     async def _search_serper(self, query: str) -> list[NewsResult]:
-        """Search via Serper.dev (paid fallback)."""
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    self.serper_url,
-                    json={"q": query, "num": MAX_RESULTS_PER_QUERY},
-                    headers={
-                        "X-API-KEY": self.serper_api_key,
-                        "Content-Type": "application/json",
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (400, 401, 403):
-                try:
-                    detail = e.response.json().get("message", str(e.response.status_code))
-                except Exception:
-                    detail = str(e.response.status_code)
-                import time as _time
-                logger.warning(f"Serper API disabled (1h cooldown): {detail}")
-                self._serper_disabled = True
-                self._serper_disabled_at = _time.monotonic()
-            else:
+        """Search via Serper.dev (paid fallback). Retries on 5xx errors."""
+        import asyncio
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        self.serper_url,
+                        json={"q": query, "num": MAX_RESULTS_PER_QUERY},
+                        headers={
+                            "X-API-KEY": self.serper_api_key,
+                            "Content-Type": "application/json",
+                        },
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                break  # Success
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (400, 401, 403):
+                    try:
+                        detail = e.response.json().get("message", str(e.response.status_code))
+                    except Exception:
+                        detail = str(e.response.status_code)
+                    import time as _time
+                    logger.warning(f"Serper API disabled (1h cooldown): {detail}")
+                    self._serper_disabled = True
+                    self._serper_disabled_at = _time.monotonic()
+                    return []
+                elif e.response.status_code >= 500 and attempt < max_retries:
+                    wait = 2 ** attempt
+                    logger.debug(f"Serper 5xx error, retrying in {wait}s (attempt {attempt + 1})")
+                    await asyncio.sleep(wait)
+                    continue
+                else:
+                    logger.warning(f"Serper search failed for '{query}': {e}")
+                    return []
+            except httpx.HTTPError as e:
+                if attempt < max_retries:
+                    wait = 2 ** attempt
+                    logger.debug(f"Serper network error, retrying in {wait}s: {e}")
+                    await asyncio.sleep(wait)
+                    continue
                 logger.warning(f"Serper search failed for '{query}': {e}")
-            return []
-        except httpx.HTTPError as e:
-            logger.warning(f"Serper search failed for '{query}': {e}")
-            return []
+                return []
 
         results = []
         for item in data.get("organic", [])[:MAX_RESULTS_PER_QUERY]:
@@ -507,7 +529,8 @@ def _normalize_url(url: str) -> str:
         else:
             clean_query = ""
         return urlunparse((parsed.scheme, host, parsed.path.rstrip("/"), "", clean_query, ""))
-    except Exception:
+    except Exception as e:
+        logger.debug(f"URL normalization failed for {url[:80]}: {e}")
         return url
 
 
@@ -520,5 +543,6 @@ def _extract_source(url: str) -> str:
         if host.startswith("www."):
             host = host[4:]
         return host
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Source extraction failed for {url[:80]}: {e}")
         return url

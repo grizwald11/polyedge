@@ -401,6 +401,7 @@ class ForecastResult(BaseModel):
     latency_ms: int = 0
     raw_response: str = ""
     parse_failed: bool = False
+    high_divergence: bool = False  # Set when Claude diverges > max_divergence from market
 
     @field_validator("probability")
     @classmethod

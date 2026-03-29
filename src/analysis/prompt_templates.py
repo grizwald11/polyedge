@@ -234,7 +234,12 @@ def get_template(category: MarketCategory) -> str:
 def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
     """Sanitize text from external sources (market descriptions, news) before prompt injection.
 
-    Strips prompt-injection patterns and truncates to prevent abuse.
+    Uses a two-layer defense:
+    1. Strip known prompt-injection patterns (role overrides, system tags, etc.)
+    2. Remove non-printable / control characters that could confuse the model.
+
+    If ANY injection pattern is detected, the entire surrounding sentence is
+    removed (not just the keyword) to prevent residual manipulation.
     """
     import re
     # Truncate to prevent oversized injections
@@ -242,26 +247,35 @@ def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
     text = text[:max_length]
     if original_len > max_length:
         logger.debug(f"Sanitize: truncated text from {original_len} to {max_length} chars")
-    # Detect and STRIP suspicious prompt injection patterns.
-    # Prior to this fix, detected patterns were only warned about but still
-    # included in the prompt — a crafted market description could manipulate
-    # Claude's probability output.
-    warning_patterns = [
-        (r"(?i)ignore\s+(all\s+)?previous\s+instructions", "ignore previous instructions"),
-        (r"(?i)you\s+are\s+now\s+", "role override attempt"),
-        (r"(?i)system\s*:\s*", "system: prefix"),
-        (r"(?i)assistant\s*:\s*", "assistant: prefix"),
-        (r"(?i)human\s*:\s*", "human: prefix"),
-        (r"(?i)<\s*/?system\s*>", "system tag"),
+
+    # Layer 1: Strip control characters and zero-width unicode
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060\ufeff]', '', text)
+
+    # Layer 2: Detect and REMOVE entire sentences containing injection patterns.
+    # Removing just the keyword leaves surrounding manipulative context intact.
+    injection_patterns = [
+        (r"ignore\s+(all\s+)?previous\s+instructions", "ignore previous instructions"),
+        (r"you\s+are\s+now\s+", "role override attempt"),
+        (r"system\s*:\s*", "system: prefix"),
+        (r"assistant\s*:\s*", "assistant: prefix"),
+        (r"human\s*:\s*", "human: prefix"),
+        (r"<\s*/?system\s*>", "system tag"),
+        (r"output\s+probability\s+\d", "probability override"),
+        (r"forget\s+(all\s+)?(your|prior)", "memory wipe attempt"),
+        (r"new\s+instructions?\s*:", "instruction override"),
     ]
-    for pattern, description in warning_patterns:
-        if re.search(pattern, text):
+    for pattern, description in injection_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
             logger.warning(
                 f"Prompt injection pattern STRIPPED ({description}) "
                 f"from external text: {text[:100]!r}..."
             )
-            text = re.sub(pattern, "[REMOVED]", text)
-    return text
+            # Remove the entire sentence containing the injection
+            sentence_pattern = r'[^.!?\n]*' + pattern + r'[^.!?\n]*[.!?\n]?'
+            text = re.sub(sentence_pattern, '', text, flags=re.IGNORECASE)
+
+    return text.strip()
 
 
 def build_prompt(

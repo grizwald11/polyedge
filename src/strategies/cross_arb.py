@@ -441,7 +441,8 @@ class CrossArbStrategy:
                 import json
                 return json.loads(row["relationship_data"])
             return None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Arb cache lookup failed for {ticker_a}/{ticker_b}: {e}")
             return None
 
     def _cache_relationship(self, ticker_a: str, ticker_b: str, data: dict):

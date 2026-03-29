@@ -78,14 +78,13 @@ class ObviousNoStrategy:
         simple_return = net_profit / no_price
         annualized_return = simple_return * (365.0 / days) if days > 0 else 0
 
-        # Edge = probability edge (our estimate - market price), NOT dollar profit.
-        # Kelly sizer uses edge to derive market_price = probability - edge,
-        # so edge must be in probability space for correct sizing.
-        # For obvious NO, we believe the true NO probability is slightly higher
-        # than the market implies — markets at 1-5¢ YES have noise that makes
-        # NO underpriced. We estimate P(NO) = 1 - (yes_price * 0.5), which
-        # is conservative: at YES=0.03, we think NO is 98.5% not 97%.
-        probability_estimate = min(0.99, 1.0 - yes_price * 0.5)  # YES=0.01→0.995, YES=0.05→0.975
+        # Edge = probability edge (our estimate - market price).
+        # For obvious NO, the true P(NO) is very close to 1.0. We use a
+        # conservative estimate that accounts for tiny black-swan risk:
+        #   P(NO) = 1 - yes_price * 0.3 (at YES=0.03, P(NO) = 0.991)
+        # The old formula (0.5 factor) significantly underestimated edge,
+        # causing Kelly to under-size the most reliable strategy.
+        probability_estimate = min(0.99, 1.0 - yes_price * 0.3)  # YES=0.01→0.997, YES=0.05→0.985
         edge = probability_estimate - no_price
         if edge <= 0:
             return None

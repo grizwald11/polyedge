@@ -69,25 +69,27 @@ class CircuitBreaker:
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
 
         if daily_pnl < -daily_limit:
-            self._halt(
+            reason = (
                 f"Daily loss limit hit: ${daily_pnl:.2f} exceeds "
                 f"-${daily_limit:.2f} ({self.settings.trading.daily_loss_limit_pct:.0%})"
             )
+            self._halt(reason)
+            logger.critical(f"CIRCUIT BREAKER HALTED: {reason}")
             return False
 
         # Check consecutive losing days
         self._update_consecutive_losses()
         if self._consecutive_losing_days >= 5:
-            self._halt(
-                f"5 consecutive losing days — manual review required"
-            )
+            reason = "5 consecutive losing days — manual review required"
+            self._halt(reason)
+            logger.critical(f"CIRCUIT BREAKER HALTED: {reason}")
             return False
 
         if self._consecutive_losing_days >= 3:
             if not self._reduced_sizing:
                 self._reduced_sizing = True
                 self._persist_state()
-                logger.warning(
+                logger.error(
                     f"3 consecutive losing days — reducing to quarter-Kelly"
                 )
 

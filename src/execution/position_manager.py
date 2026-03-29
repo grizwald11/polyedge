@@ -301,22 +301,39 @@ class PositionManager:
             return False, ""
 
         # 1. Stop-loss check
+        #    Require fresh price data (<2 min) to avoid false exits on stale prices.
         if position.unrealized_pnl < 0:
             loss_pct = abs(position.unrealized_pnl) / cost_basis
             if loss_pct >= stop_loss_pct:
-                return True, f"stop_loss: {loss_pct:.0%} loss exceeds {stop_loss_pct:.0%} threshold"
+                price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
+                if price_age > 120:
+                    logger.debug(
+                        f"Skipping stop_loss for {position.market_id}: "
+                        f"price data stale ({price_age:.0f}s old)"
+                    )
+                else:
+                    return True, f"stop_loss: {loss_pct:.0%} loss exceeds {stop_loss_pct:.0%} threshold"
 
         # 2. Trailing stop: if we've had a significant gain and it's pulling back
+        #    Require fresh price data (<2 min) for trailing stop to avoid
+        #    false exits on stale prices.
         if position.peak_pnl > 0 and cost_basis > 0:
             peak_gain_pct = position.peak_pnl / cost_basis
             if peak_gain_pct >= self._trailing_stop_activate:
                 trail_floor = position.peak_pnl * self._trailing_stop_distance
                 if position.unrealized_pnl < trail_floor:
-                    return True, (
-                        f"trailing_stop: current P&L ${position.unrealized_pnl:.2f} "
-                        f"dropped below trail floor ${trail_floor:.2f} "
-                        f"(peak ${position.peak_pnl:.2f})"
-                    )
+                    price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
+                    if price_age > 120:
+                        logger.debug(
+                            f"Skipping trailing_stop for {position.market_id}: "
+                            f"price data stale ({price_age:.0f}s old)"
+                        )
+                    else:
+                        return True, (
+                            f"trailing_stop: current P&L ${position.unrealized_pnl:.2f} "
+                            f"dropped below trail floor ${trail_floor:.2f} "
+                            f"(peak ${position.peak_pnl:.2f})"
+                        )
 
         # 3. Take-profit: capture gains when near max theoretical payout
         # BUY_YES/BUY_NO: max gain = (1.0 - entry) * size (payout is $1.00)

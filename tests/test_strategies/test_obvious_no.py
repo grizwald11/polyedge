@@ -76,10 +76,10 @@ class TestObviousNoStrategy:
         market = _make_market(yes_price=0.04, days=10)
         signals = strategy.scan_for_opportunities([market])
         assert len(signals) == 1
-        # probability_estimate = min(0.99, 1.0 - 0.04*0.5) = 0.98
-        # edge = 0.98 - 0.96 = 0.02
-        assert abs(signals[0].edge - 0.02) < 0.001
-        assert abs(signals[0].probability_estimate - 0.98) < 0.001
+        # probability_estimate = min(0.99, 1.0 - 0.04*0.3) = 0.988
+        # edge = 0.988 - 0.96 = 0.028
+        assert abs(signals[0].edge - 0.028) < 0.001
+        assert abs(signals[0].probability_estimate - 0.988) < 0.001
 
     def test_rejects_yes_price_too_low(self, strategy):
         # YES at $0.00 — no token to buy NO against

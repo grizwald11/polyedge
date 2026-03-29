@@ -402,8 +402,8 @@ async def _generate_all_signals(
             await alert_manager.send_circuit_breaker_alert(
                 f"ALL STRATEGIES FAILED: {', '.join(_strategy_failures)}"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to send strategy failure alert: {e}")
 
     return all_signals, ai_signals, no_signals
 
@@ -472,9 +472,9 @@ async def _execute_signals(
             order_price=signal.market_price,
         )
 
-        cb_mult = circuit_breaker.get_kelly_multiplier()
-        if cb_mult < 1.0:
-            contracts = int(contracts * cb_mult)
+        # NOTE: Circuit breaker multiplier is already applied inside
+        # kelly_sizer via set_circuit_breaker_multiplier(). Do NOT apply
+        # it again here — that would double-penalize during drawdowns.
 
         if contracts <= 0:
             logger.debug(
@@ -708,14 +708,16 @@ async def scan_and_trade(
         except Exception as e:
             logger.error(f"Calibration report failed: {e}", exc_info=True)
 
-    # Periodic position sync with Kalshi (every 10 cycles, live mode only)
-    if settings.trading.mode == "live" and cycle_count % 10 == 0:
+    # Position sync with Kalshi every cycle in live mode to prevent desync.
+    # Previously every 10 cycles (50 min gap) — too long, risks naked shorts
+    # or double entries if fills arrive between syncs.
+    if settings.trading.mode == "live":
         try:
             mismatches = await position_manager.sync_with_kalshi(kalshi)
             if mismatches:
-                logger.warning(f"Periodic sync found {mismatches} position mismatches")
+                logger.warning(f"Position sync found {mismatches} mismatches")
         except Exception as e:
-            logger.debug(f"Periodic position sync failed: {e}")
+            logger.debug(f"Position sync failed: {e}")
 
 
 async def run_trading_loop(

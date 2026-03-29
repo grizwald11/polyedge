@@ -255,7 +255,8 @@ def create_app(
                         strategy=StrategyName(s["strategy"])
                     )
                     s["brier_score"] = brier
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Brier score lookup failed for {s.get('strategy')}: {e}")
                     s["brier_score"] = None
         return stats
 
