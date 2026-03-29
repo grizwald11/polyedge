@@ -234,7 +234,7 @@ class ClaudeForecaster:
         except anthropic.RateLimitError:
             # Retry up to 3 times with exponential backoff before falling back
             for retry_attempt in range(1, 4):
-                wait = 2 ** retry_attempt
+                wait = min(10, 2 ** retry_attempt)  # Cap backoff at 10s
                 logger.warning(
                     f"Claude API rate limited, retrying in {wait}s "
                     f"(attempt {retry_attempt}/3)"

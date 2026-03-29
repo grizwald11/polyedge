@@ -193,11 +193,11 @@ def parse_market(raw: dict[str, Any], event_category: str = "") -> Optional[Mark
 
         # Status — Kalshi uses "active", "closed", "settled"
         status_str = raw.get("status", "active")
-        known_statuses = {"open", "active", "closed", "settled", "finalized"}
+        known_statuses = {"open", "active", "closed", "settled", "finalized", "determined"}
         if status_str not in known_statuses:
             logger.debug(f"Unknown market status '{status_str}' for {ticker} — treating as inactive")
         active = status_str in ("open", "active")
-        closed = status_str in ("closed", "settled", "finalized")
+        closed = status_str in ("closed", "settled", "finalized", "determined")
 
         return Market(
             ticker=ticker,

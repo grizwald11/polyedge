@@ -292,6 +292,7 @@ class Order(BaseModel):
     cancelled_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
     exchange_order_id: Optional[str] = None  # Kalshi/Polymarket order ID for cancel/lookup
+    kalshi_side: Optional[str] = None  # "yes" or "no" — set by order_builder to avoid fragile string matching
 
     @field_validator("price")
     @classmethod
@@ -329,11 +330,11 @@ class Position(BaseModel):
 
     @property
     def market_value(self) -> float:
-        return self.size * self.current_price
+        return round(self.size * self.current_price, 4)
 
     @property
     def cost_basis(self) -> float:
-        return self.size * self.avg_entry_price + self.buy_fees
+        return round(self.size * self.avg_entry_price + self.buy_fees, 4)
 
 
 class Trade(BaseModel):

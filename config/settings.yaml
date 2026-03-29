@@ -36,7 +36,7 @@ trading:
   mode: "paper"  # "paper" or "live"
   bankroll: 5000.0
   max_position_pct: 0.05        # 5% of bankroll per position
-  max_total_exposure_pct: 0.60  # 60% total exposure
+  max_total_exposure_pct: 0.40  # 40% total exposure (design spec limit)
   max_correlated_exposure_pct: 0.20  # 20% in related markets
   min_edge_ai: 0.05             # 5% minimum edge for AI strategy
   min_edge_arb: 0.02            # 2% minimum edge for arbitrage
@@ -45,7 +45,7 @@ trading:
   prefer_maker: true            # Always use limit orders when possible
   daily_loss_limit_pct: 0.10    # 10% daily loss circuit breaker
   max_obvious_no_pct: 0.10      # Max 10% bankroll in obvious NO positions
-  max_trades_per_cycle: 7       # Max trades per scan cycle to prevent overtrading
+  max_trades_per_cycle: 5       # Max trades per scan cycle (matches config.py default)
 
 claude:
   model_primary: "claude-sonnet-4-6"

@@ -109,13 +109,13 @@ class TestBuildMarketOrder:
 class TestResolveSideAndToken:
     def test_all_directions(self, builder, sample_market):
         buy_yes = builder._resolve_side_and_token(sample_market, Direction.BUY_YES)
-        assert buy_yes == (Side.BUY, "FED-RATE-CUT-MAY26_yes")
+        assert buy_yes == (Side.BUY, "FED-RATE-CUT-MAY26_yes", "yes")
 
         buy_no = builder._resolve_side_and_token(sample_market, Direction.BUY_NO)
-        assert buy_no == (Side.BUY, "FED-RATE-CUT-MAY26_no")
+        assert buy_no == (Side.BUY, "FED-RATE-CUT-MAY26_no", "no")
 
         sell_yes = builder._resolve_side_and_token(sample_market, Direction.SELL_YES)
-        assert sell_yes == (Side.SELL, "FED-RATE-CUT-MAY26_yes")
+        assert sell_yes == (Side.SELL, "FED-RATE-CUT-MAY26_yes", "yes")
 
         sell_no = builder._resolve_side_and_token(sample_market, Direction.SELL_NO)
-        assert sell_no == (Side.SELL, "FED-RATE-CUT-MAY26_no")
+        assert sell_no == (Side.SELL, "FED-RATE-CUT-MAY26_no", "no")

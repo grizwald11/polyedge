@@ -143,12 +143,20 @@ class RiskEngine:
         if self.positions.has_position(signal.market_id):
             failed.append(f"Already have position in {signal.market_id}")
 
-        # 8a. Minimum trade cost check — Kalshi minimum is 1 contract,
+        # 8a. Minimum confidence check — reject signals with very low confidence
+        # to prevent trading on noisy or uncertain estimates.
+        min_confidence = 0.40
+        if signal.confidence < min_confidence:
+            failed.append(
+                f"Confidence too low: {signal.confidence:.1%} < {min_confidence:.1%} minimum"
+            )
+
+        # 8b. Minimum trade cost check — Kalshi minimum is 1 contract,
         # so any non-zero size is valid. We only reject truly zero-cost trades.
         if proposed_cost <= 0:
             failed.append("Trade cost is zero")
 
-        # 8b. Edge minimum check — edge must be positive (we have a favorable view)
+        # 8c. Edge minimum check — edge must be positive (we have a favorable view)
         # and exceed the strategy-specific threshold. Negative edge means we agree
         # with the market, so there's nothing to trade.
         min_edge = self._get_min_edge(signal.strategy)

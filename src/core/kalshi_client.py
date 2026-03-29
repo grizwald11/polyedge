@@ -165,15 +165,12 @@ class KalshiClient:
 
                     if resp.status_code == 429:
                         if attempt < max_retries - 1:
-                            wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+                            wait = min(10, 2 ** (attempt + 1)) + random.uniform(0, 1)
                             logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
                             await asyncio.sleep(wait)
                             continue
-                        logger.error(f"Rate limited on {path} after {max_retries} attempts — giving up")
-                        raise httpx.HTTPStatusError(
-                            f"Rate limited (429) on {path} after {max_retries} retries",
-                            request=resp.request, response=resp,
-                        )
+                        logger.error(f"Rate limited on {path} after {max_retries} attempts — returning None")
+                        return None
                     resp.raise_for_status()
                     if resp.status_code == 204:
                         return {}

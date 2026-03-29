@@ -104,10 +104,10 @@ class PositionManager:
                 # Adding to position — weighted average entry
                 total_cost = existing.avg_entry_price * existing.size + trade.price * trade.size
                 existing.size += trade.size
-                existing.avg_entry_price = total_cost / existing.size if existing.size > 0 else 0
-                # Accumulate fees on buy
-                existing.total_fees += trade.fee
-                existing.buy_fees += trade.fee
+                existing.avg_entry_price = round(total_cost / existing.size, 6) if existing.size > 0 else 0
+                # Accumulate fees on buy — round to prevent float drift
+                existing.total_fees = round(existing.total_fees + trade.fee, 4)
+                existing.buy_fees = round(existing.buy_fees + trade.fee, 4)
             else:
                 # Reducing position — avg_entry_price stays the same
                 # (it represents the cost basis of remaining contracts)
@@ -144,9 +144,9 @@ class PositionManager:
                 )
 
                 # Reduce buy_fees proportionally (remaining fees stay with remaining contracts)
-                existing.buy_fees -= proportional_buy_fee
+                existing.buy_fees = round(existing.buy_fees - proportional_buy_fee, 4)
                 # Accumulate sell fee into total_fees for record-keeping
-                existing.total_fees += trade.fee
+                existing.total_fees = round(existing.total_fees + trade.fee, 4)
                 existing.size -= sell_size
                 if existing.size <= 0:
                     # Position closed
@@ -205,10 +205,11 @@ class PositionManager:
                 return  # No valid price for this position's side
             position.current_price = yes_price
         # P&L = (current - entry) * size for BUY, (entry - current) * size for SELL
+        # Round to 4dp to prevent floating-point drift in accumulated P&L
         if position.direction in (Direction.BUY_YES, Direction.BUY_NO):
-            position.unrealized_pnl = (position.current_price - position.avg_entry_price) * position.size
+            position.unrealized_pnl = round((position.current_price - position.avg_entry_price) * position.size, 4)
         else:
-            position.unrealized_pnl = (position.avg_entry_price - position.current_price) * position.size
+            position.unrealized_pnl = round((position.avg_entry_price - position.current_price) * position.size, 4)
         # Track peak P&L for trailing stop
         if position.unrealized_pnl > position.peak_pnl:
             position.peak_pnl = position.unrealized_pnl
@@ -224,7 +225,7 @@ class PositionManager:
 
     def get_total_exposure(self) -> float:
         """Total capital deployed across all positions."""
-        return sum(p.cost_basis for p in self._positions.values())
+        return round(sum(p.cost_basis for p in self._positions.values()), 4)
 
     def get_total_exposure_pct(self) -> float:
         """Total exposure as percentage of bankroll."""
@@ -234,14 +235,14 @@ class PositionManager:
 
     def get_total_unrealized_pnl(self) -> float:
         """Sum of unrealized P&L across all positions."""
-        return sum(p.unrealized_pnl for p in self._positions.values())
+        return round(sum(p.unrealized_pnl for p in self._positions.values()), 4)
 
     def get_strategy_exposure(self, strategy: StrategyName) -> float:
         """Total exposure for a specific strategy."""
-        return sum(
+        return round(sum(
             p.cost_basis for p in self._positions.values()
             if p.strategy == strategy
-        )
+        ), 4)
 
     def has_position(self, market_id: str) -> bool:
         """Check if we already have a position in this market."""

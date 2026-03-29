@@ -84,8 +84,10 @@ class NewsResearcher:
         self,
         serper_api_key: Optional[str] = None,
         searxng_url: Optional[str] = None,
+        serper_url: str = SERPER_SEARCH_URL,
     ):
         self.serper_api_key = serper_api_key
+        self.serper_url = serper_url
         # searxng_url kept for backward compatibility
         self.searxng_url = searxng_url
         self._serper_disabled = False  # Set True after credit/auth failures
@@ -210,7 +212,7 @@ class NewsResearcher:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
-                    SERPER_SEARCH_URL,
+                    self.serper_url,
                     json={"q": query, "num": MAX_RESULTS_PER_QUERY},
                     headers={
                         "X-API-KEY": self.serper_api_key,
@@ -422,7 +424,16 @@ class NewsResearcher:
                     all_results.append(r)
 
         if not all_results:
-            logger.info(f"No news results for: {market_question[:60]}")
+            # Escalate to ERROR when ALL search backends fail — Claude will
+            # assess this market with zero news context, increasing false-signal risk.
+            if not DDG_AVAILABLE and (not self.serper_api_key or self._serper_disabled):
+                logger.error(
+                    f"ALL search backends unavailable — Claude assessment for "
+                    f"'{market_question[:60]}' will have NO news context. "
+                    f"DDG_AVAILABLE={DDG_AVAILABLE}, serper_disabled={self._serper_disabled}"
+                )
+            else:
+                logger.info(f"No news results for: {market_question[:60]}")
             return ""
 
         # Filter stale results, deduplicate, score by relevance, keep top results

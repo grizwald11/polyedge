@@ -102,6 +102,7 @@ class KalshiWebSocket:
         self._price_callbacks: dict[int, PriceCallback] = {}
         self._fill_callbacks: dict[int, FillCallback] = {}
         self._lifecycle_callbacks: dict[int, LifecycleCallback] = {}
+        self._reconnect_callbacks: list[Callable[[], Coroutine[Any, Any, None]]] = []
 
     # ── Subscription management ────────────────────
 
@@ -145,6 +146,14 @@ class KalshiWebSocket:
         cb_id = id(callback)
         self._lifecycle_callbacks[cb_id] = callback
         return cb_id
+
+    def on_reconnect(self, callback: Callable[[], Coroutine[Any, Any, None]]):
+        """Register a callback to run after WebSocket reconnects.
+
+        Use this to sync market status via REST API after a disconnect,
+        since markets may have closed/settled while disconnected.
+        """
+        self._reconnect_callbacks.append(callback)
 
     def remove_callback(self, cb_id: int) -> bool:
         """Remove a previously registered callback by its id.
@@ -195,6 +204,13 @@ class KalshiWebSocket:
                     # Resubscribe to all tickers
                     if self._subscriptions:
                         await self._send_subscribe(list(self._subscriptions))
+
+                    # Run reconnect callbacks (e.g., market status sync via REST)
+                    for cb in self._reconnect_callbacks:
+                        try:
+                            await cb()
+                        except Exception as cb_err:
+                            logger.warning(f"Reconnect callback failed: {cb_err}")
 
                     await self._message_loop(ws)
 

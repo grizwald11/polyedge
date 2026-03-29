@@ -63,12 +63,12 @@ class OrderRouter:
     def _add_pending(self, order_id: str, cost: float) -> None:
         """Track a new pending (resting) order's cost."""
         self._pending_orders[order_id] = cost
-        self._pending_order_cost = sum(self._pending_orders.values())
+        self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
 
     def _remove_pending(self, order_id: str) -> None:
         """Remove a pending order (filled, cancelled, or expired)."""
         self._pending_orders.pop(order_id, None)
-        self._pending_order_cost = sum(self._pending_orders.values())
+        self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
 
     def _log_gate_status(self):
         """Log live trading gate status at startup for visibility."""
@@ -115,7 +115,7 @@ class OrderRouter:
                     fee_dollars = kalshi_maker_fee(int(order.size), price_cents) / 100.0
                 else:
                     fee_dollars = kalshi_taker_fee(int(order.size), price_cents) / 100.0
-                order.cost = order.price * order.size + fee_dollars
+                order.cost = round(order.price * order.size + fee_dollars, 4)
 
         if order.paper or self.settings.trading.mode == "paper":
             return await self._paper_fill(order)
@@ -129,23 +129,19 @@ class OrderRouter:
 
         Returns (filled, fill_price). ~15% of limit orders miss entirely.
         Fills include 0-1 cent adverse slippage.
-        Uses order ID for per-order randomness (different results across cycles).
+        Uses order ID as seed for deterministic per-order randomness.
         """
-        import hashlib
-        # Per-order pseudo-random: include order ID so repeated assessments
-        # of the same signal produce different outcomes across cycles
-        seed = hashlib.md5(
-            f"{order.id}:{order.market_id}:{order.price}:{order.size}:{order.side.value}".encode()
-        ).hexdigest()
-        rand_val = int(seed[:8], 16) / 0xFFFFFFFF  # 0.0 to 1.0
+        import random as _random
+        # Deterministic per-order PRNG seeded from order attributes
+        seed_str = f"{order.id}:{order.market_id}:{order.price}:{order.size}:{order.side.value}"
+        rng = _random.Random(seed_str)
 
         # 15% chance limit order doesn't fill
-        if rand_val < 0.15:
+        if rng.random() < 0.15:
             return False, order.price
 
-        # Adverse slippage: 0-1 cent based on order characteristics
-        slippage_rand = int(seed[8:16], 16) / 0xFFFFFFFF
-        slippage = slippage_rand * 0.01  # 0 to 1 cent
+        # Adverse slippage: 0-1 cent
+        slippage = rng.random() * 0.01
         if order.side == Side.BUY:
             fill_price = min(0.99, order.price + slippage)
         else:
@@ -256,8 +252,17 @@ class OrderRouter:
         if gate3_result is not None:
             return gate3_result
 
-        # Determine Kalshi side and order type
-        kalshi_side = "yes" if "yes" in order.token_id.lower() else "no"
+        # Determine Kalshi side and order type.
+        # kalshi_side is set explicitly by order_builder from the Direction enum,
+        # avoiding fragile string matching on token_id.
+        kalshi_side = order.kalshi_side
+        if kalshi_side is None:
+            # Fallback for legacy orders missing kalshi_side — infer from token_id
+            kalshi_side = "yes" if "yes" in order.token_id.lower() else "no"
+            logger.warning(
+                f"Order {order.id} missing kalshi_side — inferred '{kalshi_side}' from token_id "
+                f"'{order.token_id}'. This fallback is fragile; ensure order_builder sets kalshi_side."
+            )
         kalshi_type = "limit" if order.order_type == OrderType.GTC else "market"
         # Kalshi API always expects yes_price regardless of which side we buy.
         # For BUY_NO: order.price is the NO price, so yes_price = 1 - order.price.
@@ -267,14 +272,33 @@ class OrderRouter:
             yes_price = dollars_to_cents(order.price)
 
         try:
-            result = await self.kalshi.create_order(
-                ticker=order.market_id,
-                side=kalshi_side,
-                yes_price=yes_price,
-                count=int(order.size),
-                order_type=kalshi_type,
-                action=order.side.value.lower(),
-            )
+            # Hard timeout on order creation to prevent hanging indefinitely.
+            # If this times out, the order may have been placed on Kalshi —
+            # we reconcile by checking open orders below.
+            try:
+                result = await asyncio.wait_for(
+                    self.kalshi.create_order(
+                        ticker=order.market_id,
+                        side=kalshi_side,
+                        yes_price=yes_price,
+                        count=int(order.size),
+                        order_type=kalshi_type,
+                        action=order.side.value.lower(),
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Order creation timed out for {order.market_id} — "
+                    f"order may exist on Kalshi. Checking open orders for reconciliation."
+                )
+                # Reconcile: check if the order was actually placed
+                result = await self._reconcile_after_timeout(order)
+                if result is None:
+                    order.status = OrderStatus.REJECTED
+                    order.rejection_reason = "Timeout creating order — no matching order found on Kalshi"
+                    self._log_order(order)
+                    return OrderResult(success=False, order=order, error="Timeout — order not found on Kalshi")
 
             if result is None:
                 order.status = OrderStatus.REJECTED
@@ -493,6 +517,29 @@ class OrderRouter:
             self._log_order(order)
             logger.error(f"Polymarket live order failed: {e}", exc_info=True)
             return OrderResult(success=False, order=order, error=str(e))
+
+    async def _reconcile_after_timeout(self, order: Order) -> Optional[dict]:
+        """After a create_order timeout, check Kalshi for matching recent orders.
+
+        Returns the matching order dict if found, None otherwise.
+        """
+        try:
+            open_orders = await asyncio.wait_for(
+                self.kalshi.get_open_orders(),
+                timeout=10.0,
+            )
+            for oo in open_orders:
+                if (
+                    oo.get("ticker") == order.market_id
+                    and oo.get("count") == int(order.size)
+                ):
+                    logger.warning(
+                        f"Reconciliation found matching order on Kalshi: {oo.get('order_id')}"
+                    )
+                    return oo
+        except Exception as e:
+            logger.error(f"Reconciliation check failed: {e}", exc_info=True)
+        return None
 
     async def _poll_order_status(
         self, kalshi_order_id: str, initial_data: dict

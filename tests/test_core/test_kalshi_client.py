@@ -112,8 +112,9 @@ class TestKalshiRequests:
         mock_http.get = AsyncMock(return_value=mock_response)
         client._client = mock_http
 
-        with pytest.raises(httpx.HTTPStatusError):
-            await client._request("GET", "/markets")
+        result = await client._request("GET", "/markets")
+        # Should return None after exhausting retries (not raise)
+        assert result is None
         # Should have been called max_retries times (3)
         assert mock_http.get.call_count == 3
 

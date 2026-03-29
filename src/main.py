@@ -82,52 +82,25 @@ def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log")
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
-async def scan_and_trade(
-    scanner: MarketScanner,
-    kalshi: KalshiClient,
-    ai_strategy: AIProbabilityStrategy,
-    no_strategy: ObviousNoStrategy,
-    news_strategy: NewsReactiveStrategy | None,
-    cross_arb_strategy: CrossArbStrategy | None,
-    whale_strategy: WhaleTrackerStrategy | None,
-    market_graph: MarketGraph | None,
-    risk_engine: RiskEngine,
-    kelly_sizer: KellySizer,
-    circuit_breaker: CircuitBreaker,
-    order_builder: OrderBuilder,
-    order_router: OrderRouter,
-    position_manager: PositionManager,
-    calibration: CalibrationTracker,
-    resolution_tracker: ResolutionTracker,
-    calibration_analyzer: CalibrationAnalyzer,
-    fill_tracker: FillTracker,
-    alert_manager: AlertManager,
-    metrics: Metrics | None,
-    settings,
-    cycle_count: int = 0,
-    poly_scanner=None,
-    cross_platform_arb: CrossPlatformArbStrategy | None = None,
-):
-    """Execute one scan-assess-trade cycle."""
-    logger = logging.getLogger("polyedge.main")
-    _cycle_start = time.time()
-    bankroll = settings.trading.bankroll
+async def _sync_bankroll(settings, kalshi, risk_engine, position_manager, bankroll, logger):
+    """Re-sync bankroll from Kalshi balance in live mode."""
+    if settings.trading.mode != "live":
+        return bankroll
+    try:
+        live_balance = await kalshi.get_balance()
+        if live_balance is not None and live_balance > 0:
+            if abs(live_balance - bankroll) > 1.0:
+                logger.info(f"Bankroll sync: config=${bankroll:.2f} → live=${live_balance:.2f}")
+            bankroll = live_balance
+            risk_engine.update_bankroll(live_balance)
+            position_manager.bankroll = live_balance
+    except Exception as e:
+        logger.warning(f"Failed to sync live balance: {e} — using config bankroll")
+    return bankroll
 
-    # Re-sync bankroll from Kalshi balance in live mode (every cycle)
-    if settings.trading.mode == "live":
-        try:
-            live_balance = await kalshi.get_balance()
-            if live_balance is not None and live_balance > 0:
-                if abs(live_balance - bankroll) > 1.0:  # Only log if >$1 drift
-                    logger.info(f"Bankroll sync: config=${bankroll:.2f} → live=${live_balance:.2f}")
-                bankroll = live_balance
-                # Propagate to all components that use bankroll
-                risk_engine.update_bankroll(live_balance)
-                position_manager.bankroll = live_balance
-        except Exception as e:
-            logger.warning(f"Failed to sync live balance: {e} — using config bankroll")
 
-    # Check for fills on pending live orders
+async def _check_fills_and_cleanup(fill_tracker, position_manager, order_router, settings, logger):
+    """Check for fills on pending orders and cancel stale ones."""
     try:
         new_fills = await fill_tracker.check_fills()
         for fill in new_fills:
@@ -136,7 +109,6 @@ async def scan_and_trade(
     except Exception as e:
         logger.error(f"Fill tracker check failed: {e}", exc_info=True)
 
-    # Cancel stale open orders (resting > 30 min with no fill)
     try:
         stale_cancelled = await order_router.cancel_stale_orders(
             max_age_seconds=settings.execution.stale_order_age_seconds
@@ -146,20 +118,9 @@ async def scan_and_trade(
     except Exception as e:
         logger.error(f"Stale order cancellation failed: {e}", exc_info=True)
 
-    # Check circuit breaker (include unrealized losses from open positions)
-    unrealized_pnl = position_manager.get_total_unrealized_pnl()
-    if not circuit_breaker.check(bankroll, unrealized_pnl=unrealized_pnl):
-        logger.warning("Circuit breaker active — skipping trade cycle")
-        if settings.alerts.alert_on_circuit_breaker:
-            try:
-                await alert_manager.send_circuit_breaker_alert(
-                    circuit_breaker.halt_reason or "Unknown"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to send circuit breaker alert: {e}")
-        return
 
-    # Scan and filter markets (both platforms in parallel when available)
+async def _scan_markets(scanner, poly_scanner, metrics, logger):
+    """Scan and filter markets from all platforms. Returns (markets, poly_markets)."""
     poly_markets: list[Market] = []
     try:
         if poly_scanner is not None:
@@ -184,13 +145,14 @@ async def scan_and_trade(
         logger.error(f"Market scan failed: {e}", exc_info=True)
         if metrics is not None:
             metrics.record_error("scanner", str(e))
-        return  # Skip this cycle, try again next time
+        return None, poly_markets
+    return markets, poly_markets
 
-    if not markets:
-        logger.info("No qualifying markets found")
-        return
 
-    # Update unrealized P&L with latest market prices
+async def _update_position_prices(
+    markets, position_manager, kalshi, poly_scanner, logger,
+):
+    """Update prices for all open positions, fetching missing ones from API."""
     scanned_tickers = set()
     pos_tickers = {p.market_id for p in position_manager.get_all_positions()}
     positions_updated_from_scan = 0
@@ -205,9 +167,7 @@ async def scan_and_trade(
             f"updated from scan ({len(scanned_tickers)} markets scanned)"
         )
 
-    # Fetch prices for open positions not covered by the scan.
-    # This prevents $0.00 unrealized P&L on positions whose markets
-    # don't rank in the top scanned markets by volume/opportunity.
+    # Fetch prices for positions not covered by the scan
     missing_positions = [
         p for p in position_manager.get_all_positions()
         if p.market_id not in scanned_tickers
@@ -219,7 +179,6 @@ async def scan_and_trade(
             pos_platform = getattr(pos, "platform", Platform.KALSHI)
             try:
                 if pos_platform == Platform.POLYMARKET and poly_scanner is not None:
-                    # Polymarket positions: use Gamma API for price lookup
                     from src.core.polymarket_discovery import parse_polymarket_market
                     raw = await poly_scanner.discovery.get_market_by_condition_id(ticker)
                     if raw:
@@ -234,12 +193,10 @@ async def scan_and_trade(
                         yes_ask = float(raw.get("yes_ask_dollars") or raw.get("yes_ask") or 0)
                         yes_price = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else max(yes_bid, yes_ask)
                         no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
-                        # Skip if we got no valid price — don't create a Market with price=0
                         if yes_price <= 0 and no_price <= 0:
                             logger.warning(f"No valid price data for {ticker} — skipping")
                             continue
                         position_manager.update_price(ticker, yes_price, no_price)
-                        # Build minimal Market so exit logic can process this position
                         minimal_market = Market(
                             ticker=ticker,
                             question=raw.get("title", ticker),
@@ -252,11 +209,13 @@ async def scan_and_trade(
             except Exception as e:
                 logger.warning(f"Failed to fetch price for position market {ticker}: {e}")
 
-    # Build market lookup (used by both exit logic and signal processing)
-    market_lookup = {m.ticker: m for m in markets}
 
-    # Process exit candidates — close positions that hit stop-loss, time limit, or lost edge
-    # Log position state for debugging
+async def _process_exits(
+    position_manager, market_lookup, scanner, settings, kalshi,
+    poly_scanner, order_builder, order_router, circuit_breaker,
+    fill_tracker, risk_engine, alert_manager, logger,
+):
+    """Process exit candidates — close positions that hit stop-loss, time limit, or lost edge."""
     all_pos = position_manager.get_all_positions()
     if all_pos:
         pos_with_market = sum(1 for p in all_pos if p.market_id in market_lookup)
@@ -272,13 +231,10 @@ async def scan_and_trade(
         if market is None:
             continue
 
-        # Skip if there's already a resting exit order for this position
         if position_manager.has_pending_exit(position.market_id):
             logger.debug(f"Skipping exit for {position.market_id}: resting exit order already in flight")
             continue
 
-        # Dedup: skip if we already sold this market recently (prevents duplicate
-        # exits from overlapping scan cycles or pm2 restart races)
         if scanner.db.has_recent_exit(position.market_id):
             logger.info(f"Skipping exit for {position.market_id}: recent exit exists (dedup)")
             continue
@@ -293,7 +249,7 @@ async def scan_and_trade(
                     if raw:
                         pm = parse_polymarket_market(raw)
                         if pm:
-                            market = pm  # Use fresh data
+                            market = pm
                 else:
                     raw = await kalshi.get_market(position.market_id)
                     if raw:
@@ -322,7 +278,7 @@ async def scan_and_trade(
             side=Side.SELL,
             price=exit_price,
             size=position.size,
-            cost=exit_price * position.size,
+            cost=round(exit_price * position.size, 4),
             order_type=OrderType.GTC if settings.trading.prefer_maker else OrderType.FOK,
             status=OrderStatus.PENDING,
             strategy=position.strategy,
@@ -330,25 +286,19 @@ async def scan_and_trade(
             created_at=datetime.now(timezone.utc),
         )
 
-        # Exit orders skip full risk checks (we WANT to close), but still
-        # verify circuit breaker isn't halted (prevents panic selling) and
-        # validate the order is sane.
         if circuit_breaker.is_halted() and "stop_loss" not in exit_reason.lower():
             logger.warning(f"Skipping exit for {position.market_id}: circuit breaker active (non-stop-loss)")
             continue
 
         result = await order_router.route_order(exit_order)
         if result is not None and result.success and result.trade is None:
-            # Resting live order — register with fill tracker for polling
             fill_tracker.track(exit_order)
             position_manager.mark_pending_exit(position.market_id)
         if result is not None and result.success and result.trade:
             position_manager.clear_pending_exit(position.market_id)
             position_manager.update_from_trade(result.trade)
-            # Record cooldown to prevent immediate re-entry
             risk_engine.record_exit(position.market_id)
             logger.info(f"[EXIT] {position.market_id} — {exit_reason}")
-            # Log exit reason to DB for post-hoc analysis
             try:
                 scanner.db.log_exit_reason(
                     market_id=position.market_id,
@@ -375,19 +325,18 @@ async def scan_and_trade(
                 except Exception as e:
                     logger.warning(f"Failed to send exit trade alert for {position.market_id}: {e}")
 
-    # Index markets in graph (if available)
-    if market_graph is not None:
-        try:
-            market_graph.index_markets(markets)
-        except Exception as e:
-            logger.warning(f"Market graph indexing failed: {e}")
 
-    # Generate signals from all strategies
+async def _generate_all_signals(
+    markets, poly_markets, ai_strategy, no_strategy, news_strategy,
+    cross_arb_strategy, whale_strategy, cross_platform_arb,
+    alert_manager, metrics, logger,
+):
+    """Generate signals from all strategies. Returns (all_signals, ai_signals, no_signals)."""
     all_signals: list = []
     ai_signals: list = []
     no_signals: list = []
-    _strategy_failures: list[str] = []  # M-10: track which strategies raised exceptions
-    _strategies_attempted = 2  # ai_probability + obvious_no are always attempted
+    _strategy_failures: list[str] = []
+    _strategies_attempted = 2
 
     try:
         ai_signals = await ai_strategy.scan_for_opportunities(markets)
@@ -440,7 +389,7 @@ async def scan_and_trade(
             logger.error(f"Cross-platform arb strategy failed: {e}", exc_info=True)
             _strategy_failures.append("cross_platform_arb")
 
-    # M-10: alert if ALL strategies raised exceptions (complete system failure)
+    # Alert if ALL strategies raised exceptions (complete system failure)
     if len(_strategy_failures) >= _strategies_attempted and _strategies_attempted > 0:
         fail_msg = (
             f"ALL {_strategies_attempted} strategies failed: {', '.join(_strategy_failures)}. "
@@ -454,35 +403,29 @@ async def scan_and_trade(
                 f"ALL STRATEGIES FAILED: {', '.join(_strategy_failures)}"
             )
         except Exception:
-            pass  # Best effort — alert system itself may be down
+            pass
 
-    if not all_signals:
-        logger.info("No signals generated this cycle")
-        if metrics is not None:
-            metrics.record_cycle(
-                duration_ms=(time.time() - _cycle_start) * 1000,
-                trades=0, signals=0,
-                positions=position_manager.get_position_count(),
-            )
-            metrics.persist_to_db(scanner.db)
-        return
+    return all_signals, ai_signals, no_signals
 
-    # Separate obvious_no from other signals so they get their own trade slot.
-    # Obvious_no has tiny edges (1-2%) and would always lose to AI/arb signals
-    # (5%+) in a single sorted list, never getting executed.
+
+async def _execute_signals(
+    all_signals, ai_signals, no_signals, markets, market_lookup,
+    scanner, settings, bankroll, kelly_sizer, circuit_breaker,
+    order_builder, order_router, risk_engine, position_manager,
+    calibration, fill_tracker, alert_manager, logger,
+):
+    """Execute trades for generated signals. Returns trades_executed count."""
+    # Separate obvious_no from other signals so they get their own trade slot
     edge_signals = [s for s in all_signals if s.strategy != StrategyName.OBVIOUS_NO]
     obvious_no_signals = [s for s in all_signals if s.strategy == StrategyName.OBVIOUS_NO]
 
-    # Sort each pool by edge descending
     edge_signals.sort(key=lambda s: abs(s.edge), reverse=True)
     obvious_no_signals.sort(key=lambda s: abs(s.edge), reverse=True)
 
-    # Reserve up to 2 slots for obvious_no — low-risk diversification
     max_trades = settings.trading.max_trades_per_cycle
     no_slots = min(2, len(obvious_no_signals)) if obvious_no_signals else 0
     max_edge_trades = max_trades - no_slots
 
-    # Interleave: edge signals first, then obvious_no
     ordered_signals = edge_signals + obvious_no_signals
 
     logger.info(
@@ -493,31 +436,23 @@ async def scan_and_trade(
 
     trades_executed = 0
     edge_trades = 0
-    acted_markets: set[str] = set()  # Dedup: one trade per market per cycle
+    acted_markets: set[str] = set()
     for signal in ordered_signals:
-        # Enforce max trades per cycle to prevent overtrading
         if trades_executed >= max_trades:
             logger.info(f"Max trades per cycle ({max_trades}) reached — deferring remaining signals")
             break
-        # Per-pool limit: edge strategies share max_edge_trades slots
         is_obvious_no = signal.strategy == StrategyName.OBVIOUS_NO
         if not is_obvious_no and edge_trades >= max_edge_trades:
-            continue  # Skip remaining edge signals, move to obvious_no pool
+            continue
 
-        # Dedup: skip if we already acted on this market this cycle
         if signal.market_id in acted_markets:
             logger.debug(f"Skipping duplicate signal for {signal.market_id}")
             continue
 
-        # DB-level dedup: prevent duplicate trades from concurrent pm2 instances.
-        # If another process already placed a trade on this market in the last 5
-        # minutes, skip it. This catches the race condition where pm2 restarts
-        # overlap and both instances try to trade the same signal.
         if scanner.db.has_recent_trade(signal.market_id):
             logger.info(f"Skipping {signal.market_id}: recent trade exists (dedup)")
             continue
 
-        # Log every signal immediately for analysis (acted_on=False by default)
         signal_id = scanner.db.log_signal(signal)
 
         market = market_lookup.get(signal.market_id)
@@ -528,7 +463,6 @@ async def scan_and_trade(
             )
             continue
 
-        # Kelly sizing with circuit breaker multiplier
         current_exposure = position_manager.get_total_exposure()
         contracts = kelly_sizer.calculate_position_size(
             edge=signal.edge,
@@ -538,7 +472,6 @@ async def scan_and_trade(
             order_price=signal.market_price,
         )
 
-        # Apply circuit breaker multiplier (reduces sizing after consecutive losses)
         cb_mult = circuit_breaker.get_kelly_multiplier()
         if cb_mult < 1.0:
             contracts = int(contracts * cb_mult)
@@ -550,7 +483,6 @@ async def scan_and_trade(
             )
             continue
 
-        # Build order first to get fee-inclusive cost
         price = signal.market_price
         if settings.trading.prefer_maker:
             order = order_builder.build_limit_order(market, signal, contracts, price)
@@ -558,25 +490,18 @@ async def scan_and_trade(
             order = order_builder.build_market_order(market, signal, contracts)
         proposed_cost = order.cost
 
-        # Risk check
         risk_result = risk_engine.check_all(signal, market, contracts, proposed_cost)
         if not risk_result.passed:
             continue
 
-        # Route order
         result = await order_router.route_order(order)
         if result is not None and result.success and result.trade is None:
-            # Resting live order — register with fill tracker for polling
             fill_tracker.track(order)
         if result is not None and result.success and result.trade:
-            # Update position tracker
             position_manager.update_from_trade(result.trade, market.question)
 
-            # Log calibration prediction
-            # Convert to YES probability for calibration (Brier expects YES=1, NO=0)
             if signal.direction in (Direction.BUY_NO, Direction.SELL_NO):
                 cal_probability = 1.0 - signal.probability_estimate
-                # market_price must also be YES price for calibration consistency
                 cal_market_price = 1.0 - signal.market_price
             else:
                 cal_probability = signal.probability_estimate
@@ -590,10 +515,8 @@ async def scan_and_trade(
                 strategy=signal.strategy,
             )
 
-            # Update signal as acted on
             scanner.db.update_signal_acted_on(signal_id, order.id)
 
-            # Send trade alert
             if settings.alerts.alert_on_trade:
                 try:
                     await alert_manager.send_trade_alert(
@@ -612,6 +535,123 @@ async def scan_and_trade(
             if not is_obvious_no:
                 edge_trades += 1
             acted_markets.add(signal.market_id)
+
+    return trades_executed
+
+
+async def scan_and_trade(
+    scanner: MarketScanner,
+    kalshi: KalshiClient,
+    ai_strategy: AIProbabilityStrategy,
+    no_strategy: ObviousNoStrategy,
+    news_strategy: NewsReactiveStrategy | None,
+    cross_arb_strategy: CrossArbStrategy | None,
+    whale_strategy: WhaleTrackerStrategy | None,
+    market_graph: MarketGraph | None,
+    risk_engine: RiskEngine,
+    kelly_sizer: KellySizer,
+    circuit_breaker: CircuitBreaker,
+    order_builder: OrderBuilder,
+    order_router: OrderRouter,
+    position_manager: PositionManager,
+    calibration: CalibrationTracker,
+    resolution_tracker: ResolutionTracker,
+    calibration_analyzer: CalibrationAnalyzer,
+    fill_tracker: FillTracker,
+    alert_manager: AlertManager,
+    metrics: Metrics | None,
+    settings,
+    cycle_count: int = 0,
+    poly_scanner=None,
+    cross_platform_arb: CrossPlatformArbStrategy | None = None,
+):
+    """Execute one scan-assess-trade cycle.
+
+    Decomposed into sub-functions for maintainability:
+    1. _sync_bankroll — live mode balance reconciliation
+    2. _check_fills_and_cleanup — fill tracking + stale order cancellation
+    3. _scan_markets — multi-platform market discovery
+    4. _update_position_prices — refresh P&L for open positions
+    5. _process_exits — close positions at stop-loss/time/edge-gone thresholds
+    6. _generate_all_signals — run all strategy engines
+    7. _execute_signals — size, risk-check, and route orders
+    """
+    logger = logging.getLogger("polyedge.main")
+    _cycle_start = time.time()
+    bankroll = settings.trading.bankroll
+
+    # 1. Sync bankroll
+    bankroll = await _sync_bankroll(settings, kalshi, risk_engine, position_manager, bankroll, logger)
+
+    # 2. Check fills and cleanup stale orders
+    await _check_fills_and_cleanup(fill_tracker, position_manager, order_router, settings, logger)
+
+    # 3. Circuit breaker check
+    unrealized_pnl = position_manager.get_total_unrealized_pnl()
+    if not circuit_breaker.check(bankroll, unrealized_pnl=unrealized_pnl):
+        logger.warning("Circuit breaker active — skipping trade cycle")
+        if settings.alerts.alert_on_circuit_breaker:
+            try:
+                await alert_manager.send_circuit_breaker_alert(
+                    circuit_breaker.halt_reason or "Unknown"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send circuit breaker alert: {e}")
+        return
+
+    # 4. Scan markets
+    markets, poly_markets = await _scan_markets(scanner, poly_scanner, metrics, logger)
+    if markets is None:
+        return  # Scan failed
+    if not markets:
+        logger.info("No qualifying markets found")
+        return
+
+    # 5. Update position prices
+    await _update_position_prices(markets, position_manager, kalshi, poly_scanner, logger)
+
+    # Build market lookup
+    market_lookup = {m.ticker: m for m in markets}
+
+    # 6. Process exits
+    await _process_exits(
+        position_manager, market_lookup, scanner, settings, kalshi,
+        poly_scanner, order_builder, order_router, circuit_breaker,
+        fill_tracker, risk_engine, alert_manager, logger,
+    )
+
+    # Index markets in graph
+    if market_graph is not None:
+        try:
+            market_graph.index_markets(markets)
+        except Exception as e:
+            logger.warning(f"Market graph indexing failed: {e}")
+
+    # 7. Generate signals
+    all_signals, ai_signals, no_signals = await _generate_all_signals(
+        markets, poly_markets, ai_strategy, no_strategy, news_strategy,
+        cross_arb_strategy, whale_strategy, cross_platform_arb,
+        alert_manager, metrics, logger,
+    )
+
+    if not all_signals:
+        logger.info("No signals generated this cycle")
+        if metrics is not None:
+            metrics.record_cycle(
+                duration_ms=(time.time() - _cycle_start) * 1000,
+                trades=0, signals=0,
+                positions=position_manager.get_position_count(),
+            )
+            metrics.persist_to_db(scanner.db)
+        return
+
+    # 8. Execute signals
+    trades_executed = await _execute_signals(
+        all_signals, ai_signals, no_signals, markets, market_lookup,
+        scanner, settings, bankroll, kelly_sizer, circuit_breaker,
+        order_builder, order_router, risk_engine, position_manager,
+        calibration, fill_tracker, alert_manager, logger,
+    )
 
     logger.info(
         f"Cycle complete: {trades_executed} trades executed, "
@@ -661,9 +701,7 @@ async def scan_and_trade(
                         direction = "underestimates" if adj > 0 else "overestimates"
                         logger.info(f"  Claude {direction} {cat} by {abs(adj):.1%}")
 
-                # Adapt Kelly sizing based on calibration quality
                 kelly_sizer.update_calibration_multiplier(report.overall_brier)
-                # Also apply circuit breaker sizing reduction if consecutive losses
                 kelly_sizer.set_circuit_breaker_multiplier(circuit_breaker.get_kelly_multiplier())
             else:
                 logger.info("Calibration: no resolved predictions yet")
@@ -701,9 +739,16 @@ async def run_trading_loop(
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if today != last_trading_day:
                 yesterday_pnl = scanner.db.get_daily_pnl(last_trading_day)
-                circuit_breaker.record_daily_result(yesterday_pnl)
+                # Include unrealized P&L (discounted) in the daily result
+                # so positions held overnight contribute to consecutive loss tracking
+                unrealized = position_manager.get_total_unrealized_pnl()
+                total_daily_pnl = yesterday_pnl + unrealized * 0.3
+                circuit_breaker.record_daily_result(total_daily_pnl)
                 circuit_breaker.reset_daily()
-                logger.info(f"New trading day: previous day P&L=${yesterday_pnl:.2f}")
+                logger.info(
+                    f"New trading day: previous day P&L=${yesterday_pnl:.2f} "
+                    f"(unrealized=${unrealized:.2f}, weighted total=${total_daily_pnl:.2f})"
+                )
                 last_trading_day = today
 
                 # Daily maintenance: clean up old snapshots and orphaned records
@@ -837,7 +882,7 @@ def _release_pid_lock(lock_path: str = "data/polyedge.pid"):
 async def main():
     """Main entry point."""
     if not _acquire_pid_lock():
-        print("ERROR: Another PolyEdge instance is already running (PID lock exists). Exiting.")
+        logging.critical("Another PolyEdge instance is already running (PID lock exists). Exiting.")
         sys.exit(1)
 
     settings = load_settings()

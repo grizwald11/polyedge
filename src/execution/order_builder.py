@@ -55,10 +55,10 @@ class OrderBuilder:
         Returns:
             Order ready for routing
         """
-        side, token_id = self._resolve_side_and_token(market, signal.direction)
+        side, token_id, k_side = self._resolve_side_and_token(market, signal.direction)
         price = self._clamp_price(price)
         fee_dollars = self._calculate_fee(market.platform, size, price, maker=True)
-        cost = price * size + fee_dollars
+        cost = round(price * size + fee_dollars, 4)
         fee_bps = 0 if market.platform == Platform.POLYMARKET else 175
 
         order = Order(
@@ -77,6 +77,7 @@ class OrderBuilder:
             signal_id=signal.id,
             paper=self.settings.trading.mode == "paper",
             created_at=datetime.now(timezone.utc),
+            kalshi_side=k_side,
         )
 
         logger.debug(
@@ -103,7 +104,7 @@ class OrderBuilder:
         Returns:
             Order ready for routing
         """
-        side, token_id = self._resolve_side_and_token(market, signal.direction)
+        side, token_id, k_side = self._resolve_side_and_token(market, signal.direction)
 
         # Use current market price for the appropriate side
         if signal.direction in (Direction.BUY_YES, Direction.SELL_YES):
@@ -120,7 +121,7 @@ class OrderBuilder:
 
         price = self._clamp_price(price)
         fee_dollars = self._calculate_fee(market.platform, size, price, maker=False)
-        cost = price * size + fee_dollars
+        cost = round(price * size + fee_dollars, 4)
         fee_bps = 0 if market.platform == Platform.POLYMARKET else 700
 
         order = Order(
@@ -139,6 +140,7 @@ class OrderBuilder:
             signal_id=signal.id,
             paper=self.settings.trading.mode == "paper",
             created_at=datetime.now(timezone.utc),
+            kalshi_side=k_side,
         )
 
         logger.debug(
@@ -149,30 +151,34 @@ class OrderBuilder:
 
     def _resolve_side_and_token(
         self, market: Market, direction: Direction
-    ) -> tuple[Side, str]:
-        """Map a Direction to Kalshi side + token_id."""
+    ) -> tuple[Side, str, str]:
+        """Map a Direction to (Side, token_id, kalshi_side).
+
+        Returns:
+            Tuple of (Side, token_id, kalshi_side) where kalshi_side is "yes" or "no".
+        """
         if direction == Direction.BUY_YES:
             token = market.yes_token
             if token:
-                return Side.BUY, token.token_id
+                return Side.BUY, token.token_id, "yes"
             else:
                 raise ValueError(f"Missing YES token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         elif direction == Direction.BUY_NO:
             token = market.no_token
             if token:
-                return Side.BUY, token.token_id
+                return Side.BUY, token.token_id, "no"
             else:
                 raise ValueError(f"Missing NO token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         elif direction == Direction.SELL_YES:
             token = market.yes_token
             if token:
-                return Side.SELL, token.token_id
+                return Side.SELL, token.token_id, "yes"
             else:
                 raise ValueError(f"Missing YES token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         else:  # SELL_NO
             token = market.no_token
             if token:
-                return Side.SELL, token.token_id
+                return Side.SELL, token.token_id, "no"
             else:
                 raise ValueError(f"Missing NO token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
 
