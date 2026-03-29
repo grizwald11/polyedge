@@ -27,11 +27,22 @@ CALIBRATION RULES:
 - Express genuine uncertainty. Avoid false precision.
 - Use the provided news context to inform your assessment. If the news contradicts your prior beliefs, update accordingly.
 - When structured data is provided (economic indicators, community forecasts, cross-platform prices), treat these as real-time factual inputs. They are current as of today.
+- Avoid overconfidence: probabilities above 95% or below 5% are rarely justified unless the outcome is nearly certain (e.g., settled law, already-occurred event). Most "obvious" outcomes still have 5-15% residual uncertainty.
+- Avoid underconfidence: if the evidence strongly favors one outcome, do not hedge to 50-60% out of false modesty.
+- Your confidence interval should reflect genuine uncertainty, not a formulaic spread around the point estimate.
+
+DECOMPOSITION METHOD:
+When the question involves compound events (A AND B, sequential steps, conditional outcomes), decompose it:
+1. Break the question into independent sub-questions with individual probabilities.
+2. For AND (all must happen): multiply the sub-probabilities.
+3. For OR (at least one): use 1 - product of (1 - each sub-probability).
+4. For conditional: P(A and B) = P(A) × P(B|A).
+5. State the decomposition in your reasoning.
 
 CRITICAL: Respond ONLY with a valid JSON object. No explanation, no markdown, no code fences, no text before or after the JSON. Your entire response must be parseable as JSON.
 
 Required JSON schema:
-{"probability": <float 0.01-0.99>, "confidence_low": <float>, "confidence_high": <float>, "key_factors_for": ["<string>", ...], "key_factors_against": ["<string>", ...], "uncertainties": ["<string>", ...], "reasoning": "<brief explanation>"}"""
+{"probability": <float 0.01-0.99>, "confidence_low": <float>, "confidence_high": <float>, "key_factors_for": ["<string>", ...], "key_factors_against": ["<string>", ...], "uncertainties": ["<string>", ...], "reasoning": "<brief explanation including decomposition if applicable>"}"""
 
 
 POLITICS_TEMPLATE = """Assess the probability of this POLITICAL market resolving YES.

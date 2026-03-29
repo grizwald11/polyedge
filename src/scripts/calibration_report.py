@@ -121,7 +121,12 @@ def main():
     db = Database(db_path=args.db, wal_mode=True)
     analyzer = CalibrationAnalyzer(db)
 
-    print(format_report(analyzer))
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    report = format_report(analyzer)
+    logging.getLogger(__name__).info(report)
+    # Also print to stdout for CLI usage
+    sys.stdout.write(report + "\n")
 
 
 if __name__ == "__main__":

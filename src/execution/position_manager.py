@@ -34,9 +34,28 @@ logger = logging.getLogger(__name__)
 class PositionManager:
     """Tracks all open positions and portfolio metrics."""
 
-    def __init__(self, db: Database, bankroll: float = 500.0):
+    def __init__(
+        self,
+        db: Database,
+        bankroll: float = 500.0,
+        stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
+        max_hold_days: float = DEFAULT_MAX_HOLD_DAYS,
+        edge_gone_threshold: float = DEFAULT_EDGE_GONE_THRESHOLD,
+        trailing_stop_activate: float = DEFAULT_TRAILING_STOP_ACTIVATE,
+        trailing_stop_distance: float = DEFAULT_TRAILING_STOP_DISTANCE,
+        take_profit_pct: float = DEFAULT_TAKE_PROFIT_PCT,
+        capital_rotation_edge: float = DEFAULT_CAPITAL_ROTATION_EDGE,
+    ):
         self.db = db
         self.bankroll = bankroll
+        # Exit thresholds — configurable via settings.execution.*
+        self._stop_loss_pct = stop_loss_pct
+        self._max_hold_days = max_hold_days
+        self._edge_gone_threshold = edge_gone_threshold
+        self._trailing_stop_activate = trailing_stop_activate
+        self._trailing_stop_distance = trailing_stop_distance
+        self._take_profit_pct = take_profit_pct
+        self._capital_rotation_edge = capital_rotation_edge
         self._positions: dict[str, Position] = {}  # market_id -> Position
         self._pending_exits: set[str] = set()  # market_ids with resting exit orders
         self._load_positions_from_db()
@@ -248,9 +267,9 @@ class PositionManager:
         self,
         position: Position,
         market: Market | None = None,
-        stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
-        max_hold_days: float = DEFAULT_MAX_HOLD_DAYS,
-        edge_gone_threshold: float = DEFAULT_EDGE_GONE_THRESHOLD,
+        stop_loss_pct: float | None = None,
+        max_hold_days: float | None = None,
+        edge_gone_threshold: float | None = None,
     ) -> tuple[bool, str]:
         """Determine if a position should be exited.
 
@@ -264,13 +283,18 @@ class PositionManager:
         Args:
             position: The position to evaluate
             market: Current market data (needed for edge-gone check)
-            stop_loss_pct: Max loss as fraction of cost basis before exit
-            max_hold_days: Max days to hold before time-based exit
-            edge_gone_threshold: Min remaining edge to justify holding
+            stop_loss_pct: Override instance threshold (defaults to self._stop_loss_pct)
+            max_hold_days: Override instance threshold (defaults to self._max_hold_days)
+            edge_gone_threshold: Override instance threshold (defaults to self._edge_gone_threshold)
 
         Returns:
             (should_exit, reason) tuple
         """
+        # Use instance thresholds unless caller overrides
+        stop_loss_pct = stop_loss_pct if stop_loss_pct is not None else self._stop_loss_pct
+        max_hold_days = max_hold_days if max_hold_days is not None else self._max_hold_days
+        edge_gone_threshold = edge_gone_threshold if edge_gone_threshold is not None else self._edge_gone_threshold
+
         cost_basis = position.cost_basis
         if cost_basis <= 0:
             return False, ""
@@ -284,9 +308,8 @@ class PositionManager:
         # 2. Trailing stop: if we've had a significant gain and it's pulling back
         if position.peak_pnl > 0 and cost_basis > 0:
             peak_gain_pct = position.peak_pnl / cost_basis
-            if peak_gain_pct >= DEFAULT_TRAILING_STOP_ACTIVATE:
-                # Trail at 50% of peak — e.g., peak +40% → exit if drops below +20%
-                trail_floor = position.peak_pnl * DEFAULT_TRAILING_STOP_DISTANCE
+            if peak_gain_pct >= self._trailing_stop_activate:
+                trail_floor = position.peak_pnl * self._trailing_stop_distance
                 if position.unrealized_pnl < trail_floor:
                     return True, (
                         f"trailing_stop: current P&L ${position.unrealized_pnl:.2f} "
@@ -301,7 +324,7 @@ class PositionManager:
             max_gain = (1.0 - position.avg_entry_price) * position.size
         else:
             max_gain = position.avg_entry_price * position.size
-        if max_gain > 0 and position.unrealized_pnl >= max_gain * DEFAULT_TAKE_PROFIT_PCT:
+        if max_gain > 0 and position.unrealized_pnl >= max_gain * self._take_profit_pct:
             return True, (
                 f"take_profit: captured {position.unrealized_pnl / max_gain:.0%} of max gain "
                 f"(${position.unrealized_pnl:.2f} / ${max_gain:.2f})"
@@ -338,9 +361,9 @@ class PositionManager:
             else:
                 exposure_pct = self.get_total_exposure_pct()
                 remaining = self._calculate_remaining_edge(position, market)
-                if exposure_pct > 0.35 and remaining < DEFAULT_CAPITAL_ROTATION_EDGE:
+                if exposure_pct > 0.35 and remaining < self._capital_rotation_edge:
                     return True, (
-                        f"capital_rotation: edge {remaining:.1%} < {DEFAULT_CAPITAL_ROTATION_EDGE:.0%} "
+                        f"capital_rotation: edge {remaining:.1%} < {self._capital_rotation_edge:.0%} "
                         f"threshold with portfolio at {exposure_pct:.0%} exposure"
                     )
 

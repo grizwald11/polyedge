@@ -1,9 +1,10 @@
-# PolyEdge Complete Codebase Audit Report
+# PolyEdge — Complete Codebase Audit Report
 
 **Date:** March 28, 2026
-**Auditor:** Claude Opus 4.6 (automated, comprehensive)
-**Codebase Version:** Commit `bb7a9ac` (Audit revision 8)
-**Scope:** All 12 sections per POLYEDGE-AUDIT-PROMPT.md
+**Auditor:** Claude Opus 4.6 (automated)
+**Codebase:** `/Users/adamgrodin/polyedge`
+**Commit:** `dc93686` (main)
+**Scope:** All 12 audit sections per POLYEDGE-AUDIT-PROMPT.md
 
 ---
 
@@ -11,798 +12,705 @@
 
 | Metric | Value |
 |--------|-------|
-| Source files (non-init) | 52 Python files |
-| Source lines of code | 14,890 |
-| Test files (non-init) | 55 Python files |
-| Test lines of code | 12,256 |
-| Test functions | 823 |
-| Tests passing | **820 passed, 3 skipped** |
-| Script files | 4 (1,357 lines) |
-| External API integrations | 7 (Kalshi REST, Kalshi WS, Claude, Serper, FRED, Metaculus, Manifold) |
-| Environment variables | 9 defined, 9 documented in .env.example |
-| Dependencies (pinned) | 17 (all exact `==` versions) |
-| TODO/FIXME/HACK/XXX | **0** |
-| Bare `except:` clauses | **0** |
-| `print()` in source | **1** (CLI script output, acceptable) |
+| **Source files** | 63 Python files in `src/` |
+| **Test files** | 65 Python files in `tests/` |
+| **Total source LOC** | 15,072 |
+| **Total test LOC** | 12,352 |
+| **Total LOC** | 27,424 |
+| **Tests collected** | 837 |
+| **Tests passing** | 834 (3 skipped, 0 failed) |
+| **External API integrations** | 10 (Kalshi, Polymarket, Anthropic, Serper, FRED, FedWatch, Cleveland Fed, Metaculus, Manifold, DuckDuckGo) |
+| **Env vars (total)** | 9 (3 required, 6 optional) |
+| **Env vars (documented)** | 9/9 — all documented in `.env.example` |
+| **Dependencies (pinned)** | 17 exact-version pins |
+| **Dependencies (optional)** | 5 (commented, unpinned) |
 
 ---
 
-## 1. Structural Integrity
+## Issues by Severity
 
-### 1.1 Directory Tree
+### 🔴 CRITICAL — Fix Before Next Trade
 
-```
-polyedge/
-├── src/                              14,890 lines across 52 modules
-│   ├── main.py                       1,087 lines — Orchestrator
-│   ├── config.py                       245 lines — Pydantic settings
-│   ├── metrics.py                      121 lines — Performance tracking
-│   ├── core/                         2,144 lines
-│   │   ├── models.py                   499 — Pydantic data models & enums
-│   │   ├── kalshi_client.py            416 — Kalshi REST API wrapper
-│   │   ├── websocket_client.py         440 — Real-time price/fill feed
-│   │   ├── market_discovery.py         311 — Kalshi market discovery
-│   │   ├── polymarket_discovery.py     286 — Polymarket market discovery
-│   │   └── polymarket_client.py        192 — Polymarket API wrapper
-│   ├── analysis/                     2,161 lines
-│   │   ├── claude_forecaster.py        502 — Claude API + response parsing
-│   │   ├── news_researcher.py          353 — News search (DDG/Serper)
-│   │   ├── calibration.py              292 — Brier scores & tracking
-│   │   ├── prompt_templates.py         282 — Category-specific prompts
-│   │   ├── ensemble.py                 263 — Multi-model aggregation
-│   │   ├── calibration_analyzer.py     252 — Category-level analysis
-│   │   ├── resolution_tracker.py       190 — Market resolution tracking
-│   │   └── market_classifier.py         27 — Category classification
-│   ├── data/                         2,322 lines
-│   │   ├── metaculus_client.py         271 — Metaculus forecasts
-│   │   ├── market_scanner.py           234 — Kalshi market scanning
-│   │   ├── market_graph.py             207 — ChromaDB vector store
-│   │   ├── polymarket_scanner.py       204 — Polymarket scanning
-│   │   ├── whale_monitor.py            199 — Whale wallet tracking
-│   │   ├── data_enricher.py            184 — Multi-source aggregation
-│   │   ├── polymarket_cross_ref.py     178 — Cross-platform matching
-│   │   ├── news_ingestion.py           171 — RSS/feed ingestion
-│   │   ├── manifold_client.py          154 — Manifold Markets API
-│   │   ├── fred_client.py              142 — Federal Reserve data
-│   │   ├── cleveland_fed.py            142 — Cleveland Fed nowcast
-│   │   ├── fedwatch.py                 125 — CME FedWatch tool
-│   │   ├── leaderboard.py              65 — Trader leaderboard
-│   │   └── cache.py                     46 — In-memory TTL cache
-│   ├── execution/                    1,831 lines
-│   │   ├── order_router.py             648 — Paper/live routing + 3-gate safety
-│   │   ├── position_manager.py         598 — Position tracking + P&L + exits
-│   │   ├── fill_tracker.py             396 — Partial fill tracking (crash-safe)
-│   │   └── order_builder.py            189 — Order construction + fee calc
-│   ├── strategies/                   1,512 lines
-│   │   ├── cross_arb.py               461 — Cross-market arbitrage (3 types)
-│   │   ├── ai_probability.py          374 — Claude probability assessment
-│   │   ├── cross_platform_arb.py      233 — Kalshi vs Polymarket arb
-│   │   ├── whale_tracker.py           166 — Whale consensus signals
-│   │   ├── news_reactive.py           151 — Breaking news trading
-│   │   └── obvious_no.py              127 — Near-certain NO strategy
-│   ├── risk/                           795 lines
-│   │   ├── risk_engine.py              236 — 10-point pre-trade gate
-│   │   ├── kelly_sizer.py             230 — Half-Kelly + calibration
-│   │   ├── circuit_breaker.py          201 — Daily loss + consecutive halt
-│   │   └── portfolio_risk.py           128 — Correlation tracking
-│   ├── storage/
-│   │   └── database.py              1,463 — SQLite WAL + migrations
-│   ├── alerts/                         256 lines
-│   │   ├── alert_manager.py             95 — Central dispatcher
-│   │   ├── daily_report.py             121 — EOD P&L summary
-│   │   └── imessage_alert.py            40 — iMessage bridge
-│   ├── dashboard/
-│   │   └── server.py                   460 — FastAPI web dashboard
-│   └── scripts/                        493 lines
-│       ├── backtest.py                 365 — Historical backtesting
-│       └── calibration_report.py       128 — Calibration CLI report
-├── tests/                           12,256 lines across 55 test files
-├── scripts/                          1,357 lines (4 files)
-├── config/
-│   ├── settings.yaml                   101 — Runtime configuration
-│   ├── .env                            — Secrets (properly gitignored)
-│   └── .env.example                    — Template with placeholders
-├── ecosystem.config.js                 — PM2 process manager config
-├── requirements.txt                    — 17 pinned dependencies
-├── pyproject.toml
-├── Makefile
-└── .gitignore
-```
+**C-1. Polymarket integration has no US residency safeguard**
+- **Files:** `src/main.py:869-900`, `src/core/polymarket_client.py:131-172`, `src/execution/order_router.py:364-467`
+- **What's wrong:** The codebase can place real orders on Polymarket without verifying the user is not a US resident. Polymarket is not legal for US persons. Three safety gates exist (config mode, env var, interactive prompt) but none check jurisdiction.
+- **Impact:** Regulatory exposure. CFTC enforcement risk if live Polymarket trades are placed from a US IP/wallet.
+- **Fix:** Add a required `CONFIRM_NON_US_POLYMARKET=true` env var gate before any Polymarket order executes. Add legal disclaimer in README. Consider disabling Polymarket by default in settings.yaml (currently `enabled: false`, which is good — ensure it stays that way).
 
-### 1.2 Source File Counts by Directory
+**C-2. Floating-point arithmetic for all monetary values**
+- **Files:** `src/storage/database.py:23-27` (schema), `src/execution/position_manager.py` (P&L), `src/execution/order_router.py` (fees)
+- **What's wrong:** All prices, fees, and P&L values stored as `REAL` (float) in SQLite and computed with Python `float`. The schema has an explicit comment acknowledging this: "Ideally these would be INTEGER cents... migrating the schema is deferred to avoid risk."
+- **Impact:** Rounding errors accumulate over hundreds of trades. At $5K bankroll with ~100 trades/month, cumulative error is likely sub-dollar but could cause incorrect risk checks or P&L reporting.
+- **Fix:** Short-term: acceptable as-is since `round(pnl, 4)` is used and all comparisons should use epsilon tolerance. Medium-term: migrate to integer cents for database storage.
 
-| Directory | Files | Lines | Purpose |
-|-----------|-------|-------|---------|
-| src/core | 6 | 2,144 | API clients & market discovery |
-| src/data | 14 | 2,322 | Data ingestion & external APIs |
-| src/analysis | 8 | 2,161 | Claude AI, calibration, prompts |
-| src/execution | 4 | 1,831 | Order routing, position mgmt |
-| src/strategies | 6 | 1,512 | Trading strategies |
-| src/risk | 4 | 795 | Risk management |
-| src/storage | 1 | 1,463 | SQLite database |
-| src/alerts | 3 | 256 | Notifications |
-| src/dashboard | 1 | 460 | Web dashboard |
-| src/scripts | 2 | 493 | Utilities |
-| src/ (root) | 3 | 1,453 | Main, config, metrics |
-| **Total** | **52** | **14,890** | |
+**C-3. Race condition in trade deduplication during pm2 restarts**
+- **Files:** `src/main.py:479-486`
+- **What's wrong:** Database-level dedup checks for recent trades, but if pm2 restarts and two instances overlap (old dying, new starting), both could pass the check-then-write sequence.
+- **Impact:** Duplicate live orders worth real money.
+- **Fix:** Use SQLite `INSERT OR IGNORE` with a unique constraint on `(market_id, strategy, direction, timestamp_bucket)` or a file-based PID lock to prevent concurrent execution.
 
-### 1.3 Test Coverage by Module
+**C-4. Order cancellation uses internal ID, not Kalshi's order_id**
+- **Files:** `src/execution/order_router.py:572`
+- **What's wrong:** `cancel_order()` passes the internal `PE-xxx` order ID to `self.kalshi.cancel_order()`, but Kalshi expects their own order UUID from the create_order response.
+- **Impact:** Order cancellation silently fails. Stale limit orders remain resting on exchange.
+- **Fix:** Store Kalshi's `order_id` from the create_order response in the orders table. Use that for cancel operations.
 
-| Test Directory | Files | Lines | Tests | Coverage Target |
-|----------------|-------|-------|-------|----------------|
-| test_core | ~10 | 1,833 | ~118 | API clients, models, DB |
-| test_analysis | ~9 | 1,780 | ~115 | Claude, calibration, ensemble |
-| test_data | ~13 | 1,620 | ~171 | Data ingestion sources |
-| test_execution | ~6 | 1,581 | ~198 | Orders, positions, fills |
-| test_strategies | ~7 | 1,469 | ~136 | All 6 strategies |
-| test_risk | ~5 | 1,067 | ~148 | Risk checks, sizing, breaker |
-| test_scripts | ~4 | 961 | ~50 | Backtesting, reports |
-| test_integration | ~2 | 636 | ~50 | E2E paper trading |
-| test_dashboard | ~2 | 274 | ~18 | Web routes |
-| test_alerts | ~4 | 247 | ~18 | Alert dispatch |
-| Root test files | ~3 | 788 | ~124 | Main, metrics, conftest |
-| **Total** | **55** | **12,256** | **823** | |
+**C-5. No superforecaster-style decomposition in prompts**
+- **Files:** `src/analysis/prompt_templates.py:37-159`
+- **What's wrong:** Prompts ask Claude to consider factors but never require structured decomposition of compound questions (e.g., P(X and Y) = P(X) × P(Y|X)). Research shows decomposition significantly improves calibration.
+- **Impact:** Systematically inaccurate forecasts on compound-probability markets, leading to false-positive edge signals.
+- **Fix:** Add explicit decomposition instruction to each template: "Break this question into independent sub-questions with individual probabilities. Combine using multiplication for AND, addition for OR."
 
-### 1.4 Orphaned Files & Dead Code
-
-- **No orphaned files detected.** All modules are imported by at least one other module or test.
-- **No dead exports detected.** All public functions/classes have callers.
-
-### 1.5 Dependency Audit
-
-All 17 production dependencies pinned to exact versions with `==`:
-
-| Package | Version | Purpose | Status |
-|---------|---------|---------|--------|
-| kalshi-python | 2.1.4 | Kalshi SDK | Current |
-| py-clob-client | 0.34.6 | Polymarket SDK | Current |
-| cryptography | 46.0.5 | RSA signing | Current |
-| anthropic | 0.86.0 | Claude API | Current |
-| httpx | 0.28.1 | HTTP client | Current |
-| aiohttp | 3.13.3 | Async HTTP | Current |
-| pyyaml | 6.0.3 | Config parsing | Current |
-| pydantic | 2.12.5 | Data validation | Current |
-| python-dotenv | 1.2.2 | Env var loading | Current |
-| pytest | 9.0.2 | Testing | Current |
-| pytest-asyncio | 1.3.0 | Async tests | Current |
-| websockets | 16.0 | WebSocket client | Current |
-| fastapi | 0.135.1 | Dashboard | Current |
-| uvicorn | 0.42.0 | ASGI server | Current |
-| jinja2 | 3.1.6 | Templates | Current |
-| feedparser | 6.0.12 | RSS parsing | Current |
-| ddgs | 9.11.4 | DuckDuckGo search | Current |
-
-**No unused dependencies.** All are imported in source code.
-**No known CVEs** in pinned versions as of audit date.
-
-### 1.6 PM2 Configuration
-
-**File:** `ecosystem.config.js`
-- Reads `config/.env` and passes all vars to Python process
-- `autorestart: true`, `max_restarts: 5`, `min_uptime: "10s"`
-- `kill_timeout: 5000` (5 seconds)
-- `watch: false` (correct for trading)
-
-**Issue:** `kill_timeout` of 5s may be too short for in-flight trade cycles. Recommend increasing to 30s.
+**C-6. Full article text never fetched from news sources**
+- **Files:** `src/analysis/news_researcher.py:135-245`
+- **What's wrong:** Only headlines + 2-3 sentence snippets are fetched from DuckDuckGo and Serper. Claude makes probability estimates based on headlines, not full article content.
+- **Impact:** For Fed/macro and policy markets, missing detail in article bodies degrades forecast accuracy. A headline like "Fed Signals Rate Cut" without the CPI data context could lead to incorrect probability.
+- **Fix:** Add optional full-article fetching for top 2-3 results using `httpx` + text extraction (trafilatura or readability). Truncate to ~2000 tokens per article. The FRED/FedWatch/Cleveland Fed data sources partially compensate but don't replace article detail.
 
 ---
 
-## 2. Configuration & Environment
+### 🟠 HIGH — Fix This Week
 
-### 2.1 Complete Environment Variable List
+**H-1. Multi-model ensemble default over-weights models vs market**
+- **File:** `src/analysis/ensemble.py:106-109`
+- **What's wrong:** `multi_model_ensemble()` defaults to `market_weight=0.15`, giving the market only 15% weight. The market represents actual capital allocation by all participants and should carry more weight than community forecasts from Metaculus/Manifold.
+- **Impact:** Over-trusting model consensus on tail events → false-positive signals → bad trades.
+- **Fix:** Change default to `market_weight=0.40` or make it a config parameter. The single-model ensemble at `claude_weight=0.85` is separately calibrated and acceptable.
 
-| Variable | Required | Set | Documented | Purpose |
-|----------|----------|-----|------------|---------|
-| `KALSHI_API_KEY_ID` | Yes | Yes | Yes | Kalshi API auth |
-| `KALSHI_PRIVATE_KEY_PATH` | Yes | Yes | Yes | RSA private key path |
-| `ANTHROPIC_API_KEY` | Yes | Yes | Yes | Claude API |
-| `POLYEDGE_LIVE_ENABLED` | Yes | Yes (false) | Yes | Safety gate |
-| `POLYMARKET_PRIVATE_KEY` | No | Yes | Yes | Polymarket wallet |
-| `SERPER_API_KEY` | No | Yes | Yes | News search |
-| `METACULUS_API_TOKEN` | No | Yes | Yes | Community forecasts |
-| `FRED_API_KEY` | No | No | Yes | Fed economic data |
-| `SEARXNG_URL` | No | No | Yes | Alternative search |
+**H-2. No calibration feedback in system prompt**
+- **File:** `src/analysis/prompt_templates.py:20-34`
+- **What's wrong:** The system prompt tells Claude to calibrate but provides no examples, no feedback on past performance, and no explicit anti-overconfidence instruction. Claude doesn't know its own track record.
+- **Impact:** Wider-than-necessary confidence intervals reduce signal count. Potential systematic over/under-confidence.
+- **Fix:** Add to SYSTEM_PROMPT: calibration rules ("95%+ probabilities are rarely justified"), and optionally inject rolling Brier score data ("Your recent 70% predictions resolved YES 68% of the time").
 
-**All env vars documented in `.env.example`.** No undocumented variables found.
+**H-3. Missing response field validation in live order flow**
+- **File:** `src/execution/order_router.py:277-289`
+- **What's wrong:** After order creation, the code validates `order_id` exists but doesn't validate other critical fields (`avg_price`, `filled_count`, `status`) before using them.
+- **Impact:** Malformed API response could cause silent NaN calculations or incorrect position tracking.
+- **Fix:** Add field validation: `if not all(k in result for k in ("order_id", "status")): reject`.
 
-### 2.2 Secret Management
+**H-4. No log rotation configured**
+- **File:** `src/main.py:57-75`
+- **What's wrong:** Logs written to `data/logs/polyedge.log` via `FileHandler` with no rotation. Running 24/7, this file grows unbounded.
+- **Impact:** Disk space exhaustion on Mac Mini after weeks/months of operation.
+- **Fix:** Replace `FileHandler` with `RotatingFileHandler(maxBytes=10*1024*1024, backupCount=5)` for 10MB rotation with 5 backups.
 
-- **No hardcoded secrets** in any source file (verified by grep for `sk-ant`, `api_key`, `secret`, `password`, `private_key` patterns)
-- **No secrets in git history** (only `.env.example` with placeholders committed)
-- **`.gitignore` coverage:** `.env`, `config/.env`, `*.pem`, `*.key`, `config/kalshi_private_key*`, `credentials*.json`
-- **Kalshi private key:** Properly at 0o600 permissions; auto-enforced by `kalshi_client.py`
+**H-5. scan_and_trade() is 568 lines — monolithic function**
+- **File:** `src/main.py:82-649`
+- **What's wrong:** Core orchestration function is 568 lines with 6+ levels of nesting. Market price fetching logic is repeated 3 times. Exit processing is deeply nested.
+- **Impact:** Hard to debug, test, or modify without introducing regressions.
+- **Fix:** Extract sub-functions: `_fetch_market_prices()`, `_process_exits()`, `_sort_and_execute_signals()`, `_run_strategies()`.
 
-### 2.3 Issues Found
+**H-6. WebSocket auth failure detection via string matching**
+- **File:** `src/core/websocket_client.py:212-218`
+- **What's wrong:** Authentication failure detection relies on substring matching ("401", "403", "authentication", "unauthorized") which could miss auth errors with different messages.
+- **Impact:** Permanent auth failures retried indefinitely instead of failing fast.
+- **Fix:** Check HTTP status codes directly when available, fall back to string matching.
 
-| ID | Severity | Issue | File | Fix |
-|----|----------|-------|------|-----|
-| ENV-1 | **CRITICAL** | `config/.env` has 644 permissions (world-readable) | config/.env | `chmod 600 config/.env` |
-| ENV-2 | **MEDIUM** | PM2 `kill_timeout: 5000` too short for trade cycles | ecosystem.config.js | Increase to 30000 |
-| ENV-3 | **LOW** | API key validation happens on first use, not startup | src/config.py | Call `validate_required_keys()` in main |
-
----
-
-## 3. Kalshi Integration
-
-### 3.1 Endpoints Used
-
-**Public (no auth):**
-- `GET /markets` — Market discovery with pagination
-- `GET /markets/{ticker}` — Single market details
-- `GET /markets/{ticker}/orderbook` — Order book depth
-- `GET /markets/{ticker}/trades` — Trade history
-- `GET /exchange/status` — Health check
-
-**Authenticated (RSA-PSS):**
-- `GET /portfolio/balance` — Account balance (cents, converted to dollars)
-- `GET /portfolio/positions` — Open positions
-- `GET /portfolio/orders` — Order status
-- `POST /portfolio/orders` — Create order
-- `DELETE /portfolio/orders/{id}` — Cancel order
-
-**WebSocket:**
-- Channels: `ticker`, `fill`, `market_lifecycle_v2`
-- Auto-reconnect with exponential backoff (1s to 60s)
-
-### 3.2 Authentication
-
-- **RSA-PSS with SHA256** signature, MAX_LENGTH salt padding
-- Timestamp in milliseconds (13 digits, correct)
-- Full path used for signing (includes `/trade-api/v2` base)
-- Private key loaded once and cached
-- File permissions auto-enforced to 0o600
-
-**Assessment: CORRECT and well-implemented.**
-
-### 3.3 Rate Limiting
-
-- Exponential backoff with jitter on 429: `2^attempt + random(0, 1)s`
-- Max 3 retry attempts
-- Distinguishes transient (5xx, network) from permanent (4xx) errors
-- No application-level request throttling (relies on hitting and retrying 429s)
-
-### 3.4 Order Placement
-
-- **Price formatting:** Cents for API, dollars internally. Conversions use `dollars_to_cents()` with `int(round(dollars * 100))`.
-- **Side handling:** Correctly maps BUY_YES/BUY_NO/SELL_YES/SELL_NO to Kalshi's side + action fields.
-- **Order types:** GTC (limit/maker) preferred; FOK (market/taker) available.
-- **Fee calculation:** `ceil(0.0175 * contracts * p * (1-p))` for maker; `ceil(0.07 * ...)` for taker. Uses `math.ceil()`.
-- **Order response validation:** Checks for non-empty `order_id` before proceeding.
-
-### 3.5 Position Tracking
-
-- Syncs with Kalshi API via `sync_with_kalshi()`
-- Reconciliation: creates missing positions, removes stale ones
-- Average entry price via weighted average on multiple buys
-- Unrealized P&L: `(current - entry) * size` for buys, inverted for sells
-
-### 3.6 Monetary Calculations
-
-- Fee calculations use integer cents with `math.ceil()`
-- Balance from API converted: `float(data["balance"]) / 100.0`
-- **Database stores prices as REAL (float), not INTEGER cents** — documented tech debt with epsilon tolerance
-
-### 3.7 Issues Found
-
-| ID | Severity | Issue | File:Line | Fix |
-|----|----------|-------|-----------|-----|
-| KAL-1 | **HIGH** | Pending unfilled orders not counted in balance check | risk_engine.py:82-85 | Track pending order cost in OrderRouter, pass to risk engine |
-| KAL-2 | **HIGH** | Database uses FLOAT for monetary values | storage/database.py:24-27 | Migrate to INTEGER cents |
-| KAL-3 | **MEDIUM** | Order poll loop has no per-order timeout | order_router.py:250+ | Add `asyncio.wait_for()` wrapper |
-| KAL-4 | **MEDIUM** | `get_order()` returns raw dict instead of None on missing field | kalshi_client.py | Return None explicitly |
-| KAL-5 | **LOW** | No application-level request throttling | kalshi_client.py | Add max req/s limiter |
+**H-7. Cross-check feature disabled by default and overly strict**
+- **File:** `src/analysis/claude_forecaster.py:361-474`, `src/config.py:106`
+- **What's wrong:** `cross_check_enabled` defaults to `False`. When enabled, markets with >22% disagreement between two temperature runs are SKIPPED entirely (returning None), which is overly conservative and burns 2x Claude API budget.
+- **Impact:** Underutilized validation mechanism. When on, it over-filters.
+- **Fix:** Default to enabled. On disagreement, downgrade confidence instead of skipping.
 
 ---
 
-## 4. AI Forecasting Pipeline
+### 🟡 MEDIUM — Fix When Possible
 
-### 4.1 Claude Integration
+**M-1. Database uses REAL for prices instead of INTEGER cents**
+- **File:** `src/storage/database.py:23-27`
+- **What's wrong:** Documented technical debt. All monetary values stored as float.
+- **Impact:** Sub-cent rounding errors over long periods. Epsilon comparisons required everywhere.
+- **Fix:** Plan schema migration to INTEGER cents. Add migration script.
 
-- **Model selection:** Sonnet 4.6 for routine (<$50); Opus 4.6 for high-stakes (>$50)
-- **Temperature:** Base 0.3, category-specific overrides (Politics 0.35, Geopolitics 0.45)
-- **Hard timeout:** 60 seconds via `asyncio.wait_for()`
-- **Health check:** `health_check()` validates API key with minimal token call
-- **Token tracking:** Daily accumulation with 500K soft warning
+**M-2. Magic numbers not in config**
+- **Files:** `src/execution/position_manager.py:18-24`, `src/core/websocket_client.py:29-31`, `src/core/kalshi_client.py:33-34`, `src/execution/fill_tracker.py:22`
+- **What's wrong:** Several operational constants are hardcoded:
+  - `DEFAULT_STOP_LOSS_PCT = 0.30` (position_manager.py:18)
+  - `DEFAULT_MAX_HOLD_DAYS = 21` (position_manager.py:19)
+  - `DEFAULT_EDGE_GONE_THRESHOLD = 0.20` (position_manager.py:20)
+  - `INITIAL_BACKOFF = 1.0`, `MAX_BACKOFF = 60.0` (websocket_client.py:29-30)
+  - `max_concurrent = 5` (kalshi_client.py:33)
+  - `max_retries = 3` (kalshi_client.py:153)
+  - `MAX_POLLS = 5` (fill_tracker.py:22)
+- **Impact:** Cannot tune without code changes.
+- **Fix:** Move to `settings.yaml` under appropriate sections.
 
-### 4.2 Prompt Engineering
+**M-3. Foreign key enforcement disabled in database**
+- **File:** `src/storage/database.py:249-259`
+- **What's wrong:** FK constraints off due to incomplete schema migration.
+- **Impact:** Orphaned records possible if markets deleted without cascading deletes.
+- **Fix:** Enable FKs after verifying all foreign key relationships are correct.
 
-- 6 category-specific templates (Politics, Fed/Macro, Geopolitics, Tech/AI, Culture, General)
-- Plus 2 specialized templates (News Impact, Arbitrage Validation)
-- **All templates include:** market price, resolution criteria (verbatim), close date, news context, base rate context
-- **Superforecaster decomposition:** Key factors for/against, uncertainties, reasoning
-- **Prompt injection sanitization:** Strips `ignore previous instructions`, `you are now`, `system:` patterns + truncates external text
+**M-4. Temperature not populated per category**
+- **File:** `src/analysis/claude_forecaster.py:75-79`, `src/config.py:105`
+- **What's wrong:** `category_temperatures` dict defaults to empty. All categories use 0.3.
+- **Impact:** Missed optimization — Politics could use lower temp for consistency, Culture could use higher for creative reasoning.
+- **Fix:** Populate defaults: `{"Politics": 0.25, "Fed": 0.20, "Culture": 0.40, "Geopolitics": 0.30}`.
 
-### 4.3 Response Parsing
+**M-5. News relevance scoring is keyword-only**
+- **File:** `src/analysis/news_researcher.py:280-309`
+- **What's wrong:** Relevance is scored by keyword overlap + recency bonus. No semantic validation. Old articles with matching keywords score equally to breaking news.
+- **Impact:** Stale or tangentially relevant context fed to Claude, degrading forecast quality.
+- **Fix:** Add absolute date validation (reject >7 days for Fed, >30 days for Culture). Consider semantic similarity scoring.
 
-4-strategy fallback chain:
-1. Direct JSON parse
-2. Markdown code block extraction
-3. Brace extraction (first `{` to last `}`)
-4. Prose regex (finds last `probability: 0.XX` pattern)
+**M-6. URL deduplication fragile**
+- **File:** `src/analysis/news_researcher.py:394-405`
+- **What's wrong:** URL normalization strips all query params. Different articles on the same domain/path with different query params treated as duplicates.
+- **Impact:** Minor — most news sites don't use query params for article identity.
+- **Fix:** Strip known tracking params (`utm_*`, `fbclid`, `gclid`) instead of all params.
 
-All failures set `parse_failed=True`, which causes the signal to be skipped.
+**M-7. Resolution tracker depends on API staleness**
+- **File:** `src/analysis/resolution_tracker.py:28-74`
+- **What's wrong:** Market resolution requires API to return `status=settled`. No fallback to blockchain for Polymarket.
+- **Impact:** Calibration Brier scores lag if API is slow to reflect settlement.
+- **Fix:** Increase poll frequency near expected resolution dates. Consider blockchain fallback for Polymarket.
 
-### 4.4 Ensemble Logic
+**M-8. Metrics kept in memory only**
+- **File:** `src/metrics.py`
+- **What's wrong:** Metrics (strategy performance, API latency, etc.) are in-memory and lost on restart.
+- **Impact:** No historical data for performance analysis across restarts.
+- **Fix:** Persist key metrics to database or export to a file on shutdown.
 
-- **Single-model:** Claude + market price with adaptive weighting based on CI width
-- **Multi-model:** Claude + community forecasts (Manifold, Metaculus) with Brier-score weighting
-- **Divergence adjustments:** Extreme prices (<5%/>95%) reduce Claude weight; strong divergence (>20%) increases it
-- **Cross-check:** Dual-temperature (0.2 and 0.5) disagreement gate — rejects if gap > 22%
+**M-9. Gate 3 confirmation logic duplicated**
+- **Files:** `src/execution/order_router.py:226-245` and `379-395`
+- **What's wrong:** `_live_fill()` and `_poly_live_fill()` have nearly identical TTL check and re-prompt logic.
+- **Impact:** Maintenance burden; changes must be made in two places.
+- **Fix:** Extract to shared `_check_gate3_confirmation()` method.
 
-### 4.5 Calibration
-
-- Brier score tracking: overall, per-category, per-time-window
-- Calibration bins (10 buckets) for predicted vs actual
-- Category adjustments: `bias = avg(actual) - avg(predicted)` applied before ensemble
-- Categories with Brier > 0.30 are skipped entirely
-
-### 4.6 Safety Gates
-
-1. **Parse failure gate** — skip on failed parse
-2. **Absolute divergence gate** — max 40% (25% for extreme prices)
-3. **Relative divergence gate** — max 1.2x for extreme prices
-4. **CI width gate** — category-specific (0.35 for Politics, 0.50 for Culture)
-5. **Category accuracy gate** — skip if Brier > 0.30
-6. **Staleness gate** — skip if prediction < 48h old and price moved < 10%
-7. **Cross-check disagreement gate** — skip if dual-temp estimates differ > 22%
-
-### 4.7 Issues Found
-
-| ID | Severity | Issue | File:Line | Fix |
-|----|----------|-------|-----------|-----|
-| AI-1 | **HIGH** | No retry backoff on 429 rate limit — falls back to market price | claude_forecaster.py:212 | Add 3-retry exponential backoff before fallback |
-| AI-2 | **MEDIUM** | Token budget (500K) hardcoded | claude_forecaster.py:86 | Move to settings.yaml |
-| AI-3 | **MEDIUM** | No cost metrics (tracks tokens but not USD) | claude_forecaster.py | Calculate cost per model |
-| AI-4 | **MEDIUM** | API timeout (60s) hardcoded | claude_forecaster.py:166 | Move to settings.yaml |
-| AI-5 | **LOW** | No prompt injection test coverage | tests/ | Add test_prompt_injection() |
-
----
-
-## 5. Data Pipeline & News Integration
-
-### 5.1 Search Architecture
-
-- **Primary:** DuckDuckGo (free, no API key)
-- **Fallback:** Serper.dev (paid)
-- Multi-angle query generation: base + time-scoped + entity-specific
-- Result deduplication: 0.7 Jaccard similarity threshold on titles
-- Top 5 results kept, truncated to 4000 chars
-
-### 5.2 Data Sources
-
-| Source | Purpose | Timeout | Caching |
-|--------|---------|---------|---------|
-| DuckDuckGo | News search | 10s | None |
-| Serper.dev | News search fallback | 10s | None |
-| FRED | Economic data | 10s | 1h TTL |
-| Cleveland Fed | Inflation nowcast | 15s | 1h TTL |
-| CME FedWatch | Rate expectations | 15s | 1h TTL |
-| Metaculus | Community forecasts | 10s | 30m TTL |
-| Manifold | Community forecasts | 10s | None |
-
-### 5.3 Issues Found
-
-| ID | Severity | Issue | File | Fix |
-|----|----------|-------|------|-----|
-| DATA-1 | **HIGH** | No full-text article fetching — only snippets passed to Claude | news_researcher.py | Add URL fetch + content extraction |
-| DATA-2 | **HIGH** | Serper disabled permanently on failure — no re-enable | news_researcher.py:215 | Add 1-hour cooldown re-enable |
-| DATA-3 | **MEDIUM** | No data freshness validation on search results | news_researcher.py | Validate result dates against current time |
-| DATA-4 | **MEDIUM** | Cache keys too simplistic (no date/market context) | polymarket_cross_ref.py:38 | Include timestamp in cache key |
-| DATA-5 | **LOW** | URL normalization not performed (www vs non-www) | news_researcher.py | Strip query params and normalize |
+**M-10. Silent failure when all strategies produce zero signals**
+- **File:** `src/main.py:387-426`
+- **What's wrong:** Each strategy is wrapped in try/except that logs and continues. If ALL strategies fail simultaneously, the result is an empty signal list with no special alert.
+- **Impact:** Systemic issues (bad config, API down) masked by per-strategy error handling.
+- **Fix:** Add check: if all strategies raised exceptions, send alert.
 
 ---
 
-## 6. Trading Logic & Risk Management
+### 🟢 LOW — Optional
 
-### 6.1 Trading Decision Engine
+**L-1. Orphaned module: `src/data/leaderboard.py`**
+- Not imported by any active code. Superseded by `whale_monitor.py`.
+- **Fix:** Remove or move to `scripts/`.
 
-**Signal flow:** Market Discovery -> Filtering/Ranking -> Strategy Signal Generation -> Risk Engine (10 checks) -> Kelly Sizing -> Order Execution -> Fill Tracking -> Calibration Logging
+**L-2. `print()` in package module**
+- **File:** `src/scripts/calibration_report.py:124`
+- **Fix:** Replace with `logger.info()`.
 
-**Edge thresholds:**
-- AI Probability: 5%
-- Cross-Arbitrage: 2%
-- Obvious NO: 1%
-- Max 5 trades per cycle
+**L-3. PM2 log file permissions**
+- **File:** `ecosystem.config.js:20-21`
+- Logs at `~/.pm2/logs/polyedge-*.log` could contain sensitive startup output.
+- **Fix:** Verify `chmod 600 ~/.pm2/logs/polyedge-*.log`.
 
-### 6.2 Position Sizing (Half-Kelly)
+**L-4. Dashboard port hardcoded in function signature**
+- **File:** `src/dashboard/server.py:44`
+- Port defaults to 8080; overridable at call site but not in config.
+- **Fix:** Add `dashboard_port` to settings.yaml.
 
-```
-kelly = (p * b - q) / b    where b = (1 - market_price) / market_price
-half_kelly = kelly * 0.5
-capped = min(half_kelly * bankroll, bankroll * 0.05)
-```
-
-- Rejects contracts < $0.10 (prevents amplified losses on cheap contracts)
-- Calibration multiplier: reduces to 10% of Kelly when Brier > 0.28
-- Fee-adjusted: loop reduces contract count until `contracts * price + fee <= budget`
-
-### 6.3 Risk Engine (10-Point Gate)
-
-| # | Check | Threshold | Status |
-|---|-------|-----------|--------|
-| 1 | Balance | cost <= available | Filled positions only (see KAL-1) |
-| 2 | Position size | <= 5% of bankroll | Enforced |
-| 3 | Total exposure | <= 40% of bankroll | Enforced |
-| 4 | Correlated exposure | <= 20% of bankroll | Event-ticker grouping |
-| 5 | Circuit breaker | Not halted | Enforced |
-| 6 | Market liquidity | Order <= 10% of book depth | Enforced |
-| 7 | Existing position | No double-entry | Enforced |
-| 8 | Edge minimum | > 0 and > strategy min | Enforced |
-| 9 | Resolution date | 1-365 days | Enforced |
-| 10 | Cooldown | 1 hour after exit | Enforced |
-
-**Additional:** Obvious NO capped at 10% of bankroll total.
-
-### 6.4 Exit Logic (6 Triggers)
-
-| Trigger | Condition | Action |
-|---------|-----------|--------|
-| Stop loss | Unrealized loss > 30% of cost basis | Exit immediately |
-| Trailing stop | Profit drops to 50% of peak (after 12% gain) | Protect gains |
-| Take profit | Captured 80% of max theoretical gain | Exit winner |
-| Time-based | Position held > 21 days | Free capital |
-| Expiry | < 1 day to close AND underwater | Prevent forced liquidation |
-| Edge-gone | Remaining upside < 20% of original edge | Thesis invalidated |
-
-**Capital rotation:** When portfolio > 35% exposed, exits profitable positions with < 40% remaining edge.
-
-### 6.5 Circuit Breaker
-
-- **Daily halt:** Realized + (0.3 * unrealized) loss > 10% of bankroll
-- **Consecutive losses:** 3 days -> quarter-Kelly; 5 days -> full halt requiring manual review
-- **State persisted to DB** — survives restarts
-- **Auto-reset:** After 6+ hours on new calendar day
-
-### 6.6 Partial Fill Handling
-
-- Tracks cumulative filled count per order in memory AND database
-- Records only the delta on subsequent partials
-- On restart: reloads partial counts from DB, prevents double-recording
-- Non-monotonic fill counts logged as warning, skipped
-
-### 6.7 Issues Found
-
-| ID | Severity | Issue | File | Fix |
-|----|----------|-------|------|-----|
-| TRADE-1 | **HIGH** | Pending unfilled orders not counted in exposure (same as KAL-1) | risk_engine.py:82 | Track pending order cost |
-| TRADE-2 | **LOW** | Exit reason strings not standardized | position_manager.py | Enum for exit reasons |
-
----
-
-## 7. Backtesting & Performance Tracking
-
-### 7.1 Backtest Infrastructure
-
-- `scripts/backtest_engine.py` (686 lines) — Walk-forward backtest
-- `scripts/run_backtest.py` (270 lines) — CLI runner
-- Lookahead bias **prominently documented** in output
-- Paper fill simulation: 15% miss rate + 0-1 cent slippage model
-
-### 7.2 Calibration Tracking
-
-- Brier score: overall, per-category, per-time-window (7d, 30d, all)
-- Calibration bins: 10 buckets (0-10%, 10-20%, ... 90-100%)
-- Win rate: directional correctness vs market consensus
-- Per-category accuracy breakdown drives strategy gating
-- **All predictions logged** regardless of whether traded
-
-### 7.3 Trade Record-Keeping
-
-Every trade logged with: `order_id`, `market_id`, `side`, `token_id`, `price`, `size`, `fee`, `realized_pnl`, `timestamp`, `strategy`, `platform` — sufficient for tax reporting.
-
----
-
-## 8. Error Handling & Reliability
-
-### 8.1 Error Handling Quality
-
-- **107 try/except blocks** across 29 files
-- **89 (83%)** use properly narrowed exceptions (`httpx.RequestError`, `anthropic.APIError`, `sqlite3.Error`)
-- **18 (17%)** use generic `Exception` — all in wrapper/bridge functions with `exc_info=True`
-- **0 bare `except:` clauses**
-- **0 silently swallowed exceptions** — all log or re-raise
-- **53 locations** capture full stack traces with `exc_info=True`
-
-### 8.2 Retry Logic Coverage
-
-| API | Retry Mechanism | Backoff | Max Attempts | Tests |
-|-----|-----------------|---------|--------------|-------|
-| Kalshi REST | Exponential + jitter | 2^n + random | 3 | 21 |
-| Kalshi WebSocket | Auto-reconnect | 1-60s | Indefinite | 23 |
-| Claude (Anthropic) | Timeout + fallback | Single attempt | 1 | 20 |
-| FRED | HTTP timeout | None | 1 | 9 |
-| Metaculus | One-time disable | N/A | 1 | 12 |
-| Manifold | HTTP timeout | None | 1 | ~10 |
-| Serper (Search) | Graceful degrade | None | 1 | 22 |
-
-### 8.3 Graceful Degradation
-
-| Scenario | Behavior |
-|----------|----------|
-| Anthropic API down | Returns market price as forecast with `parse_failed=True` (no trading) |
-| Kalshi API down | Retries 3x with backoff; halts trading cycle on failure |
-| Serper API down | Falls back to DuckDuckGo |
-| Metaculus/Manifold down | Ensemble degrades to Claude-only |
-| Internet drops mid-trade | Order in PENDING state; fill tracker reconciles on reconnect |
-| WebSocket disconnect | Auto-reconnect with exponential backoff (1s to 60s) |
-| Bot crash | PM2 auto-restarts; fill tracker + circuit breaker reload from DB |
-
-### 8.4 Crash Safety
-
-- **SQLite WAL mode** — writes durable before returning
-- **Fill tracker dedup** — `_processed_fills` set reloaded from DB on restart
-- **Partial fill counts** — `_partial_recorded` dict reloaded on restart
-- **Circuit breaker state** — persisted to DB, survives restarts
-- **Cooldowns** — persisted to DB
-- **Graceful shutdown** — `asyncio.Event` + 30s PM2 timeout
-
-### 8.5 Memory Leak Prevention
-
-- All `httpx.AsyncClient` instances properly closed via `async close()`
-- WebSocket auto-reconnect replaces stale sockets
-- `_processed_fills` set bounded (only recent fills)
-- Callback dict keyed by `id()` prevents duplicate registration
-- News `_seen_urls` set capped at 10,000 with FIFO eviction
-
----
-
-## 9. Security Review
-
-### 9.1 Credential Security
-
-| Check | Result |
-|-------|--------|
-| Secrets in source code | **NONE** found |
-| Secrets in git history | **NONE** found |
-| `.gitignore` covers `.env`, `*.pem`, `*.key` | **YES** |
-| API keys loaded from env vars | **YES** |
-| Private key permissions | **0o600** (auto-enforced) |
-| HTTPS for all API calls | **YES** |
-| Command injection risks | **NONE** (no subprocess calls in trading code) |
-| SQL injection risks | **NONE** (parameterized queries only) |
-
-### 9.2 Issues Found
-
-| ID | Severity | Issue | Fix |
-|----|----------|-------|-----|
-| SEC-1 | **CRITICAL** | `config/.env` file permissions are 644 (world-readable) | `chmod 600 config/.env` |
-
----
-
-## 10. Code Quality
-
-### 10.1 Large Files (>300 lines)
-
-| File | Lines | Status |
-|------|-------|--------|
-| storage/database.py | 1,463 | Candidate for splitting (tables, queries, migrations) |
-| main.py | 1,087 | Acceptable for orchestrator |
-| execution/order_router.py | 648 | Acceptable — complex routing logic |
-| execution/position_manager.py | 598 | Acceptable — multiple exit strategies |
-| analysis/claude_forecaster.py | 502 | Acceptable — parsing + API + cross-check |
-| strategies/cross_arb.py | 461 | Acceptable — 3 arbitrage types |
-| core/websocket_client.py | 440 | Acceptable — reconnect + callbacks |
-| core/kalshi_client.py | 416 | Acceptable — full REST wrapper |
-| execution/fill_tracker.py | 396 | Acceptable — crash-safe partial fills |
-| strategies/ai_probability.py | 374 | Acceptable — multiple safety gates |
-
-### 10.2 Code Quality Checks
-
-| Check | Result |
-|-------|--------|
-| TODO/FIXME/HACK/XXX | **0** |
-| Bare `except:` | **0** |
-| `print()` in source | **1** (CLI script, acceptable) |
-| Type hints on all functions | **YES** |
-| Pydantic models for data | **YES** |
-| Mutable default arguments | **NONE** found |
-| Import organization | **CLEAN** (stdlib, third-party, local) |
-| Magic numbers | **FEW** — most thresholds in settings.yaml |
-| Logging levels appropriate | **YES** |
-| f-string consistency | **YES** (f-strings throughout) |
-
----
-
-## 11. Regulatory Compliance
-
-### 11.1 Platform Compliance
-
-- **Primary target: Kalshi** (CFTC-regulated, legal for US users)
-- **Polymarket integration exists** but gated behind `polymarket.enabled: false` in config
-- No Polymarket trading occurs without explicit enablement
-- CLAUDE.md references Polymarket extensively (reflects project history), but actual code is Kalshi-first
-
-### 11.2 Market Manipulation Prevention
-
-- Category filtering excludes restricted categories (Crypto Prices, Sports)
-- Liquidity check prevents outsized orders relative to book depth
-- Max 5% of bankroll per position prevents market impact
-- No wash trading patterns (dedup prevents re-entering same market)
-
-### 11.3 Record-Keeping
-
-Full trade audit trail with order_id, timestamp, price, size, fee, P&L — sufficient for IRS Form 1099 / Schedule D reporting.
-
----
-
-## 12. Improvement Roadmap Audit
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Feeding Kalshi market price into Claude's prompt | **DONE** | All 8 templates include current price |
-| GPT-4o as second forecaster | **NOT IMPLEMENTED** | Multi-model ensemble uses Manifold/Metaculus community forecasts instead |
-| Superforecaster-style prompt decomposition | **DONE** | Key factors for/against, uncertainties, reasoning |
-| Fetching full article text from search results | **NOT IMPLEMENTED** | Only snippets used (see DATA-1) |
-| Multi-model ensemble with disagreement handling | **DONE** | Brier-weighted ensemble + cross-check disagreement gate (22%) |
-| Calibration tracking with Brier scores | **DONE** | Per-category, per-time-window, drives strategy gating |
-| Performance dashboard | **DONE** | FastAPI dashboard at localhost |
+**L-5. `database.py` is 1463 lines — monolithic**
+- **File:** `src/storage/database.py`
+- Schema, migrations, and 50+ query methods in one class.
+- **Fix:** Extract schema to separate file, migrations to separate module.
 
 ---
 
 ## API Integration Health Matrix
 
-| Integration | Auth | Error Handling | Retry Logic | Rate Limiting | Timeout | Tests | Status |
+| Integration | Auth | Error Handling | Retry Logic | Rate Limiting | Timeout Config | Tests | Status |
 |---|---|---|---|---|---|---|---|
-| Kalshi REST | RSA-PSS | Narrowed exceptions | 3x exp backoff | 429 + jitter | 30s | 21 | **PRODUCTION** |
-| Kalshi WebSocket | Token | Auto-reconnect | 1-60s backoff | N/A | Heartbeat | 23 | **PRODUCTION** |
-| Anthropic (Claude) | API key | Timeout + fallback | Fallback only | 429 -> market price | 60s | 20 | **GOOD** |
-| Serper (Search) | API key | Status-aware disable | None (fallback) | Session disable | 10s | 22 | **ADEQUATE** |
-| FRED | API key | Timeout | None | N/A | 10s | 9 | **ADEQUATE** |
-| Metaculus | Token | 1h cooldown | None | Session disable | 10s | 12 | **ADEQUATE** |
-| Manifold | None | Timeout | None | N/A | 10s | ~10 | **ADEQUATE** |
+| Kalshi REST | ✅ RSA-PSS | ✅ All endpoints | ✅ 3x exponential+jitter | ✅ Semaphore(5)+0.1s interval | ✅ 60s configurable | ✅ Comprehensive | **Healthy** |
+| Kalshi WebSocket | ✅ RSA-PSS | ✅ Reconnect | ✅ Exp backoff 1-60s | ✅ Built-in | ✅ Configurable | ✅ Good | **Healthy** |
+| Anthropic (Claude) | ✅ API key | ✅ Timeout+retry | ✅ 3x exponential | ✅ Token budget tracking | ✅ 60s asyncio timeout | ✅ Mocked | **Healthy** |
+| Serper (Search) | ✅ API key | ✅ Returns empty on fail | ⚠️ No explicit retry | ⚠️ Not explicit | ✅ httpx default | ✅ Mocked | **Adequate** |
+| FRED | ✅ API key | ✅ Returns None on fail | ⚠️ No explicit retry | ⚠️ Not explicit | ✅ httpx default | ✅ Mocked | **Adequate** |
+| FedWatch | 🔓 Public | ✅ Returns None on fail | ⚠️ No explicit retry | ⚠️ Not explicit | ✅ httpx default | ✅ Mocked | **Adequate** |
+| Cleveland Fed | 🔓 Public | ✅ Returns None on fail | ⚠️ No explicit retry | ⚠️ Not explicit | ✅ httpx default | ✅ Mocked | **Adequate** |
+| Metaculus | ✅ API token | ✅ Returns None on fail | ⚠️ No explicit retry | ⚠️ Not explicit | ✅ httpx default | ✅ Mocked | **Adequate** |
+| Manifold | 🔓 Public | ✅ Returns None on fail | ⚠️ No explicit retry | ⚠️ Not explicit | ✅ httpx default | ✅ Mocked | **Adequate** |
+| DuckDuckGo | 🔓 Public | ✅ Returns empty on fail | ⚠️ No explicit retry | ⚠️ Not explicit | ✅ ddgs default | ✅ Mocked | **Adequate** |
+
+**Note:** Secondary data sources (FRED, FedWatch, etc.) degrade gracefully — missing data is simply omitted from Claude's context. Retry logic is less critical for these.
 
 ---
 
 ## Trading Logic Scorecard
 
 | Component | Implementation | Tests | Risk Controls | Status |
-|-----------|---------------|-------|---------------|--------|
-| Market Discovery | Kalshi + Polymarket, pagination, filtering | 31+ | Category exclusion, volume/liquidity filters | **STRONG** |
-| Forecast Generation | Claude + ensemble + 7 safety gates | 115+ | Divergence/CI/accuracy/staleness gates | **EXCELLENT** |
-| Edge Detection | Probability - market price with min thresholds | Included above | Per-strategy minimums, divergence cap | **STRONG** |
-| Position Sizing | Half-Kelly + calibration multiplier + caps | 48 | 5% cap, fee adjustment, cheap contract rejection | **EXCELLENT** |
-| Order Execution | Paper/live routing, 3-gate safety | 38 | Config + env + interactive confirmation | **EXCELLENT** |
-| Position Tracking | Weighted avg entry, P&L, Kalshi sync | 52 | Reconciliation, staleness detection | **STRONG** |
-| P&L Calculation | Entry/exit fees, partial fills | Included above | Proportional fee allocation | **STRONG** |
-| Settlement Handling | WebSocket lifecycle, value clamping | 23 | Range validation [0,1], logging | **GOOD** |
+|---|---|---|---|---|
+| Market Discovery | ✅ Kalshi + Polymarket + Gamma API with pagination | ✅ Mocked | ✅ Volume/liquidity/category filters | **Solid** |
+| Forecast Generation | ✅ Claude with category-specific prompts, ensemble | ✅ 12+ tests | ⚠️ No decomposition (C-5), no calibration feedback (H-2) | **Good, needs tuning** |
+| Edge Detection | ✅ `claude_prob - market_price` with min threshold | ✅ Tested | ✅ Min edge 5% (AI), 2% (arb) | **Solid** |
+| Position Sizing | ✅ Half-Kelly with caps, calibration multiplier | ✅ Tested | ✅ 5% per position, 40% total, 20% correlated | **Solid** |
+| Order Execution | ✅ Paper + live modes, maker preference | ✅ Tested | ✅ Three-gate safety, balance checks | **Solid** |
+| Position Tracking | ✅ Weighted avg entry, proportional fees, partial fills | ✅ Tested | ✅ Crash recovery via DB | **Solid** |
+| P&L Calculation | ✅ Realized + unrealized, includes all fees | ✅ Tested | ⚠️ Float precision (C-2) | **Good** |
+| Settlement Handling | ✅ Polls Kalshi/Polymarket for resolved markets | ✅ Tested | ✅ Rejects intermediate prices | **Solid** |
 
 ---
 
 ## Module-by-Module Scorecard
 
-| Module | Quality | Tests | Error Handling | Risk Controls | Documentation | Overall |
-|--------|---------|-------|----------------|---------------|---------------|---------|
-| core/kalshi_client.py | 5 | 5 | 5 | 4 | 4 | **4.6** |
-| core/websocket_client.py | 5 | 5 | 5 | 4 | 4 | **4.6** |
-| core/models.py | 5 | 4 | 4 | N/A | 4 | **4.3** |
-| core/market_discovery.py | 4 | 5 | 4 | 4 | 4 | **4.2** |
-| analysis/claude_forecaster.py | 5 | 4 | 4 | 5 | 4 | **4.4** |
-| analysis/ensemble.py | 5 | 5 | 4 | 5 | 3 | **4.4** |
-| analysis/calibration.py | 5 | 5 | 4 | N/A | 4 | **4.5** |
-| analysis/prompt_templates.py | 5 | 4 | 5 | 5 | 4 | **4.6** |
-| analysis/news_researcher.py | 4 | 4 | 4 | 3 | 4 | **3.8** |
-| data/market_scanner.py | 4 | 4 | 4 | 4 | 4 | **4.0** |
-| data/data_enricher.py | 4 | 4 | 4 | 3 | 3 | **3.6** |
-| data/fred_client.py | 4 | 4 | 3 | N/A | 3 | **3.5** |
-| execution/order_router.py | 5 | 5 | 5 | 5 | 4 | **4.8** |
-| execution/position_manager.py | 5 | 5 | 5 | 5 | 4 | **4.8** |
-| execution/fill_tracker.py | 5 | 5 | 5 | 5 | 4 | **4.8** |
-| execution/order_builder.py | 5 | 4 | 4 | 4 | 4 | **4.2** |
-| strategies/ai_probability.py | 5 | 5 | 4 | 5 | 4 | **4.6** |
-| strategies/cross_arb.py | 5 | 5 | 4 | 5 | 4 | **4.6** |
-| strategies/obvious_no.py | 4 | 4 | 4 | 4 | 4 | **4.0** |
-| risk/risk_engine.py | 5 | 5 | 4 | 5 | 4 | **4.6** |
-| risk/kelly_sizer.py | 5 | 5 | 4 | 5 | 4 | **4.6** |
-| risk/circuit_breaker.py | 5 | 5 | 5 | 5 | 4 | **4.8** |
-| storage/database.py | 4 | 4 | 4 | 3 | 3 | **3.6** |
-| main.py | 4 | 5 | 4 | 5 | 3 | **4.2** |
-
-**Codebase average: 4.3/5**
+| Module | Code Quality | Test Coverage | Error Handling | Risk Controls | Documentation | Overall |
+|---|---|---|---|---|---|---|
+| `src/core/kalshi_client.py` | 5 | 5 | 5 | 5 | 4 | **5/5** |
+| `src/core/market_discovery.py` | 4 | 4 | 4 | 4 | 4 | **4/5** |
+| `src/core/models.py` | 5 | 5 | 5 | N/A | 4 | **5/5** |
+| `src/core/websocket_client.py` | 4 | 4 | 4 | 3 | 3 | **4/5** |
+| `src/core/polymarket_client.py` | 4 | 4 | 4 | 3 | 3 | **4/5** |
+| `src/analysis/claude_forecaster.py` | 4 | 5 | 5 | 4 | 4 | **4/5** |
+| `src/analysis/prompt_templates.py` | 3 | 4 | N/A | 4 | 3 | **3/5** |
+| `src/analysis/ensemble.py` | 4 | 5 | 4 | 4 | 4 | **4/5** |
+| `src/analysis/calibration.py` | 5 | 5 | 4 | N/A | 4 | **5/5** |
+| `src/analysis/calibration_analyzer.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/analysis/news_researcher.py` | 3 | 4 | 4 | 3 | 3 | **3/5** |
+| `src/analysis/resolution_tracker.py` | 4 | 4 | 4 | 4 | 4 | **4/5** |
+| `src/strategies/ai_probability.py` | 4 | 4 | 4 | 4 | 4 | **4/5** |
+| `src/strategies/obvious_no.py` | 4 | 4 | 4 | 4 | 4 | **4/5** |
+| `src/strategies/cross_arb.py` | 4 | 4 | 4 | 4 | 3 | **4/5** |
+| `src/strategies/cross_platform_arb.py` | 4 | 4 | 4 | 3 | 3 | **4/5** |
+| `src/strategies/news_reactive.py` | 4 | 4 | 4 | 4 | 3 | **4/5** |
+| `src/strategies/whale_tracker.py` | 4 | 4 | 4 | 4 | 3 | **4/5** |
+| `src/data/market_scanner.py` | 4 | 4 | 4 | 4 | 4 | **4/5** |
+| `src/data/market_graph.py` | 4 | 4 | 3 | N/A | 3 | **4/5** |
+| `src/data/data_enricher.py` | 5 | 4 | 5 | N/A | 4 | **5/5** |
+| `src/data/news_ingestion.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/data/whale_monitor.py` | 4 | 4 | 4 | 4 | 3 | **4/5** |
+| `src/data/fred_client.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/data/fedwatch.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/data/cleveland_fed.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/data/manifold_client.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/data/metaculus_client.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/execution/order_builder.py` | 4 | 4 | 4 | 4 | 4 | **4/5** |
+| `src/execution/order_router.py` | 3 | 4 | 4 | 5 | 3 | **4/5** |
+| `src/execution/position_manager.py` | 4 | 4 | 4 | 4 | 3 | **4/5** |
+| `src/execution/fill_tracker.py` | 5 | 4 | 5 | 4 | 4 | **5/5** |
+| `src/risk/risk_engine.py` | 5 | 5 | 5 | 5 | 4 | **5/5** |
+| `src/risk/kelly_sizer.py` | 5 | 5 | 4 | 5 | 4 | **5/5** |
+| `src/risk/circuit_breaker.py` | 5 | 5 | 4 | 5 | 4 | **5/5** |
+| `src/risk/portfolio_risk.py` | 4 | 4 | 4 | 5 | 3 | **4/5** |
+| `src/alerts/alert_manager.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/alerts/daily_report.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/alerts/imessage_alert.py` | 4 | 4 | 4 | N/A | 3 | **4/5** |
+| `src/dashboard/server.py` | 4 | 3 | 3 | N/A | 3 | **3/5** |
+| `src/storage/database.py` | 3 | 4 | 4 | 3 | 4 | **3/5** |
+| `src/main.py` | 3 | 4 | 4 | 5 | 4 | **4/5** |
+| `src/config.py` | 5 | 5 | 4 | N/A | 5 | **5/5** |
+| `src/metrics.py` | 3 | 3 | 3 | N/A | 3 | **3/5** |
 
 ---
 
-## All Issues by Severity
+## Section 1: Structural Integrity
 
-### CRITICAL (Fix Before Next Trade)
+### Directory Tree Summary
+```
+polyedge/
+├── config/                     # 4 files: settings.yaml, categories.yaml, .env, .env.example
+├── src/                        # 63 Python files
+│   ├── core/          (7)      # Models, clients (Kalshi, Polymarket), WebSocket, market discovery
+│   ├── analysis/      (9)      # Claude forecaster, prompts, ensemble, calibration, news research
+│   ├── strategies/    (7)      # AI probability, obvious NO, cross-arb, cross-platform, news, whales
+│   ├── data/          (15)     # Scanners, graph, cache, news, whale monitor, FRED, FedWatch, etc.
+│   ├── execution/     (5)      # Order builder, router, position manager, fill tracker, exit logic
+│   ├── risk/          (5)      # Risk engine, Kelly sizer, circuit breaker, portfolio risk
+│   ├── alerts/        (4)      # Alert manager, iMessage, daily report
+│   ├── dashboard/     (2+7)    # FastAPI server, 6 HTML templates, 1 CSS
+│   ├── storage/       (1)      # SQLite database with WAL
+│   ├── scripts/       (2)      # Backtest, calibration report
+│   └── root           (4)      # main.py, config.py, metrics.py, __init__.py
+├── tests/                      # 65 test files (mirrors src/ structure)
+├── scripts/                    # 4 CLI scripts (backfill, backtest, discover whales, etc.)
+├── data/                       # SQLite DBs, ChromaDB, logs (all gitignored)
+├── ecosystem.config.js         # PM2 process manager config
+├── requirements.txt            # 17 pinned dependencies
+├── pyproject.toml              # Build config, pytest settings
+├── Makefile                    # test, run, lint, clean, install, start, stop, logs
+└── .gitignore                  # Comprehensive (secrets, data, caches, IDE)
+```
 
-| ID | Issue | File | Impact | Fix |
-|----|-------|------|--------|-----|
-| SEC-1 / ENV-1 | `.env` file permissions 644 (world-readable) | config/.env | Any system user can read all API keys and private keys | `chmod 600 config/.env` |
+### Orphaned Files
+- `src/data/leaderboard.py` — not imported by any active code. Superseded by `whale_monitor.py`.
 
-### HIGH (Fix This Week)
+### Dead Code
+- None found. All exported symbols are imported elsewhere or used in tests.
 
-| ID | Issue | File | Impact | Fix |
-|----|-------|------|--------|-----|
-| KAL-1 / TRADE-1 | Pending unfilled orders not counted in balance/exposure check | risk_engine.py:82 | Could over-leverage portfolio with multiple pending orders (mitigated by 40% headroom) | Track pending cost in OrderRouter, pass to risk engine |
-| KAL-2 | Database stores monetary values as FLOAT, not INTEGER cents | storage/database.py:24 | Floating-point accumulation drift over 1000s of trades | Migrate schema to INTEGER cents |
-| AI-1 | No retry backoff on Claude 429 — falls back to market price immediately | claude_forecaster.py:212 | During rate limits, system silently degrades to no-edge market prices | Add 3-retry exponential backoff before fallback |
-| DATA-1 | No full-text article fetching — only snippets sent to Claude | news_researcher.py | Claude receives ~150 chars instead of full article context; reduced edge | Fetch URLs + extract article body |
-| DATA-2 | Serper disabled permanently on first failure — never re-enabled | news_researcher.py:215 | Loses paid search fallback for entire session | Add `_disabled_at` timestamp + 1h cooldown re-enable |
+### Config File Status
+| File | Present | Valid |
+|------|---------|-------|
+| `ecosystem.config.js` | ✅ | ✅ Correct PM2 config |
+| `config/.env` | ✅ | ✅ Permissions 0o600 |
+| `config/.env.example` | ✅ | ✅ All 9 vars documented |
+| `config/settings.yaml` | ✅ | ✅ 101 lines, well-commented |
+| `config/categories.yaml` | ✅ | ✅ 51 lines |
+| `requirements.txt` | ✅ | ✅ 17 exact pins |
+| `pyproject.toml` | ✅ | ✅ Python >=3.12 |
 
-### MEDIUM (Fix When Possible)
+### Dependency Pinning
+All 17 production dependencies pinned to exact versions. 5 optional dependencies (chromadb, sentence-transformers, apscheduler, pandas, numpy) are commented out and unpinned — acceptable since they're not installed.
 
-| ID | Issue | File | Impact | Fix |
-|----|-------|------|--------|-----|
-| KAL-3 | Order poll loop has no per-order timeout | order_router.py | Could block trade cycle if Kalshi hangs | Add `asyncio.wait_for()` wrapper |
-| KAL-4 | `get_order()` returns raw dict instead of None on missing field | kalshi_client.py | Caller may process error dict as order | Return None explicitly |
-| AI-2 | Token budget (500K) hardcoded | claude_forecaster.py:86 | Can't adjust spending limit | Move to settings.yaml |
-| AI-3 | No USD cost metrics — tracks tokens only | claude_forecaster.py | Hard to monitor spending trends | Calculate per-model costs |
-| AI-4 | API timeout (60s) hardcoded | claude_forecaster.py:166 | Can't tune for conditions | Move to settings.yaml |
-| DATA-3 | No data freshness validation on search results | news_researcher.py | Old articles treated as current | Validate dates against current time |
-| DATA-4 | Cache keys don't include date/market context | polymarket_cross_ref.py:38 | Cross-market cache collisions | Include timestamp in key |
-| ENV-2 | PM2 `kill_timeout: 5000` too short | ecosystem.config.js | Orphaned orders during restart | Increase to 30000 |
+### Unused Dependencies
+None identified. All 17 pinned packages are actively imported.
 
-### LOW (Optional)
+### Known CVEs
+No known critical CVEs for the pinned versions as of March 2026. `cryptography==46.0.5` is recent and actively maintained.
 
-| ID | Issue | File | Impact | Fix |
-|----|-------|------|--------|-----|
-| KAL-5 | No application-level request throttling | kalshi_client.py | Relies on hitting 429s | Add max req/s limiter |
-| AI-5 | No prompt injection test coverage | tests/ | Regression risk on sanitization | Add test cases |
-| DATA-5 | URL normalization not performed | news_researcher.py | Duplicate articles with www/non-www | Normalize URLs |
-| TRADE-2 | Exit reason strings not standardized | position_manager.py | Harder to analyze exits | Use enum |
-| ENV-3 | API key validation on first use, not startup | src/config.py | Delayed error detection | Call validation in main |
-| STRUCT-1 | database.py is 1,463 lines | storage/database.py | Refactoring candidate | Split into tables/queries/migrations |
+---
+
+## Section 2: Configuration & Environment
+
+### Complete Environment Variable Inventory
+| Variable | Required | Documented | Used In |
+|----------|----------|------------|---------|
+| `KALSHI_API_KEY_ID` | Yes | ✅ | `src/config.py:237` |
+| `KALSHI_PRIVATE_KEY_PATH` | Yes (if Kalshi) | ✅ | `src/config.py:238` |
+| `ANTHROPIC_API_KEY` | Yes | ✅ | `src/config.py:239` |
+| `SERPER_API_KEY` | No | ✅ | `src/config.py:240` |
+| `SEARXNG_URL` | No | ✅ | `src/config.py:241` |
+| `FRED_API_KEY` | No | ✅ | `src/config.py:242` |
+| `METACULUS_API_TOKEN` | No | ✅ | `src/config.py:243` |
+| `POLYMARKET_PRIVATE_KEY` | No | ✅ | `src/config.py:244` |
+| `POLYEDGE_LIVE_ENABLED` | Safety gate | ✅ | `src/config.py:245`, `src/main.py:808,813` |
+
+**Undocumented env vars:** 0
+**Hardcoded secrets:** 0 found
+**Secrets in git history:** 0 found
+
+### Security Posture
+- `.env` file: permissions 0o600 ✅
+- `kalshi_private_key.pem`: permissions 0o600, gitignored ✅
+- `.gitignore` covers: `.env`, `*.pem`, `*.key`, `credentials*.json` ✅
+- All API endpoints configurable via `settings.yaml` ✅
+- Demo/production toggle: `kalshi.use_demo` in settings.yaml ✅
+- Paper/live toggle: `trading.mode` in settings.yaml + env var gate ✅
+
+---
+
+## Section 3: Kalshi Integration
+
+### Endpoints Used
+| Endpoint | Method | File | Auth |
+|----------|--------|------|------|
+| `GET /exchange/status` | `health_check()` | `kalshi_client.py:205` | No |
+| `GET /markets` | `get_markets()` | `kalshi_client.py:218` | No |
+| `GET /markets/{ticker}` | `get_market()` | `kalshi_client.py:240` | No |
+| `GET /events` | `get_events()` | `kalshi_client.py:251` | No |
+| `GET /markets/{ticker}/orderbook` | `get_orderbook()` | `kalshi_client.py:270` | No |
+| `GET /markets/trades` | `get_market_history()` | `kalshi_client.py:281` | No |
+| `GET /portfolio/balance` | `get_balance()` | `kalshi_client.py:317` | ✅ RSA-PSS |
+| `GET /portfolio/positions` | `get_positions()` | `kalshi_client.py:336` | ✅ RSA-PSS |
+| `POST /portfolio/orders` | `create_order()` | `kalshi_client.py:354` | ✅ RSA-PSS |
+| `DELETE /portfolio/orders/{id}` | `cancel_order()` | `kalshi_client.py:394` | ✅ RSA-PSS |
+| `GET /portfolio/orders/{id}` | `get_order()` | `kalshi_client.py:407` | ✅ RSA-PSS |
+| `GET /portfolio/orders` | `get_open_orders()` | `kalshi_client.py:421` | ✅ RSA-PSS |
+
+### Authentication
+- RSA-PSS signing with SHA-256 ✅
+- Millisecond timestamps ✅
+- Private key file permission check + auto-fix ✅
+- Headers: `KALSHI-ACCESS-KEY`, `KALSHI-ACCESS-SIGNATURE`, `KALSHI-ACCESS-TIMESTAMP` ✅
+
+### Rate Limiting
+- Semaphore limits to 5 concurrent requests ✅
+- 0.1s minimum interval between requests ✅
+- 429 handler: exponential backoff (2^n + jitter), 3 retries ✅
+
+### Order Placement
+- Price conversion: dollars → integer cents via `int(round(dollars * 100))` ✅
+- NO-side: `yes_price = cents(1.0 - order.price)` ✅
+- Quantity: `int(order.size)` ✅
+- Order types: "limit" (GTC) or "market" (FOK) ✅
+- Response validation: checks `order_id` exists before proceeding ✅
+- Fill polling: up to 5 polls with 2s delay ✅
+
+### Monetary Calculations
+- **Prices:** Float in Python, converted to integer cents at API boundary ✅
+- **Fees:** `kalshi_taker_fee()` returns integer cents, uses `math.ceil` ✅
+- **P&L:** `round(realized_pnl, 4)` — 4 decimal precision ✅
+- **Storage:** REAL (float) in SQLite — documented tech debt ⚠️ (C-2)
+
+### Partial Fill Handling
+- Delta tracking: records only NEW contracts per poll, not cumulative ✅
+- Crash recovery: loads partial fill counts from trades table on restart ✅
+- Non-monotonic detection: warns if filled_count decreases ✅
+
+### Settlement Handling
+- Polls for `status=settled` and parses `result` field ✅
+- Rejects intermediate prices (0.25-0.75 on Polymarket) as incomplete ✅
+- Updates calibration records on resolution ✅
+
+---
+
+## Section 4: AI Forecasting Pipeline
+
+### Prompt Engineering
+- 6 category-specific templates (Politics, Fed, Geopolitics, Tech, Culture, General) ✅
+- Market price included in all prompts: `CURRENT MARKET PRICE: {market_price:.0%}` ✅
+- Resolution criteria included verbatim ✅
+- Base rate instructions present ✅
+- Prompt injection sanitization with 7+ patterns stripped ✅
+- Input length limits enforced (question: 500, criteria: 2000, news: 5000 chars) ✅
+- **Missing:** Superforecaster-style decomposition ❌ (C-5)
+- **Missing:** Calibration feedback in system prompt ❌ (H-2)
+
+### Response Parsing
+- 4-stage fallback: JSON → markdown block → brace extraction → regex ✅
+- Takes LAST probability match (avoids stale references) ✅
+- Clamps to [0.01, 0.99] ✅
+- Inverted CI auto-correction ✅
+
+### Model Selection
+- Sonnet for routine, Opus for positions > $50 threshold ✅
+- Configurable threshold ✅
+
+### Token & Cost Tracking
+- Per-model pricing tracked (Sonnet $3/$15M, Opus $15/$60M) ✅
+- Daily budget warning at 500K tokens ✅
+- Daily counter reset ✅
+
+### Ensemble
+- Single-model: `claude_weight=0.85` with CI penalty and extreme-price adjustment ✅
+- Multi-model: Brier-score-weighted average with disagreement factor ✅
+- **Issue:** Multi-model `market_weight=0.15` is too low (H-1)
+
+### GPT-4o Integration
+- **Not implemented.** System uses Claude only + community forecast cross-reference (Metaculus, Manifold). No OpenAI integration.
+
+---
+
+## Section 5: Data Pipeline & News Integration
+
+### Search Sources
+- DuckDuckGo (ddgs): primary, no API key needed ✅
+- Serper: optional, API key required ✅
+- RSS feeds: Reuters, NYT Politics ✅
+
+### Query Generation
+- 4 query variants: core topic, time-scoped, entity-focused, broad context ✅
+
+### Data Freshness
+- News items scored by recency + keyword relevance ✅
+- Title-based deduplication (Jaccard > 0.7) ✅
+- **Issue:** No absolute date validation — old articles with matching keywords score well (M-5)
+- **Issue:** Only headlines + snippets fetched, never full text (C-6)
+
+### Caching
+- TTL cache implemented in `src/data/cache.py` ✅
+- Stale data served during refresh failures ✅
+
+### Data Enrichment Pipeline (data_enricher.py)
+- Concurrent fetching with `asyncio.gather` ✅
+- 15-second hard timeout ✅
+- Pending task cancellation on timeout ✅
+- Priority-based section truncation ✅
+- Graceful degradation: missing sources simply omitted ✅
+
+---
+
+## Section 6: Trading Logic & Risk Management
+
+### Edge Detection
+- AI strategy: `min_edge_ai = 0.05` (5% minimum) ✅
+- Arbitrage: `min_edge_arb = 0.02` (2% minimum) ✅
+- Edge = `claude_probability - market_price` ✅
+
+### Position Sizing
+- Half-Kelly: `f * 0.5 * bankroll` ✅
+- Hard cap: 5% per position ✅
+- Calibration multiplier adjusts Kelly based on Brier score ✅
+- Contracts rounded to integer ✅
+
+### Risk Checks (10-point gate)
+1. Balance check (includes pending orders) ✅
+2. Position size limit (5% bankroll) ✅
+3. Total exposure limit (40% bankroll) ✅
+4. Correlated exposure limit (20% bankroll) ✅
+5. Daily loss limit (10% → circuit breaker) ✅
+6. Market liquidity check ✅
+7. Existing position check (no double-entry) ✅
+8. Edge minimum check ✅
+9. Resolution date check ✅
+10. Cooldown check ✅
+
+### Circuit Breaker
+- Daily loss > 10% bankroll → halt all trading ✅
+- 3 consecutive losing days → quarter-Kelly ✅
+- 5 consecutive losing days → halt, require manual review ✅
+- Unrealized losses weighted at 30% for daily P&L ✅
+
+### Stop Loss
+- 30% loss of cost basis → auto-exit ✅
+- Max hold 21 days ✅
+- Edge-gone threshold 20% ✅
+
+### Market Manipulation
+- No wash trading or spoofing patterns detected ✅
+- Maker orders preferred ✅
+- Order sizes checked against book depth ✅
+
+---
+
+## Section 7: Backtesting & Performance Tracking
+
+### Backtest Infrastructure
+- `scripts/run_backtest.py` and `scripts/backtest_engine.py` present ✅
+- Uses resolved Kalshi markets for historical validation ✅
+
+### Calibration Tracking
+- Brier score calculation: `mean((predicted - actual)^2)` ✅
+- 10-bin calibration curves (predicted vs actual resolution rate) ✅
+- Per-category accuracy breakdown ✅
+- Per-probability-bucket analysis ✅
+- Min sample sizes enforced (5 for reporting, 4 for base rates) ✅
+
+### Decision Logging
+- Every forecast logged: market_id, predicted_prob, market_price, timestamp, model_used ✅
+- Every trade logged: entry price, exit price, P&L, fees, strategy ✅
+- Signals logged with reasoning and edge size ✅
+- Raw Claude prompts + responses logged at DEBUG level ✅
+
+### Selection Bias
+- No cherry-picking detected. All predictions logged regardless of outcome.
+
+---
+
+## Section 8: Error Handling & Reliability
+
+### Try/Except Coverage
+- All external API calls wrapped in try/except ✅
+- Pattern: `except (httpx.HTTPStatusError, httpx.RequestError)` + `except Exception` ✅
+- **No bare `except:` clauses** found ✅
+- All exceptions logged at ERROR with `exc_info=True` ✅
+
+### Retry Logic
+| API | Retries | Backoff | Tested |
+|-----|---------|---------|--------|
+| Kalshi REST | 3 | Exponential + jitter | ✅ |
+| Claude API | 3 | Exponential | ✅ |
+| Kalshi WebSocket | Unlimited (reconnect) | 1-60s exponential | ✅ |
+| Secondary data APIs | 0 | N/A (graceful skip) | ✅ |
+
+### Graceful Degradation
+- Anthropic down → returns market price as fallback, `parse_failed=True` ✅
+- Kalshi down → scanner warns, skips cycle ✅
+- Serper/FRED/etc. down → omitted from context, no crash ✅
+- Internet drop mid-trade → order may be placed but fill tracking resumes on reconnect ⚠️
+
+### State Persistence
+- Positions stored in SQLite, recovered on restart ✅
+- Partial fill counts loaded from trades table on restart ✅
+- Circuit breaker state persisted via daily P&L in DB ✅
+
+### Memory Leak Risk
+- WebSocket callbacks stored in dicts; `remove_callback()` exists but must be called ⚠️
+- Fill tracker `_partial_recorded` dict grows per order; cleaned on fill completion ✅
+- No unbounded list growth detected ✅
+
+---
+
+## Section 9: Security Review
+
+| Check | Status |
+|-------|--------|
+| No credentials in code | ✅ Grep found 0 matches for `sk-ant`, `api_key=`, `secret=`, `password=` |
+| .gitignore covers secrets | ✅ `.env`, `*.pem`, `*.key`, `credentials*` |
+| API keys in env vars only | ✅ All 9 vars loaded from `.env` |
+| No sensitive data in logs | ✅ API responses not logged at INFO; DEBUG only |
+| HTTPS for all API calls | ✅ All endpoints use `https://` |
+| No command injection | ✅ No `subprocess` calls found |
+| No SQL injection | ✅ All queries use parameterized `?` placeholders |
+| File permissions | ✅ `.env` and `.pem` at 0o600 |
+
+---
+
+## Section 10: Code Quality
+
+| Check | Status | Details |
+|-------|--------|---------|
+| Functions > 50 lines | ⚠️ | `scan_and_trade()` is 568 lines (H-5) |
+| Files > 300 lines | ⚠️ | `database.py` (1463), `main.py` (~1020), `order_router.py` (~580), `position_manager.py` (~598), `claude_forecaster.py` (571) |
+| TODO/FIXME/HACK/XXX | ✅ | 0 found in source |
+| Bare except clauses | ✅ | 0 found |
+| Mutable default arguments | ✅ | 0 found |
+| Type hints | ✅ | All function signatures have type hints |
+| f-string consistency | ✅ | f-strings used throughout |
+| Magic numbers | ⚠️ | 10+ operational constants hardcoded (M-2) |
+| Docstrings | ✅ | All public functions have docstrings |
+| Log levels | ✅ | Proper DEBUG/INFO/WARNING/ERROR usage |
+| print() statements | ✅ | 1 in `src/scripts/` (L-2), rest in `scripts/` (CLI, acceptable) |
+| Copy-pasted code | ⚠️ | Gate 3 logic duplicated (M-9), market price fetching 3x (H-5) |
+| Import organization | ✅ | stdlib → third-party → local pattern followed |
+
+---
+
+## Section 11: Regulatory Compliance
+
+| Check | Status | Details |
+|-------|--------|---------|
+| Primary platform is Kalshi (CFTC-regulated) | ✅ | Kalshi is the primary trading target |
+| No illegal Polymarket trading for US | ⚠️ | Polymarket integration exists, no residency check (C-1). Currently disabled in config (`polymarket.enabled: false`). |
+| Terms of service compliance | ✅ | No TOS violations detected. Maker orders, standard API usage. |
+| Position limits | ✅ | 5% per position, 40% total, well within Kalshi limits |
+| No market manipulation | ✅ | No wash trading, spoofing, or price manipulation patterns |
+| Trade record-keeping | ✅ | All trades logged with timestamps, prices, P&L in SQLite |
+
+---
+
+## Section 12: Improvement Roadmap Audit
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Feeding Kalshi market price into Claude's prompt | ✅ Implemented | `CURRENT MARKET PRICE: {market_price:.0%}` in all templates |
+| GPT-4o as second forecaster | ❌ Not implemented | Uses Metaculus/Manifold community forecasts instead |
+| Superforecaster-style prompt decomposition | ❌ Not implemented | Prompts mention base rates but don't require structured decomposition (C-5) |
+| Fetching full article text from Serper results | ❌ Not implemented | Headlines + snippets only (C-6) |
+| Multi-model ensemble with disagreement handling | ✅ Implemented | Brier-weighted, disagreement factor, confidence penalty |
+| Calibration tracking with Brier scores | ✅ Implemented | Per-category, per-bucket, rolling windows |
+| Performance dashboard | ✅ Implemented | FastAPI at :8080, 6 pages (portfolio, signals, strategies, calibration, risk, base) |
 
 ---
 
 ## Top 10 Recommendations (Prioritized)
 
-### 1. Fix `.env` file permissions (SEC-1)
-**Risk: Security** | Effort: 30 seconds
-```bash
-chmod 600 /Users/adamgrodin/polyedge/config/.env
-```
+### 1. 🔴 Fix order cancellation to use Kalshi's order_id (C-4)
+**Risk:** Stale orders left on exchange. **Effort:** 1 hour. Store Kalshi order_id in DB, use for cancel.
 
-### 2. Track pending order cost in risk engine (KAL-1)
-**Risk: Could lose money** | Effort: 2-3 hours
-Maintain pending order set in OrderRouter. Pass cumulative pending cost to `risk_engine.check_all()` so `available = bankroll - filled_exposure - pending_cost`.
+### 2. 🔴 Add Polymarket residency safeguard (C-1)
+**Risk:** Regulatory exposure. **Effort:** 30 min. Add env var gate `CONFIRM_NON_US_POLYMARKET=true`.
 
-### 3. Add retry backoff for Claude 429 errors (AI-1)
-**Risk: Missed trading opportunities** | Effort: 1 hour
-Before falling back to market price, retry 3x with exponential backoff (1s, 2s, 4s). Only use market-price fallback after all retries exhausted.
+### 3. 🔴 Add race condition protection for pm2 restarts (C-3)
+**Risk:** Duplicate live orders. **Effort:** 1 hour. Use PID lock file or `INSERT OR IGNORE` with unique constraint.
 
-### 4. Migrate database to INTEGER cents (KAL-2)
-**Risk: P&L drift over time** | Effort: 3-4 hours
-Change all REAL price/fee/pnl columns to INTEGER. Store cents. Convert at read/write boundaries. Prevents floating-point accumulation over thousands of trades.
+### 4. 🔴 Add superforecaster decomposition to prompts (C-5)
+**Risk:** Bad forecasts on compound events. **Effort:** 2 hours. Add decomposition instructions to each template.
 
-### 5. Implement full-text article fetching (DATA-1)
-**Risk: Reduced forecasting edge** | Effort: 4 hours
-For each search result URL, fetch HTML and extract article body (use trafilatura or similar). Pass full text to Claude instead of 150-char snippets.
+### 5. 🟠 Add calibration feedback to system prompt (H-2)
+**Risk:** Miscalibrated confidence → wrong position sizes. **Effort:** 1 hour. Inject rolling Brier stats and anti-overconfidence rules.
 
-### 6. Fix Serper permanent disable (DATA-2)
-**Risk: Degraded search quality** | Effort: 30 minutes
-Track `_disabled_at` timestamp. Re-enable after 1 hour (matching the Metaculus cooldown pattern already in the codebase).
+### 6. 🟠 Fix multi-model ensemble market weight (H-1)
+**Risk:** Over-trusting model consensus. **Effort:** 15 min. Change default from 0.15 to 0.40+.
 
-### 7. Add per-order timeout to poll loop (KAL-3)
-**Risk: Blocked trade cycles** | Effort: 1 hour
-Wrap order polling in `asyncio.wait_for(timeout=30)` to prevent hanging on slow Kalshi responses.
+### 7. 🟠 Add log rotation (H-4)
+**Risk:** Disk exhaustion on Mac Mini. **Effort:** 15 min. Switch to `RotatingFileHandler`.
 
-### 8. Increase PM2 kill_timeout (ENV-2)
-**Risk: Orphaned orders on restart** | Effort: 1 minute
-Change `kill_timeout` from 5000 to 30000 in `ecosystem.config.js`.
+### 8. 🟠 Validate API response fields in live order flow (H-3)
+**Risk:** Malformed responses → NaN calculations. **Effort:** 30 min. Add field presence checks.
 
-### 9. Move hardcoded thresholds to config (AI-2, AI-4)
-**Risk: Inflexibility** | Effort: 1 hour
-Move Claude token budget (500K), API timeout (60s), and other hardcoded values to `settings.yaml` for runtime tuning.
+### 9. 🔴 Fetch full article text for news context (C-6)
+**Risk:** Headlines-only analysis degrades forecast quality. **Effort:** 3 hours. Add `httpx` fetch + text extraction for top results.
 
-### 10. Add data freshness validation (DATA-3)
-**Risk: Stale data feeding forecasts** | Effort: 2 hours
-Validate search result dates against current time. Reject results older than configurable threshold (e.g., 7 days for general news, 24 hours for breaking news context).
+### 10. 🟠 Refactor `scan_and_trade()` into smaller functions (H-5)
+**Risk:** Regression bugs from 568-line function. **Effort:** 2 hours. Extract 4-5 sub-functions.
 
 ---
 
 ## Conclusion
 
-**Overall assessment: PRODUCTION-READY with minor improvements needed.**
+PolyEdge is a **well-engineered, production-ready trading system** with comprehensive risk controls, thorough test coverage (834/837 tests passing), and proper security practices. The codebase demonstrates strong engineering discipline:
 
-The PolyEdge codebase is well-engineered for a real-money trading system. It demonstrates:
+- **Strengths:** 10-point risk gate, half-Kelly sizing with calibration multiplier, three-gate live trading safety, comprehensive error handling, RSA-PSS authentication, prompt injection protection, graceful degradation for all secondary data sources, zero bare excepts, zero TODO markers, all dependencies pinned, all secrets externalized.
 
-- **Excellent risk management** — 10-point pre-trade gate, Half-Kelly sizing, circuit breaker, 6 exit triggers
-- **Strong error handling** — 107 try/except blocks, 83% properly narrowed, zero bare excepts, zero silent swallows
-- **Comprehensive testing** — 823 test functions (820 passing), 0.82:1 test-to-source line ratio
-- **Good security posture** — no hardcoded secrets, env-based config, auto-enforced key permissions
-- **Thoughtful AI integration** — 7 safety gates on Claude forecasts, 4-strategy response parsing, calibration feedback loop
+- **Key risks:** 6 critical issues identified, none of which are show-stoppers but all should be addressed before scaling capital. The most urgent are the order cancellation bug (C-4) and race condition (C-3) which could cause real money loss in live trading.
 
-The single **critical** issue (`.env` file permissions) is a one-command fix. The **high** issues are real but mitigated — pending order tracking has 40% exposure headroom as buffer, float storage has epsilon tolerance, and Claude rate limit fallback is safe (just suboptimal).
+- **Overall grade: 8/10** — Production-ready with optimizations available. Fix the 6 critical issues to reach 9/10.
 
-**Confidence for live trading: HIGH** after fixing SEC-1 and KAL-1.
+---
+
+*Report generated by Claude Opus 4.6 on March 28, 2026. All file paths and line numbers reference commit `dc93686` on main.*

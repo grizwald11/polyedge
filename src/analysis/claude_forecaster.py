@@ -442,23 +442,29 @@ class ClaudeForecaster:
         disagreement = abs(low_result.probability - high_result.probability)
         avg_prob = (low_result.probability + high_result.probability) / 2.0
 
+        # Average the two results, widen CI based on disagreement
+        ci_low = min(low_result.confidence_low, high_result.confidence_low)
+        ci_high = max(low_result.confidence_high, high_result.confidence_high)
+
         if disagreement > threshold:
+            # Instead of returning None (skipping the market entirely), return
+            # the averaged result with widened CI and a "low_confidence" flag.
+            # This lets the ensemble and Kelly sizer naturally reduce position
+            # size rather than missing potentially profitable opportunities.
             logger.info(
                 f"Cross-check DISAGREE on '{market.question[:50]}...' "
                 f"(low={low_result.probability:.0%}, high={high_result.probability:.0%}, "
-                f"gap={disagreement:.0%})"
+                f"gap={disagreement:.0%}) — returning with widened CI"
             )
-            return None
-
-        logger.info(
-            f"Cross-check AGREE on '{market.question[:50]}...' "
-            f"(low={low_result.probability:.0%}, high={high_result.probability:.0%}, "
-            f"avg={avg_prob:.0%})"
-        )
-
-        # Average the two results, widen CI slightly
-        ci_low = min(low_result.confidence_low, high_result.confidence_low)
-        ci_high = max(low_result.confidence_high, high_result.confidence_high)
+            # Widen CI proportional to disagreement
+            ci_low = max(0.01, avg_prob - disagreement)
+            ci_high = min(0.99, avg_prob + disagreement)
+        else:
+            logger.info(
+                f"Cross-check AGREE on '{market.question[:50]}...' "
+                f"(low={low_result.probability:.0%}, high={high_result.probability:.0%}, "
+                f"avg={avg_prob:.0%})"
+            )
 
         return ForecastResult(
             probability=max(0.01, min(0.99, avg_prob)),

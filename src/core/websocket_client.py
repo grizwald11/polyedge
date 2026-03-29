@@ -207,9 +207,15 @@ class KalshiWebSocket:
                 if not self._running:
                     break
                 consecutive_failures += 1
-                # Detect permanent auth failures (401/403-like errors)
-                err_str = str(e).lower()
-                is_auth_error = any(code in err_str for code in ("401", "403", "authentication", "unauthorized"))
+                # Detect permanent auth failures — check HTTP status code first
+                # (websockets wraps it in InvalidStatusCode), then fall back to
+                # string matching for other exception types.
+                is_auth_error = False
+                if hasattr(e, "status_code"):
+                    is_auth_error = getattr(e, "status_code", 0) in (401, 403)
+                if not is_auth_error:
+                    err_str = str(e).lower()
+                    is_auth_error = any(code in err_str for code in ("401", "403", "authentication", "unauthorized"))
                 if is_auth_error or consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     logger.error(
                         f"WebSocket permanently failed after {consecutive_failures} attempts: {e}. "

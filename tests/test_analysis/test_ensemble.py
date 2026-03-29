@@ -128,8 +128,8 @@ class TestMultiModelEnsemble:
         """Works correctly with a single forecast."""
         f = _make_forecast(0.65, model="solo")
         result = multi_model_ensemble([f], market_price=0.50)
-        # 0.65 * 0.85 + 0.50 * 0.15 = 0.5525 + 0.075 = 0.6275
-        assert abs(result.final_probability - 0.6275) < 0.01
+        # 0.65 * 0.60 + 0.50 * 0.40 = 0.39 + 0.20 = 0.59 (market_weight=0.40)
+        assert abs(result.final_probability - 0.59) < 0.01
 
     def test_empty_forecasts_returns_market_price(self):
         """Empty forecast list returns market price."""

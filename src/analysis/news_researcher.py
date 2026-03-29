@@ -23,6 +23,9 @@ MAX_RESULTS_PER_QUERY = 5
 MAX_QUERIES = 4
 MAX_CONTEXT_CHARS = 4000  # ~1000 tokens — increased to reduce mid-article truncation
 MAX_RELEVANT_RESULTS = 5
+MAX_ARTICLE_FETCH = 3  # Fetch full text for top N results
+MAX_ARTICLE_CHARS = 1500  # Max chars to extract per article
+ARTICLE_FETCH_TIMEOUT = 5.0  # Seconds per article fetch
 DEDUP_SIMILARITY_THRESHOLD = 0.7
 
 # Common abbreviation → expanded form for broader news coverage
@@ -244,8 +247,22 @@ class NewsResearcher:
             ))
         return results
 
-    def _is_stale(self, result: NewsResult, max_age_days: int = 7) -> bool:
-        """Check if a result's date indicates it is too old to be useful."""
+    def _is_stale(self, result: NewsResult, max_age_days: int = 7, category: str = "") -> bool:
+        """Check if a result's date indicates it is too old to be useful.
+
+        Uses category-aware thresholds: Fed/macro news goes stale faster
+        than culture/politics news.
+        """
+        # Category-specific staleness thresholds (more time-sensitive categories
+        # get shorter windows to avoid injecting outdated context into Claude)
+        category_max_days = {
+            "Fed": 5, "Fed_Macro": 5,
+            "Geopolitics": 7,
+            "Politics": 14,
+            "Culture": 30,
+            "Tech": 10, "Tech_AI": 10,
+        }
+        effective_max = category_max_days.get(category, max_age_days)
         if not result.date:
             return False  # No date — can't determine staleness, keep it
         date_lower = result.date.lower()
@@ -254,7 +271,7 @@ class NewsResearcher:
         weeks_match = re.search(r"(\d+)\s*week", date_lower)
         if weeks_match:
             weeks = int(weeks_match.group(1))
-            if weeks * 7 > max_age_days:
+            if weeks * 7 > effective_max:
                 return True
         months_match = re.search(r"(\d+)\s*month", date_lower)
         if months_match:
@@ -262,7 +279,7 @@ class NewsResearcher:
         days_match = re.search(r"(\d+)\s*day", date_lower)
         if days_match:
             days = int(days_match.group(1))
-            if days > max_age_days:
+            if days > effective_max:
                 return True
         # Try parsing absolute dates
         for fmt in ("%Y-%m-%d", "%b %d, %Y", "%B %d, %Y", "%m/%d/%Y"):
@@ -270,7 +287,7 @@ class NewsResearcher:
                 from datetime import datetime, timezone
                 parsed = datetime.strptime(result.date.strip()[:20], fmt).replace(tzinfo=timezone.utc)
                 age_days = (datetime.now(timezone.utc) - parsed).days
-                if age_days > max_age_days:
+                if age_days > effective_max:
                     return True
                 return False
             except ValueError:
@@ -331,6 +348,61 @@ class NewsResearcher:
                 unique.append(r)
         return unique
 
+    async def _fetch_article_text(self, url: str) -> str:
+        """Fetch and extract main text content from an article URL.
+
+        Uses a lightweight approach: fetch HTML, strip tags, extract the
+        largest text block. Returns empty string on failure.
+        """
+        if not url:
+            return ""
+        try:
+            async with httpx.AsyncClient(
+                timeout=ARTICLE_FETCH_TIMEOUT,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; PolyEdge/1.0)"},
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "")
+                if "text/html" not in content_type and "application/xhtml" not in content_type:
+                    return ""
+                html = resp.text
+        except Exception as e:
+            logger.debug(f"Article fetch failed for {url}: {e}")
+            return ""
+
+        # Extract text: strip script/style tags, then HTML tags
+        html = re.sub(r"<(script|style|nav|header|footer)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", html)
+        # Collapse whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Extract the meatiest paragraph-like block (heuristic: longest run of sentences)
+        # Split into chunks by double-space or period sequences
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.strip()) > 40]
+        if not sentences:
+            return ""
+
+        # Take a contiguous block of sentences from the middle (skip boilerplate header/footer)
+        start = min(3, len(sentences) // 4)  # Skip first few (often nav/header text)
+        block = " ".join(sentences[start:])
+        return block[:MAX_ARTICLE_CHARS]
+
+    async def _enrich_with_article_text(self, results: list[NewsResult]) -> list[NewsResult]:
+        """Fetch full article text for top results and append to snippets."""
+        import asyncio
+
+        to_fetch = results[:MAX_ARTICLE_FETCH]
+        tasks = [self._fetch_article_text(r.url) for r in to_fetch]
+        texts = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, text in enumerate(texts):
+            if isinstance(text, str) and text and len(text) > len(to_fetch[i].snippet):
+                to_fetch[i].snippet = text
+
+        return results
+
     async def get_context(self, market_question: str) -> str:
         """Get formatted news context for a market question.
 
@@ -364,6 +436,12 @@ class NewsResearcher:
         )
         all_results = all_results[:MAX_RELEVANT_RESULTS]
 
+        # Enrich top results with full article text (replaces snippet if richer)
+        try:
+            all_results = await self._enrich_with_article_text(all_results)
+        except Exception as e:
+            logger.debug(f"Article enrichment failed: {e}")
+
         context = self._format_context(all_results)
         logger.info(
             f"News research: {len(all_results)} results for '{market_question[:50]}...'"
@@ -391,16 +469,33 @@ class NewsResearcher:
         return context
 
 
+_TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "gclsrc", "dclid", "msclkid",
+    "mc_cid", "mc_eid", "ref", "source",
+})
+
+
 def _normalize_url(url: str) -> str:
-    """Normalize a URL for deduplication — strip query params, fragments, www prefix."""
+    """Normalize a URL for deduplication — strip tracking params, fragments, www prefix.
+
+    Keeps non-tracking query params so articles distinguished only by query
+    (e.g., ?article=123 vs ?article=456) are not falsely deduplicated.
+    """
     try:
-        from urllib.parse import urlparse, urlunparse
+        from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
         parsed = urlparse(url)
         host = parsed.hostname or ""
         if host.startswith("www."):
             host = host[4:]
-        # Keep scheme, normalized host, and path; drop query and fragment
-        return urlunparse((parsed.scheme, host, parsed.path.rstrip("/"), "", "", ""))
+        # Strip only known tracking params; keep the rest
+        if parsed.query:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            filtered = {k: v for k, v in params.items() if k.lower() not in _TRACKING_PARAMS}
+            clean_query = urlencode(filtered, doseq=True) if filtered else ""
+        else:
+            clean_query = ""
+        return urlunparse((parsed.scheme, host, parsed.path.rstrip("/"), "", clean_query, ""))
     except Exception:
         return url
 

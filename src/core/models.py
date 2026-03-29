@@ -291,6 +291,7 @@ class Order(BaseModel):
     fill_price: Optional[float] = None
     cancelled_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
+    exchange_order_id: Optional[str] = None  # Kalshi/Polymarket order ID for cancel/lookup
 
     @field_validator("price")
     @classmethod

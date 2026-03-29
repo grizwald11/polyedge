@@ -102,8 +102,14 @@ class ClaudeConfig(BaseModel):
     temperature: float = 0.3
     max_assessments_per_cycle: int = 10
     ensemble_weight: float = 0.85
-    category_temperatures: dict[str, float] = Field(default_factory=dict)
-    cross_check_enabled: bool = False
+    category_temperatures: dict[str, float] = Field(default_factory=lambda: {
+        "Politics": 0.25,
+        "Fed": 0.20,
+        "Geopolitics": 0.30,
+        "Tech": 0.30,
+        "Culture": 0.40,
+    })
+    cross_check_enabled: bool = True
     cross_check_top_n: int = 3
     cross_check_temp_low: float = 0.2
     cross_check_temp_high: float = 0.5
@@ -135,6 +141,14 @@ class ExecutionConfig(BaseModel):
     order_poll_delay_seconds: float = 2.0  # Delay between order status polls
     max_poll_attempts: int = 5  # Max order status poll attempts
     cycle_timeout_seconds: int = 300  # Hard timeout per scan-trade cycle
+    # Exit thresholds (previously hardcoded in position_manager.py)
+    stop_loss_pct: float = 0.30          # Exit if unrealized loss > 30% of cost basis
+    max_hold_days: int = 21              # Exit if held > 21 days
+    edge_gone_threshold: float = 0.20    # Exit if remaining edge < 20% of original
+    trailing_stop_activate: float = 0.12 # Activate trailing stop after 12% gain
+    trailing_stop_distance: float = 0.50 # Trail 50% of peak gain
+    take_profit_pct: float = 0.80        # Take profit at 80% of max theoretical gain
+    capital_rotation_edge: float = 0.40  # When exposure >35%, exit positions with <40% remaining edge
 
 
 class AlertsConfig(BaseModel):
@@ -144,6 +158,7 @@ class AlertsConfig(BaseModel):
     alert_on_trade: bool = True
     alert_on_circuit_breaker: bool = True
     daily_report_time: str = "21:00"
+    dashboard_port: int = 8080
 
 
 class DatabaseConfig(BaseModel):

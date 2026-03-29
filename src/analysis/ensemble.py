@@ -106,7 +106,7 @@ def ensemble_forecast(
 def multi_model_ensemble(
     forecasts: list[ForecastResult],
     market_price: float,
-    market_weight: float = 0.15,
+    market_weight: float = 0.40,
     brier_scores: Optional[dict[str, float]] = None,
     category: str = "",
     category_brier_scores: Optional[dict[str, dict[str, float]]] = None,

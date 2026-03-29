@@ -52,6 +52,7 @@ class OrderRouter:
         self._session_confirmed = False  # Gate 3: first-trade confirmation
         self._session_confirm_time: float | None = None  # When gate 3 was confirmed
         self._session_confirm_ttl = 3600  # Gate 3 expires after 1 hour
+        self._polymarket_residency_confirmed = False  # Polymarket jurisdiction gate
         self._log_gate_status()
 
     @property
@@ -211,21 +212,14 @@ class OrderRouter:
 
         return OrderResult(success=True, order=order, trade=trade)
 
-    async def _live_fill(self, order: Order) -> OrderResult:
-        """Submit order to Kalshi API for live execution."""
-        # Three-gate safety check
-        if not self._live_gates_passed():
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = "Live trading gates not passed"
-            self._log_order(order)
-            return OrderResult(
-                success=False, order=order,
-                error="Live trading gates not passed"
-            )
+    async def _check_gate3(self, order: Order) -> Optional[OrderResult]:
+        """Check Gate 3 (interactive session confirmation) with TTL expiry.
 
-        # Gate 3: Interactive confirmation — expires after TTL to prevent stale session
+        Returns None if gate passes, or an OrderResult rejection if gate fails.
+        Shared by both Kalshi and Polymarket live fill paths.
+        """
+        import time as _time
         if self._session_confirmed and self._session_confirm_time is not None:
-            import time as _time
             if _time.time() - self._session_confirm_time > self._session_confirm_ttl:
                 logger.info("Gate 3 confirmation expired — re-prompting")
                 self._session_confirmed = False
@@ -240,9 +234,27 @@ class OrderRouter:
                     success=False, order=order,
                     error="User declined live trade confirmation"
                 )
-            import time as _time
             self._session_confirmed = True
             self._session_confirm_time = _time.time()
+
+        return None  # Gate passed
+
+    async def _live_fill(self, order: Order) -> OrderResult:
+        """Submit order to Kalshi API for live execution."""
+        # Three-gate safety check
+        if not self._live_gates_passed():
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = "Live trading gates not passed"
+            self._log_order(order)
+            return OrderResult(
+                success=False, order=order,
+                error="Live trading gates not passed"
+            )
+
+        # Gate 3: Interactive confirmation with TTL
+        gate3_result = await self._check_gate3(order)
+        if gate3_result is not None:
+            return gate3_result
 
         # Determine Kalshi side and order type
         kalshi_side = "yes" if "yes" in order.token_id.lower() else "no"
@@ -287,6 +299,16 @@ class OrderRouter:
                     success=False, order=order,
                     error="Kalshi API did not return order_id",
                 )
+
+            # Validate that response contains expected fields
+            if "status" not in result:
+                logger.warning(
+                    f"Kalshi order response missing 'status' field: {result}"
+                )
+
+            # Store exchange order ID for later cancel/lookup operations
+            order.exchange_order_id = kalshi_order_id
+
             final_status = await self._poll_order_status(kalshi_order_id, result)
 
             # Capture timestamp once for consistency
@@ -369,6 +391,25 @@ class OrderRouter:
             self._log_order(order)
             return OrderResult(success=False, order=order, error="Polymarket client not configured")
 
+        # Polymarket residency gate: require explicit non-US confirmation.
+        # Polymarket is not legal for US persons — this gate prevents accidental
+        # live trades without jurisdiction acknowledgment.
+        if not self._polymarket_residency_confirmed:
+            import os
+            if os.environ.get("CONFIRM_NON_US_POLYMARKET", "").lower() != "true":
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = (
+                    "Polymarket residency gate: set CONFIRM_NON_US_POLYMARKET=true "
+                    "to confirm you are not a US resident"
+                )
+                self._log_order(order)
+                logger.error(
+                    "Polymarket live trade BLOCKED: CONFIRM_NON_US_POLYMARKET env var not set. "
+                    "Polymarket is not available to US residents."
+                )
+                return OrderResult(success=False, order=order, error=order.rejection_reason)
+            self._polymarket_residency_confirmed = True
+
         # Three-gate safety check (same gates for both platforms)
         if not self._live_gates_passed():
             order.status = OrderStatus.REJECTED
@@ -376,23 +417,10 @@ class OrderRouter:
             self._log_order(order)
             return OrderResult(success=False, order=order, error="Live trading gates not passed")
 
-        # Gate 3 TTL check for Polymarket path
-        if self._session_confirmed and self._session_confirm_time is not None:
-            import time as _time
-            if _time.time() - self._session_confirm_time > self._session_confirm_ttl:
-                logger.info("Gate 3 confirmation expired — re-prompting")
-                self._session_confirmed = False
-
-        if not self._session_confirmed:
-            confirmed = await self._request_confirmation(order)
-            if not confirmed:
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = "User declined live trade confirmation"
-                self._log_order(order)
-                return OrderResult(success=False, order=order, error="User declined")
-            import time as _time
-            self._session_confirmed = True
-            self._session_confirm_time = _time.time()
+        # Gate 3: Interactive confirmation with TTL (shared logic)
+        gate3_result = await self._check_gate3(order)
+        if gate3_result is not None:
+            return gate3_result
 
         try:
             poly_side = order.side.value  # "BUY" or "SELL"
@@ -540,10 +568,10 @@ class OrderRouter:
         Returns:
             True if successfully cancelled, False otherwise
         """
-        # Look up the order in DB to get Kalshi order ID and current status
+        # Look up the order in DB to get exchange order ID and current status
         conn = self.db._get_conn()
         row = conn.execute(
-            "SELECT status, paper FROM orders WHERE id=?", (order_id,)
+            "SELECT status, paper, exchange_order_id FROM orders WHERE id=?", (order_id,)
         ).fetchone()
 
         if row is None:
@@ -568,8 +596,17 @@ class OrderRouter:
             logger.info(f"[PAPER] Cancelled order {order_id}")
             return True
 
+        # Use the exchange (Kalshi) order ID for the cancel API call.
+        # Fall back to internal ID only if exchange_order_id was never stored.
+        exchange_id = row["exchange_order_id"] if row["exchange_order_id"] else order_id
+        if not row["exchange_order_id"]:
+            logger.warning(
+                f"No exchange_order_id for {order_id} — using internal ID "
+                f"(cancel may fail if Kalshi doesn't recognize it)"
+            )
+
         try:
-            result = await self.kalshi.cancel_order(order_id)
+            result = await self.kalshi.cancel_order(exchange_id)
             if result is not None:
                 self._remove_pending(order_id)
                 conn = self.db._get_conn()
@@ -578,10 +615,10 @@ class OrderRouter:
                     (datetime.now(timezone.utc).isoformat(), order_id),
                 )
                 conn.commit()
-                logger.info(f"[LIVE] Cancelled order {order_id}")
+                logger.info(f"[LIVE] Cancelled order {order_id} (exchange_id={exchange_id})")
                 return True
             else:
-                logger.warning(f"Cancel returned None for {order_id}")
+                logger.warning(f"Cancel returned None for {order_id} (exchange_id={exchange_id})")
                 return False
         except Exception as e:
             logger.error(f"Cancel failed for {order_id}: {e}", exc_info=True)
@@ -651,8 +688,9 @@ class OrderRouter:
             INSERT OR REPLACE INTO orders (
                 id, market_id, platform, token_id, side, price, size, cost,
                 order_type, fee_rate_bps, status, strategy, signal_id,
-                paper, created_at, filled_at, fill_price, cancelled_at, rejection_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                paper, created_at, filled_at, fill_price, cancelled_at, rejection_reason,
+                exchange_order_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             order.id,
             order.market_id,
@@ -673,5 +711,6 @@ class OrderRouter:
             order.fill_price,
             order.cancelled_at.isoformat() if order.cancelled_at else None,
             order.rejection_reason,
+            getattr(order, 'exchange_order_id', None),
         ))
         conn.commit()

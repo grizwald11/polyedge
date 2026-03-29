@@ -119,3 +119,35 @@ class Metrics:
         if self.last_cycle_time is None:
             return True  # Just started, no cycles yet
         return (time.time() - self.last_cycle_time) < 600
+
+    def persist_to_db(self, db) -> None:
+        """Persist current metrics snapshot to database for cross-restart analysis.
+
+        Stores a JSON snapshot in the metrics_snapshots table. Called at the end
+        of each cycle so metrics survive pm2 restarts.
+        """
+        try:
+            conn = db._get_conn()
+            # Create table if it doesn't exist (idempotent)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS metrics_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    data TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "INSERT INTO metrics_snapshots (timestamp, data) VALUES (?, ?)",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    json.dumps(self.get_health_status()),
+                ),
+            )
+            # Keep only last 1000 snapshots to bound table size
+            conn.execute(
+                "DELETE FROM metrics_snapshots WHERE id NOT IN "
+                "(SELECT id FROM metrics_snapshots ORDER BY id DESC LIMIT 1000)"
+            )
+            conn.commit()
+        except Exception as e:
+            logger.debug(f"Failed to persist metrics: {e}")

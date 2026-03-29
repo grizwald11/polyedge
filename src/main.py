@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import sys
 import time
 from pathlib import Path
@@ -70,7 +71,9 @@ def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log")
     console.setFormatter(logging.Formatter(log_format, datefmt=date_format))
     root.addHandler(console)
 
-    file_handler = logging.FileHandler(log_file)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5
+    )
     file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
     root.addHandler(file_handler)
 
@@ -383,47 +386,75 @@ async def scan_and_trade(
     all_signals: list = []
     ai_signals: list = []
     no_signals: list = []
+    _strategy_failures: list[str] = []  # M-10: track which strategies raised exceptions
+    _strategies_attempted = 2  # ai_probability + obvious_no are always attempted
 
     try:
         ai_signals = await ai_strategy.scan_for_opportunities(markets)
         all_signals.extend(ai_signals)
     except Exception as e:
         logger.error(f"AI probability strategy failed: {e}", exc_info=True)
+        _strategy_failures.append("ai_probability")
 
     try:
         no_signals = no_strategy.scan_for_opportunities(markets)
         all_signals.extend(no_signals)
     except Exception as e:
         logger.error(f"Obvious NO strategy failed: {e}", exc_info=True)
+        _strategy_failures.append("obvious_no")
 
     if news_strategy is not None:
+        _strategies_attempted += 1
         try:
             news_signals = await news_strategy.scan_for_opportunities(markets)
             all_signals.extend(news_signals)
         except Exception as e:
             logger.error(f"News strategy failed: {e}", exc_info=True)
+            _strategy_failures.append("news_reactive")
 
     if cross_arb_strategy is not None:
+        _strategies_attempted += 1
         try:
             arb_signals = await cross_arb_strategy.scan_for_opportunities(markets)
             all_signals.extend(arb_signals)
         except Exception as e:
             logger.error(f"Cross-arb strategy failed: {e}", exc_info=True)
+            _strategy_failures.append("cross_arb")
 
     if whale_strategy is not None:
+        _strategies_attempted += 1
         try:
             whale_signals = whale_strategy.scan_for_opportunities(markets)
             all_signals.extend(whale_signals)
         except Exception as e:
             logger.error(f"Whale strategy failed: {e}", exc_info=True)
+            _strategy_failures.append("whale_tracker")
 
     if cross_platform_arb is not None and poly_markets:
+        _strategies_attempted += 1
         try:
             kalshi_markets = [m for m in markets if getattr(m, "platform", Platform.KALSHI) == Platform.KALSHI]
             xplat_signals = await cross_platform_arb.scan_for_opportunities(kalshi_markets, poly_markets)
             all_signals.extend(xplat_signals)
         except Exception as e:
             logger.error(f"Cross-platform arb strategy failed: {e}", exc_info=True)
+            _strategy_failures.append("cross_platform_arb")
+
+    # M-10: alert if ALL strategies raised exceptions (complete system failure)
+    if len(_strategy_failures) >= _strategies_attempted and _strategies_attempted > 0:
+        fail_msg = (
+            f"ALL {_strategies_attempted} strategies failed: {', '.join(_strategy_failures)}. "
+            f"No signals can be generated until at least one strategy recovers."
+        )
+        logger.critical(fail_msg)
+        if metrics is not None:
+            metrics.record_error("all_strategies", fail_msg)
+        try:
+            await alert_manager.send_circuit_breaker_alert(
+                f"ALL STRATEGIES FAILED: {', '.join(_strategy_failures)}"
+            )
+        except Exception:
+            pass  # Best effort — alert system itself may be down
 
     if not all_signals:
         logger.info("No signals generated this cycle")
@@ -433,6 +464,7 @@ async def scan_and_trade(
                 trades=0, signals=0,
                 positions=position_manager.get_position_count(),
             )
+            metrics.persist_to_db(scanner.db)
         return
 
     # Separate obvious_no from other signals so they get their own trade slot.
@@ -596,6 +628,7 @@ async def scan_and_trade(
             signals=len(all_signals),
             positions=position_manager.get_position_count(),
         )
+        metrics.persist_to_db(scanner.db)
 
     # Check for resolved markets
     try:
@@ -758,8 +791,55 @@ async def run_trading_loop(
             pass  # Normal timeout — proceed to next cycle
 
 
+def _acquire_pid_lock(lock_path: str = "data/polyedge.pid") -> bool:
+    """Acquire a PID lock file to prevent concurrent pm2 instances.
+
+    Returns True if lock acquired, False if another instance is running.
+    This prevents the race condition where pm2 restarts overlap and
+    both instances try to trade the same signals (C-3).
+    """
+    import os
+    from pathlib import Path
+
+    lock_file = Path(lock_path)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if lock_file.exists():
+        try:
+            old_pid = int(lock_file.read_text().strip())
+            # Check if the old process is still running
+            os.kill(old_pid, 0)  # Sends no signal, just checks existence
+            # Process exists — another instance is running
+            return False
+        except (ProcessLookupError, ValueError, PermissionError):
+            # Old process is dead or PID file is corrupt — safe to overwrite
+            pass
+
+    lock_file.write_text(str(os.getpid()))
+    return True
+
+
+def _release_pid_lock(lock_path: str = "data/polyedge.pid"):
+    """Release the PID lock file on shutdown."""
+    import os
+    from pathlib import Path
+
+    lock_file = Path(lock_path)
+    if lock_file.exists():
+        try:
+            pid = int(lock_file.read_text().strip())
+            if pid == os.getpid():
+                lock_file.unlink()
+        except (ValueError, OSError):
+            pass
+
+
 async def main():
     """Main entry point."""
+    if not _acquire_pid_lock():
+        print("ERROR: Another PolyEdge instance is already running (PID lock exists). Exiting.")
+        sys.exit(1)
+
     settings = load_settings()
     setup_logging(settings.logging.level, settings.logging.file)
     logger = logging.getLogger("polyedge.main")
@@ -906,7 +986,17 @@ async def main():
 
     # Execution
     order_builder = OrderBuilder(settings)
-    position_manager = PositionManager(db, settings.trading.bankroll)
+    position_manager = PositionManager(
+        db,
+        bankroll=settings.trading.bankroll,
+        stop_loss_pct=settings.execution.stop_loss_pct,
+        max_hold_days=settings.execution.max_hold_days,
+        edge_gone_threshold=settings.execution.edge_gone_threshold,
+        trailing_stop_activate=settings.execution.trailing_stop_activate,
+        trailing_stop_distance=settings.execution.trailing_stop_distance,
+        take_profit_pct=settings.execution.take_profit_pct,
+        capital_rotation_edge=settings.execution.capital_rotation_edge,
+    )
     order_router = OrderRouter(settings, kalshi, db, position_manager=position_manager, polymarket=polymarket_client)
     fill_tracker = FillTracker(kalshi, db, poll_timeout=settings.execution.order_poll_timeout_seconds, polymarket=polymarket_client)
 
@@ -1080,6 +1170,7 @@ async def main():
         except Exception as e:
             logger.warning(f"Database close failed: {e}")
 
+        _release_pid_lock()
         logger.info("PolyEdge stopped.")
 
 

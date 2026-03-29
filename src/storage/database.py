@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS orders (
     fill_price REAL,
     cancelled_at TEXT,
     rejection_reason TEXT,
+    exchange_order_id TEXT,  -- Kalshi/Polymarket order ID for cancel/lookup
     FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_orders_market ON orders(market_id);
@@ -464,6 +465,12 @@ class Database:
                 "ON trades(order_id, side)"
             )
             logger.info("Migration v7: added unique constraint on trades(order_id, side)")
+
+        # Migration: add exchange_order_id to orders for proper cancel operations
+        order_cols = {row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
+        if "exchange_order_id" not in order_cols:
+            conn.execute("ALTER TABLE orders ADD COLUMN exchange_order_id TEXT")
+            logger.info("Migration: added exchange_order_id column to orders")
 
         # Migration v7: add unique constraint on market_snapshots
         if "idx_snapshots_unique" not in {
