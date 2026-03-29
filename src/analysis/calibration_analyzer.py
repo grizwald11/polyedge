@@ -124,8 +124,13 @@ class CalibrationAnalyzer:
             avg_actual = sum(float(r["actual_outcome"]) for r in records) / len(records)
             bias = avg_actual - avg_predicted
 
-            # Only suggest adjustment if bias is meaningful (>3%)
-            if abs(bias) > 0.03:
+            # Use sample-size-aware threshold: smaller samples need larger bias
+            # to be statistically meaningful. Approximate 95% CI width for a
+            # proportion: ~1.96 * sqrt(p*(1-p)/n). Use 0.5 as worst-case p.
+            n = len(records)
+            import math
+            threshold = max(0.03, 1.96 * math.sqrt(0.25 / n))
+            if abs(bias) > threshold:
                 adjustments[cat] = round(bias, 3)
 
         return adjustments

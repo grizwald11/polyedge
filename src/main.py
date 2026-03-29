@@ -488,6 +488,9 @@ async def _execute_signals(
             order = order_builder.build_limit_order(market, signal, contracts, price)
         else:
             order = order_builder.build_market_order(market, signal, contracts)
+        if order is None:
+            logger.warning(f"Could not build order for {signal.market_id} — missing tokens")
+            continue
         proposed_cost = order.cost
 
         risk_result = risk_engine.check_all(signal, market, contracts, proposed_cost)
@@ -1057,6 +1060,18 @@ async def main():
         mismatches = await position_manager.sync_with_kalshi(kalshi)
         if mismatches:
             logger.warning(f"Position sync found {mismatches} mismatches — review manually")
+
+        # M-25: Check for orphaned orders from a previous crash
+        try:
+            open_orders = await asyncio.wait_for(kalshi.get_open_orders(), timeout=10.0)
+            if open_orders:
+                logger.warning(
+                    f"Found {len(open_orders)} open orders on Kalshi at startup — "
+                    f"these may be orphaned from a previous crash. "
+                    f"Order IDs: {[o.get('order_id', '?') for o in open_orders[:5]]}"
+                )
+        except Exception as e:
+            logger.info(f"Could not check for orphaned orders: {e}")
 
     # Alerts
     alert_manager = AlertManager()

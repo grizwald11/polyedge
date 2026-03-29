@@ -42,6 +42,19 @@ class CalibrationTracker:
         Returns:
             Database row ID
         """
+        if not (0.0 <= predicted_probability <= 1.0):
+            logger.warning(
+                f"Invalid probability {predicted_probability} for {market_id} — "
+                f"clamping to [0, 1]"
+            )
+            predicted_probability = max(0.0, min(1.0, predicted_probability))
+        if not (0.0 <= market_price <= 1.0):
+            logger.warning(
+                f"Invalid market_price {market_price} for {market_id} — "
+                f"clamping to [0, 1]"
+            )
+            market_price = max(0.0, min(1.0, market_price))
+
         record = CalibrationRecord(
             market_id=market_id,
             market_question=market_question,
@@ -114,10 +127,23 @@ class CalibrationTracker:
         valid_count = 0
         skipped_null = 0
         skipped_bad = 0
+        skipped_stale = 0
         for r in records:
             if r["actual_outcome"] is None:
                 skipped_null += 1
                 continue
+            # Skip predictions that took >90 days to resolve — they reflect
+            # world changes, not forecasting accuracy.
+            if r.get("predicted_at") and r.get("resolved_at"):
+                try:
+                    pred_time = datetime.fromisoformat(r["predicted_at"])
+                    res_time = datetime.fromisoformat(r["resolved_at"])
+                    staleness_days = (res_time - pred_time).total_seconds() / 86400
+                    if staleness_days > 90:
+                        skipped_stale += 1
+                        continue
+                except (ValueError, TypeError):
+                    pass  # Proceed with the record if dates are unparseable
             try:
                 outcome = float(r["actual_outcome"])
                 predicted = float(r["predicted_probability"])
@@ -132,11 +158,12 @@ class CalibrationTracker:
             total += (predicted - outcome) ** 2
             valid_count += 1
 
-        if skipped_null or skipped_bad:
+        if skipped_null or skipped_bad or skipped_stale:
             logger.info(
                 f"Brier score: {valid_count} valid records, "
                 f"{skipped_null} skipped (cancelled/NULL outcome), "
-                f"{skipped_bad} skipped (bad data)"
+                f"{skipped_bad} skipped (bad data), "
+                f"{skipped_stale} skipped (stale >90d)"
             )
 
         if valid_count == 0:

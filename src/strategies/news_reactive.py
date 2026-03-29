@@ -36,7 +36,9 @@ class NewsReactiveStrategy:
         self.news = news_ingestion
         self.settings = settings
         self.db = db
-        self.min_edge = settings.trading.min_edge_ai
+        # News-driven moves are fast and temporary — a smaller edge with a
+        # short window can still be profitable, so use a lower threshold.
+        self.min_edge = settings.trading.min_edge_news
 
     async def scan_for_opportunities(
         self, markets: list[Market]

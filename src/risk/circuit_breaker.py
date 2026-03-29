@@ -77,7 +77,15 @@ class CircuitBreaker:
             logger.critical(f"CIRCUIT BREAKER HALTED: {reason}")
             return False
 
-        # Check consecutive losing days
+        # Consecutive losing day state machine:
+        #   0-2 losing days → normal operation (full Kelly multiplier)
+        #   3-4 losing days → reduced_sizing=True (quarter-Kelly via 0.5 multiplier)
+        #   5+  losing days → full halt (manual review required)
+        #
+        # State transitions:
+        #   record_daily_result(pnl<0) increments _consecutive_losing_days
+        #   record_daily_result(pnl>=0) resets to 0 AND clears reduced_sizing
+        #   _update_consecutive_losses() checks for missed day boundaries on restart
         self._update_consecutive_losses()
         if self._consecutive_losing_days >= 5:
             reason = "5 consecutive losing days — manual review required"

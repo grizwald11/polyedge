@@ -36,7 +36,12 @@ class RiskEngine:
         self.db = db
         self.portfolio_risk = portfolio_risk
         self._bankroll_override: float | None = None  # Live-synced bankroll
-        self.cooldown_seconds = 3600  # 1 hour cooldown after exit
+        # Cooldown after exiting a position: longer for losses to avoid
+        # re-entering bad positions, shorter for profitable exits.
+        self.cooldown_loss_seconds = 14400   # 4 hours after a loss exit
+        self.cooldown_profit_seconds = 3600  # 1 hour after a profit exit
+        self.cooldown_seconds = 3600  # Default for legacy/unknown exits
+        self._cooldown_durations: dict[str, int] = {}  # market_id -> seconds
         # Load persisted cooldowns if DB available, otherwise start empty
         if db is not None:
             self._cooldowns: dict[str, datetime] = db.load_cooldowns(self.cooldown_seconds)
@@ -112,6 +117,10 @@ class RiskEngine:
         max_correlated = bankroll * self.settings.trading.max_correlated_exposure_pct
         if self.portfolio_risk is not None:
             correlated_exposure = self.portfolio_risk.get_correlated_exposure(signal.market_id)
+            logger.debug(
+                "Correlated exposure check (event-based): %s = $%.2f",
+                signal.market_id, correlated_exposure,
+            )
             if correlated_exposure + proposed_cost > max_correlated:
                 failed.append(
                     f"Correlated exposure exceeded for event group of {signal.market_id}: "
@@ -119,6 +128,10 @@ class RiskEngine:
                 )
         else:
             strategy_exposure = self.positions.get_strategy_exposure(signal.strategy)
+            logger.info(
+                "Correlated exposure check (strategy-based fallback, no PortfolioRisk): "
+                "%s = $%.2f", signal.strategy.value, strategy_exposure,
+            )
             if strategy_exposure + proposed_cost > max_correlated:
                 failed.append(
                     f"Correlated exposure exceeded for {signal.strategy.value}: "
@@ -139,8 +152,14 @@ class RiskEngine:
         elif market.liquidity > 0 and proposed_cost > market.liquidity * 0.05:
             warnings.append("Order >5% of book depth — expect slippage")
 
-        # 7. Existing position check
+        # 7. Existing position check (including cross-strategy hedge detection)
         if self.positions.has_position(signal.market_id):
+            existing = self.positions.get_position(signal.market_id)
+            if existing and hasattr(existing, 'direction') and existing.direction != signal.direction:
+                warnings.append(
+                    f"Hedge detected: new {signal.direction.value} opposes existing "
+                    f"{existing.direction.value} in {signal.market_id}"
+                )
             failed.append(f"Already have position in {signal.market_id}")
 
         # 8a. Minimum confidence check — reject signals with very low confidence
@@ -165,6 +184,11 @@ class RiskEngine:
                 f"Invalid or non-positive edge: {signal.edge} — no favorable view"
             )
         elif signal.edge >= signal.probability_estimate:
+            logger.warning(
+                "Impossible edge detected: edge (%.1f%%) >= probability (%.1f%%) "
+                "for %s — possible ensemble bug",
+                signal.edge * 100, signal.probability_estimate * 100, signal.market_id,
+            )
             failed.append(
                 f"Edge ({signal.edge:.1%}) >= probability "
                 f"({signal.probability_estimate:.1%}) — implies market_price <= 0"
@@ -182,16 +206,20 @@ class RiskEngine:
         elif days is not None and days > 365:
             warnings.append(f"Long-dated market: {days:.0f} days to resolution")
 
-        # 10. Cooldown check
+        # 10. Cooldown check — duration depends on whether last exit was a loss
         if signal.market_id in self._cooldowns:
             last_exit = self._cooldowns[signal.market_id]
+            cd_duration = self._cooldown_durations.get(
+                signal.market_id, self.cooldown_seconds
+            )
             elapsed = (datetime.now(timezone.utc) - last_exit).total_seconds()
-            if elapsed < self.cooldown_seconds:
-                remaining = self.cooldown_seconds - elapsed
+            if elapsed < cd_duration:
+                remaining = cd_duration - elapsed
                 failed.append(f"Cooldown active: {remaining:.0f}s remaining for {signal.market_id}")
             else:
                 # Clean up expired cooldown
                 del self._cooldowns[signal.market_id]
+                self._cooldown_durations.pop(signal.market_id, None)
                 if self.db is not None:
                     self.db.delete_cooldown(signal.market_id)
 
@@ -224,10 +252,19 @@ class RiskEngine:
 
         return result
 
-    def record_exit(self, market_id: str):
-        """Record a position exit for cooldown tracking."""
+    def record_exit(self, market_id: str, pnl: float = 0.0):
+        """Record a position exit for cooldown tracking.
+
+        Losses get a longer cooldown (4h) than profits (1h) to
+        reduce re-entry into positions that just burned us.
+        """
         now = datetime.now(timezone.utc)
         self._cooldowns[market_id] = now
+        # Store the applicable cooldown duration for this specific exit
+        if pnl < 0:
+            self._cooldown_durations[market_id] = self.cooldown_loss_seconds
+        else:
+            self._cooldown_durations[market_id] = self.cooldown_profit_seconds
         if self.db is not None:
             self.db.save_cooldown(market_id, now)
 

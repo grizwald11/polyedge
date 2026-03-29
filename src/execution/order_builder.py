@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 from src.config import Settings
 from src.core.models import (
@@ -43,7 +44,7 @@ class OrderBuilder:
         signal: Signal,
         size: int,
         price: float,
-    ) -> Order:
+    ) -> Optional[Order]:
         """Build a GTC limit (maker) order.
 
         Args:
@@ -53,9 +54,12 @@ class OrderBuilder:
             price: Price per contract in dollars (0.01-0.99)
 
         Returns:
-            Order ready for routing
+            Order ready for routing, or None if market tokens are missing
         """
-        side, token_id, k_side = self._resolve_side_and_token(market, signal.direction)
+        resolved = self._resolve_side_and_token(market, signal.direction)
+        if resolved is None:
+            return None
+        side, token_id, k_side = resolved
         price = self._clamp_price(price)
         fee_dollars = self._calculate_fee(market.platform, size, price, maker=True)
         cost = round(price * size + fee_dollars, 4)
@@ -102,9 +106,12 @@ class OrderBuilder:
             size: Number of contracts
 
         Returns:
-            Order ready for routing
+            Order ready for routing, or None if market tokens are missing
         """
-        side, token_id, k_side = self._resolve_side_and_token(market, signal.direction)
+        resolved = self._resolve_side_and_token(market, signal.direction)
+        if resolved is None:
+            return None
+        side, token_id, k_side = resolved
 
         # Use current market price for the appropriate side
         if signal.direction in (Direction.BUY_YES, Direction.SELL_YES):
@@ -151,36 +158,34 @@ class OrderBuilder:
 
     def _resolve_side_and_token(
         self, market: Market, direction: Direction
-    ) -> tuple[Side, str, str]:
+    ) -> Optional[tuple[Side, str, str]]:
         """Map a Direction to (Side, token_id, kalshi_side).
 
         Returns:
-            Tuple of (Side, token_id, kalshi_side) where kalshi_side is "yes" or "no".
+            Tuple of (Side, token_id, kalshi_side) or None if token is missing.
         """
         if direction == Direction.BUY_YES:
             token = market.yes_token
             if token:
                 return Side.BUY, token.token_id, "yes"
-            else:
-                raise ValueError(f"Missing YES token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         elif direction == Direction.BUY_NO:
             token = market.no_token
             if token:
                 return Side.BUY, token.token_id, "no"
-            else:
-                raise ValueError(f"Missing NO token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         elif direction == Direction.SELL_YES:
             token = market.yes_token
             if token:
                 return Side.SELL, token.token_id, "yes"
-            else:
-                raise ValueError(f"Missing YES token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
         else:  # SELL_NO
             token = market.no_token
             if token:
                 return Side.SELL, token.token_id, "no"
-            else:
-                raise ValueError(f"Missing NO token for {market.ticker} ({market.platform.value}) — cannot build order without real token ID")
+
+        logger.warning(
+            "Missing %s token for %s (%s) — cannot build order",
+            direction.value, market.ticker, market.platform.value,
+        )
+        return None
 
     @staticmethod
     def _clamp_price(price: float) -> float:

@@ -186,8 +186,10 @@ class FillTracker:
         if delta < 0:
             logger.warning(
                 f"Non-monotonic filled_count for {order.id}: "
-                f"API={filled_count}, recorded={already_recorded} — possible API anomaly"
+                f"API={filled_count}, recorded={already_recorded} — using max defensively"
             )
+            # Use max defensively: don't lose track of already-recorded fills
+            self._partial_recorded[order.id] = max(already_recorded, filled_count)
             return None
         if delta == 0:
             return None

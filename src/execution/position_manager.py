@@ -22,6 +22,10 @@ DEFAULT_TRAILING_STOP_ACTIVATE = 0.12  # Activate trailing stop after 12% gain
 DEFAULT_TRAILING_STOP_DISTANCE = 0.50  # Trail 50% of peak gain (e.g., peak +30% → exit at +15%)
 DEFAULT_TAKE_PROFIT_PCT = 0.80     # Take profit at 80% of max theoretical gain
 DEFAULT_CAPITAL_ROTATION_EDGE = 0.40  # When exposure >35%, exit profitable positions with <40% remaining edge
+# Capital rotation frees up capital when portfolio is highly exposed by exiting
+# positions where most of the expected edge has already been captured (>60% realized).
+# The 0.40 threshold means: if only 40% of original edge remains AND total exposure
+# exceeds 35%, consider exiting to redeploy capital into higher-edge opportunities.
 
 if __name__ != "__main__":
     from typing import TYPE_CHECKING
@@ -307,9 +311,9 @@ class PositionManager:
             if loss_pct >= stop_loss_pct:
                 price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
                 if price_age > 120:
-                    logger.debug(
-                        f"Skipping stop_loss for {position.market_id}: "
-                        f"price data stale ({price_age:.0f}s old)"
+                    logger.warning(
+                        f"Stop-loss blocked by stale price for {position.market_id}: "
+                        f"loss={loss_pct:.0%}, price age={price_age:.0f}s"
                     )
                 else:
                     return True, f"stop_loss: {loss_pct:.0%} loss exceeds {stop_loss_pct:.0%} threshold"

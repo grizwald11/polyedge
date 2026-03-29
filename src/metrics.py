@@ -28,6 +28,12 @@ class Metrics:
         self.open_positions: int = 0
         self._started_at: float = time.time()
         self._daily_reset_date: str = ""
+        # M-22: Signal selection tracking
+        self.signals_generated: int = 0
+        self.signals_risk_gated: int = 0
+        self.signals_executed: int = 0
+        # M-21: Edge vs return correlation
+        self._edge_return_log: list[dict] = []
 
     def _check_daily_reset(self):
         """Reset daily counters at midnight UTC."""
@@ -75,8 +81,21 @@ class Metrics:
             })
         )
 
+    def record_signal_generated(self):
+        """Record a signal was generated (M-22)."""
+        self.signals_generated += 1
+
+    def record_signal_risk_gated(self):
+        """Record a signal was blocked by risk gates (M-22)."""
+        self.signals_risk_gated += 1
+
+    def record_signal_executed(self):
+        """Record a signal was executed (M-22)."""
+        self.signals_executed += 1
+
     def record_trade(
-        self, market_id: str, direction: str, size: int, price: float
+        self, market_id: str, direction: str, size: int, price: float,
+        predicted_edge: float = 0.0,
     ):
         """Record a trade execution."""
         logger.info(
@@ -86,8 +105,23 @@ class Metrics:
                 "direction": direction,
                 "size": size,
                 "price": price,
+                "predicted_edge": round(predicted_edge, 4),
             })
         )
+
+    def record_closed_position(
+        self, market_id: str, predicted_edge: float, realized_return: float,
+        days_held: float,
+    ):
+        """Record edge vs realized return for a closed position (M-21)."""
+        entry = {
+            "market": market_id,
+            "predicted_edge": round(predicted_edge, 4),
+            "realized_return": round(realized_return, 4),
+            "days_held": round(days_held, 1),
+        }
+        self._edge_return_log.append(entry)
+        logger.info(json.dumps({"event": "position_closed", **entry}))
 
     def get_health_status(self) -> dict:
         """Return current health metrics for dashboard/alerts."""
@@ -106,6 +140,9 @@ class Metrics:
             "open_positions": self.open_positions,
             "last_cycle_duration_ms": round(self.last_cycle_duration_ms, 1),
             "last_cycle_signals": self.last_cycle_signals,
+            "signals_generated": self.signals_generated,
+            "signals_risk_gated": self.signals_risk_gated,
+            "signals_executed": self.signals_executed,
             "seconds_since_last_cycle": (
                 round(seconds_since_last_cycle, 0)
                 if seconds_since_last_cycle is not None

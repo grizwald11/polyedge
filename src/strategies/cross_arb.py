@@ -128,9 +128,10 @@ class CrossArbStrategy:
         # Check if questions differ only in date-like suffixes.
         import re
         date_pattern = re.compile(
-            r'(before |after |during |by )'
+            r'(before |after |during |by |by end of |within )'
             r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|'
-            r'march|april|may|june|july|august|september|october|november|december)'
+            r'march|april|may|june|july|august|september|october|november|december'
+            r'|q[1-4]|next quarter|next month|\d+\s*months?)'
             r'[^?]*',
             re.IGNORECASE,
         )
@@ -316,7 +317,10 @@ class CrossArbStrategy:
                 continue
 
             # Check cached relationship first
-            cached = self._get_cached_relationship(ticker_a, ticker_b)
+            cached = self._get_cached_relationship(
+                ticker_a, ticker_b,
+                price_a=market_a.yes_price, price_b=market_b.yes_price,
+            )
             if cached is not None:
                 if cached.get("arbitrage_exists"):
                     signal = self._build_subset_signal(
@@ -329,6 +333,8 @@ class CrossArbStrategy:
             # Validate with Claude
             relationship = await self._validate_relationship(market_a, market_b)
             if relationship:
+                relationship["cached_price_a"] = market_a.yes_price
+                relationship["cached_price_b"] = market_b.yes_price
                 self._cache_relationship(ticker_a, ticker_b, relationship)
                 if relationship.get("arbitrage_exists"):
                     signal = self._build_subset_signal(
@@ -413,11 +419,14 @@ class CrossArbStrategy:
 
         return None
 
-    def _get_cached_relationship(self, ticker_a: str, ticker_b: str) -> Optional[dict]:
+    def _get_cached_relationship(
+        self, ticker_a: str, ticker_b: str,
+        price_a: float = 0.0, price_b: float = 0.0,
+    ) -> Optional[dict]:
         """Check for a cached arb relationship in the database.
 
-        Returns None if no cache exists or if the cache is older than 1 hour
-        (stale relationships can be misleading when prices move).
+        Returns None if no cache exists, if the cache is older than 30 minutes,
+        or if either market's price has moved >10% since the cache was created.
         """
         conn = self.db._get_conn()
         try:
@@ -427,7 +436,7 @@ class CrossArbStrategy:
                 (ticker_a, ticker_b, ticker_b, ticker_a),
             ).fetchone()
             if row:
-                # TTL: invalidate cache older than 1 hour
+                # TTL: invalidate cache older than 30 minutes
                 validated_at = row["validated_at"]
                 if validated_at:
                     from datetime import datetime, timedelta, timezone
@@ -439,7 +448,26 @@ class CrossArbStrategy:
                     except (ValueError, TypeError):
                         return None  # Invalid timestamp — treat as expired
                 import json
-                return json.loads(row["relationship_data"])
+                data = json.loads(row["relationship_data"])
+
+                # Price-based invalidation: if either market moved >10% since
+                # cache time, the relationship may have changed materially.
+                cached_price_a = data.get("cached_price_a", 0)
+                cached_price_b = data.get("cached_price_b", 0)
+                if cached_price_a > 0 and abs(price_a - cached_price_a) > 0.10:
+                    logger.debug(
+                        f"Arb cache price-invalidated for {ticker_a}: "
+                        f"{cached_price_a:.2f} → {price_a:.2f}"
+                    )
+                    return None
+                if cached_price_b > 0 and abs(price_b - cached_price_b) > 0.10:
+                    logger.debug(
+                        f"Arb cache price-invalidated for {ticker_b}: "
+                        f"{cached_price_b:.2f} → {price_b:.2f}"
+                    )
+                    return None
+
+                return data
             return None
         except Exception as e:
             logger.debug(f"Arb cache lookup failed for {ticker_a}/{ticker_b}: {e}")

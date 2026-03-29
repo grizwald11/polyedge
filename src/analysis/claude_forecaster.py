@@ -112,6 +112,21 @@ class ClaudeForecaster:
                 f"exceeds soft limit ({budget:,})"
             )
 
+    def is_budget_exceeded(self) -> bool:
+        """Check if the hard daily token budget has been exceeded.
+
+        The hard limit is 2x the configured soft budget. When exceeded,
+        no further API calls should be made until the next day.
+        """
+        hard_limit = self.settings.claude.daily_token_budget * 2
+        if self._total_tokens_today > hard_limit:
+            logger.critical(
+                f"Claude API hard budget exceeded: {self._total_tokens_today:,} tokens "
+                f"> {hard_limit:,} hard limit — refusing further API calls today"
+            )
+            return True
+        return False
+
     @staticmethod
     def _extract_text(response) -> str | None:
         """Safely extract text from Claude API response. Returns None if empty."""
@@ -151,6 +166,16 @@ class ClaudeForecaster:
         Returns:
             ForecastResult with probability estimate and reasoning
         """
+        # Hard budget check — refuse API calls if daily hard limit exceeded
+        if self.is_budget_exceeded():
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0.0, market.yes_price - 0.20),
+                confidence_high=min(1.0, market.yes_price + 0.20),
+                reasoning="Budget exceeded — returning market price as estimate",
+                model_used="none (budget exceeded)",
+            )
+
         # Check forecast cache — avoid re-calling Claude for same market.
         # Invalidate if the market price has moved >5% since the cached forecast,
         # since a large price move means the market has new information and the
@@ -360,6 +385,9 @@ class ClaudeForecaster:
         Returns:
             ForecastResult or None on failure
         """
+        if self.is_budget_exceeded():
+            return None
+
         model = self._select_model(position_value)
         start_time = time.monotonic()
 
@@ -417,6 +445,9 @@ class ClaudeForecaster:
 
         Falls back to single assessment on error.
         """
+        if self.is_budget_exceeded():
+            return None
+
         model = self._select_model(position_value)
         category = classify_market(market)
         temp_low = self.settings.claude.cross_check_temp_low

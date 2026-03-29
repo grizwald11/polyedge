@@ -233,7 +233,15 @@ class NewsResearcher:
                     data = response.json()
                 break  # Success
             except httpx.HTTPStatusError as e:
-                if e.response.status_code in (400, 401, 403):
+                if e.response.status_code == 429:
+                    # Rate limit — use exponential backoff, not 1h cooldown
+                    wait = min(30, 2 ** (attempt + 2))
+                    logger.warning(f"Serper rate limited (429), backing off {wait}s")
+                    if attempt < max_retries:
+                        await asyncio.sleep(wait)
+                        continue
+                    return []
+                elif e.response.status_code in (400, 401, 403):
                     try:
                         detail = e.response.json().get("message", str(e.response.status_code))
                     except Exception:
@@ -316,6 +324,11 @@ class NewsResearcher:
                 return False
             except ValueError:
                 continue
+        # All date formats exhausted — keep article but log for visibility
+        logger.info(
+            f"Could not parse date '{result.date}' for '{result.title[:50]}...' "
+            f"— keeping article (staleness unknown)"
+        )
         return False
 
     def _score_relevance(self, result: NewsResult, market_question: str) -> float:

@@ -209,7 +209,7 @@ class AIProbabilityStrategy:
                     predicted_at = datetime.fromisoformat(latest["predicted_at"])
                     age = datetime.now(timezone.utc) - predicted_at
                     price_move = abs(market.yes_price - latest["market_price_at_prediction"])
-                    if age < timedelta(hours=48) and price_move < 0.10:
+                    if age < timedelta(hours=24) and price_move < 0.05:
                         logger.debug(
                             f"Skipping {market.ticker}: recent prediction "
                             f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f})"
@@ -223,9 +223,9 @@ class AIProbabilityStrategy:
         # Category accuracy gating: skip categories where we're poorly calibrated
         cat_brier = self._category_brier_scores.get(category.value)
         if cat_brier is not None and cat_brier > 0.30:
-            logger.info(
-                f"Skipping {market.ticker}: category {category.value} has poor "
-                f"Brier score ({cat_brier:.3f} > 0.30)"
+            logger.warning(
+                f"Category accuracy gate: skipping {market.ticker} — "
+                f"{category.value} Brier score {cat_brier:.3f} > 0.30 threshold"
             )
             return None
         # Raise min edge for categories with mediocre calibration (Brier 0.20-0.30)
@@ -269,7 +269,18 @@ class AIProbabilityStrategy:
         # For extreme-price markets (<15¢ or >85¢), TIGHTEN the threshold:
         # a 10% absolute divergence on a $0.05 market is a 200% relative
         # disagreement — almost certainly a hallucination, not edge.
-        max_div = self.settings.claude.max_divergence_from_market
+        # Per-category divergence thresholds: data-rich categories (Politics,
+        # Fed) tend to be well-priced, so large Claude divergences are more
+        # likely hallucinations. Uncertain categories (Culture, World) can
+        # legitimately diverge more.
+        base_max_div = self.settings.claude.max_divergence_from_market
+        category_div_overrides = {
+            "Politics": 0.30, "Elections": 0.30, "Fed": 0.30,
+            "Economics": 0.30, "Financials": 0.30,
+            "World": 0.45, "Geopolitics": 0.45,
+            "Entertainment": 0.50, "Culture": 0.50,
+        }
+        max_div = category_div_overrides.get(category.value, base_max_div)
         divergence = abs(forecast.probability - market.yes_price)
         if market.yes_price < 0.15 or market.yes_price > 0.85:
             max_div = min(max_div, 0.25)

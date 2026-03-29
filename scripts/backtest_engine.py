@@ -81,6 +81,7 @@ class BacktestResult:
     calmar_ratio: float | None = None
     avg_edge_predicted: float = 0.0
     avg_edge_realized: float = 0.0
+    cb_skipped: int = 0
     equity_curve: list[float] = field(default_factory=list)
     daily_returns: list[float] = field(default_factory=list)
     trades: list[BacktestTrade] = field(default_factory=list)
@@ -250,6 +251,7 @@ class BacktestEngine:
         self.forecaster = forecaster or MockForecaster(db)
         self.strategy_filter = strategy_filter
         self.kelly = KellySizer(settings)
+        self.circuit_breaker = CircuitBreaker(settings, db)
 
     def run(self, bankroll: float = 500.0) -> list[BacktestResult]:
         """Run the backtest.
@@ -311,6 +313,13 @@ class BacktestEngine:
         edges_predicted: list[float] = []
         edges_realized: list[float] = []
         equity_curve = [bankroll]
+        cb_skipped = 0
+
+        # Reset circuit breaker for clean backtest state
+        self.circuit_breaker.reset()
+        # Track daily P&L for circuit breaker day-boundary resets
+        current_day: str | None = None
+        daily_pnl = 0.0
 
         for snap in all_snapshots:
             market_id = snap["market_id"]
@@ -324,6 +333,7 @@ class BacktestEngine:
                 if pos_id in end_dates and timestamp >= end_dates[pos_id]:
                     if pos_id in outcomes:
                         pnl = portfolio.resolve_position(pos_id, outcomes[pos_id])
+                        daily_pnl += pnl
                         resolved_ids.append(pos_id)
                         for t in trades:
                             if t.market_id == pos_id and not t.resolved:
@@ -335,9 +345,23 @@ class BacktestEngine:
                                 equity_curve.append(equity_curve[-1] + pnl)
                                 break
 
+            # Day boundary: reset circuit breaker daily halt and record daily result
+            snap_day = timestamp[:10] if len(timestamp) >= 10 else timestamp
+            if current_day is not None and snap_day != current_day:
+                if daily_pnl != 0.0:
+                    self.circuit_breaker.record_daily_result(daily_pnl)
+                self.circuit_breaker.reset_daily()
+                daily_pnl = 0.0
+            current_day = snap_day
+
             if market_id not in market_lookup:
                 continue
             if portfolio.has_position(market_id):
+                continue
+
+            # Circuit breaker check — skip trade if halted
+            if not self.circuit_breaker.check(portfolio.bankroll):
+                cb_skipped += 1
                 continue
 
             # Get forecast
@@ -380,7 +404,15 @@ class BacktestEngine:
             if contracts <= 0:
                 continue
 
-            # Simulate fill
+            # Simulate fill with realistic miss/partial fill rates:
+            # 15% of orders miss entirely, 25% of large orders (>50 contracts)
+            # get partial fills.
+            import random
+            if random.random() < 0.15:
+                continue  # Simulated order miss
+            if contracts > 50 and random.random() < 0.25:
+                contracts = max(1, int(contracts * random.uniform(0.4, 0.8)))
+
             portfolio.open_position(market_id, direction, contracts, order_price, strategy)
             edges_predicted.append(abs_edge)
 
@@ -411,10 +443,14 @@ class BacktestEngine:
                         break
 
         # Build result
-        return [self._compute_result(
+        result = self._compute_result(
             "all" if not self.strategy_filter else self.strategy_filter,
             trades, equity_curve, edges_predicted, edges_realized, bankroll,
-        )]
+        )
+        result.cb_skipped = cb_skipped
+        if cb_skipped > 0:
+            logger.info(f"Circuit breaker skipped {cb_skipped} potential trades")
+        return [result]
 
     def _compute_result(
         self, strategy: str, trades: list[BacktestTrade],
@@ -587,6 +623,7 @@ def format_result(result: BacktestResult, bankroll: float = 500.0) -> str:
         f"  Max Drawdown:  ${result.max_drawdown:,.2f} ({result.max_drawdown_pct:.1%})",
         f"  Avg Edge Pred: {result.avg_edge_predicted:.1%}",
         f"  Avg Edge Real: {result.avg_edge_realized:.1%}",
+        f"  CB Skipped:    {result.cb_skipped}",
     ]
     if result.brier_score is not None:
         lines.append(f"  Brier Score:   {result.brier_score:.3f}")

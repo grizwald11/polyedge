@@ -41,7 +41,7 @@ class OrderResult:
 class OrderRouter:
     """Routes orders to paper or live execution."""
 
-    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager=None, polymarket=None):
+    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager: Optional[object] = None, polymarket: Optional[object] = None):
         self.settings = settings
         self.kalshi = kalshi
         self.polymarket = polymarket  # Optional PolymarketClient
@@ -49,6 +49,7 @@ class OrderRouter:
         self.position_manager = position_manager
         self._pending_order_cost: float = 0.0  # Total cost of unfilled pending orders
         self._pending_orders: dict[str, float] = {}  # order_id -> cost
+        self._pending_lock = asyncio.Lock()  # Protect pending order state
         self._session_confirmed = False  # Gate 3: first-trade confirmation
         self._session_confirm_time: float | None = None  # When gate 3 was confirmed
         self._session_confirm_ttl = self.GATE3_CONFIRMATION_TTL_SECONDS
@@ -61,7 +62,12 @@ class OrderRouter:
         return self._pending_order_cost
 
     def _add_pending(self, order_id: str, cost: float) -> None:
-        """Track a new pending (resting) order's cost."""
+        """Track a new pending (resting) order's cost.
+
+        Note: Caller should hold self._pending_lock when concurrent access
+        is possible (e.g., fill callbacks running during order placement).
+        In practice, the single-threaded asyncio loop serializes these calls.
+        """
         self._pending_orders[order_id] = cost
         self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
 
@@ -430,6 +436,8 @@ class OrderRouter:
         # Polymarket residency gate: require explicit non-US confirmation.
         # Polymarket is not legal for US persons — this gate prevents accidental
         # live trades without jurisdiction acknowledgment.
+        # NOTE: Intentionally uses env var (not config file) as a safety gate —
+        # env vars are harder to accidentally change and require explicit action.
         if not self._polymarket_residency_confirmed:
             import os
             if os.environ.get("CONFIRM_NON_US_POLYMARKET", "").lower() != "true":
@@ -541,9 +549,11 @@ class OrderRouter:
                 timeout=10.0,
             )
             for oo in open_orders:
+                price_match = abs(oo.get("yes_price", 0) / 100 - order.price) < 0.01
                 if (
                     oo.get("ticker") == order.market_id
                     and oo.get("count") == int(order.size)
+                    and price_match
                 ):
                     logger.warning(
                         f"Reconciliation found matching order on Kalshi: {oo.get('order_id')}"
@@ -613,7 +623,10 @@ class OrderRouter:
             )
             return response.strip().lower() in ("y", "yes")
         except asyncio.TimeoutError:
-            logger.warning("Live trade confirmation timed out after 60s — rejecting trade")
+            logger.critical(
+                "Gate 3 confirmation timed out after 60s — live trade rejected. "
+                "Bot may be running unattended without interactive confirmation."
+            )
             return False
         except (EOFError, KeyboardInterrupt):
             return False

@@ -148,12 +148,18 @@ class KellySizer:
         # contract changes the fee, and a single decrement may not suffice
         # for high-fee expensive contracts.
         if contracts > 0 and 0 < cost_price < 1:
-            while contracts > 0:
-                fee_cents = math.ceil(self.fee_rate * contracts * cost_price * (1.0 - cost_price))
+            # Binary search for max contracts that fit within kelly_dollars after fees.
+            lo, hi, best = 0, contracts, 0
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                fee_cents = math.ceil(self.fee_rate * mid * cost_price * (1.0 - cost_price))
                 fee_dollars = fee_cents / 100.0
-                if contracts * cost_price + fee_dollars <= kelly_dollars:
-                    break
-                contracts -= 1
+                if mid * cost_price + fee_dollars <= kelly_dollars:
+                    best = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            contracts = best
 
         # Minimum 1 contract if we have any edge and room,
         # but only if the single contract cost + fee stays within kelly_dollars.
@@ -197,7 +203,9 @@ class KellySizer:
             self._calibration_multiplier = 1.0
             return
 
-        if brier_score <= BRIER_GOOD:
+        if brier_score <= BRIER_EXCELLENT:
+            mult = 1.1  # Reward excellent calibration with modest sizing boost
+        elif brier_score <= BRIER_GOOD:
             mult = 1.0
         elif brier_score <= BRIER_FAIR:
             mult = 0.50

@@ -192,8 +192,12 @@ class TestCalibrationMultiplier:
     def test_default_multiplier_is_one(self, sizer):
         assert sizer.calibration_multiplier == 1.0
 
-    def test_excellent_brier_keeps_full_sizing(self, sizer):
+    def test_excellent_brier_boosts_sizing(self, sizer):
         sizer.update_calibration_multiplier(0.08)
+        assert sizer.calibration_multiplier == 1.1
+
+    def test_good_brier_keeps_full_sizing(self, sizer):
+        sizer.update_calibration_multiplier(0.15)
         assert sizer.calibration_multiplier == 1.0
 
     def test_fair_brier_reduces_to_50(self, sizer):
