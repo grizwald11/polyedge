@@ -35,7 +35,9 @@ class PolymarketCrossRef:
         Returns list of market dicts with 'question', 'yes_price',
         'volume', and 'url' keys.
         """
-        cache_key = f"polymarket_search_{query[:80]}"
+        from datetime import datetime, timezone
+        date_bucket = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H")
+        cache_key = f"polymarket_search_{date_bucket}_{query[:80]}"
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached

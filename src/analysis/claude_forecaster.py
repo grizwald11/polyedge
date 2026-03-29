@@ -34,9 +34,15 @@ class ClaudeForecaster:
             serper_api_key=settings.serper_api_key,
             searxng_url=settings.searxng_url,
         )
-        # Simple token usage tracking for cost awareness
+        # Token and cost tracking for budget awareness
         self._total_tokens_today: int = 0
+        self._total_cost_today: float = 0.0  # Estimated USD cost
         self._today_date: str = ""
+        # Per-million-token pricing (input/output) by model family
+        self._cost_per_million: dict[str, tuple[float, float]] = {
+            "claude-sonnet-4-6": (3.0, 15.0),
+            "claude-opus-4-6": (15.0, 60.0),
+        }
 
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
@@ -72,22 +78,32 @@ class ClaudeForecaster:
             category.value, self.settings.claude.temperature
         )
 
-    def _track_tokens(self, tokens: int):
+    def _estimate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
+        """Estimate USD cost for a Claude API call."""
+        prices = self._cost_per_million.get(model, (3.0, 15.0))
+        return (input_tokens * prices[0] + output_tokens * prices[1]) / 1_000_000
+
+    def _track_tokens(self, tokens: int, input_tokens: int = 0, output_tokens: int = 0, model: str = ""):
         """Track daily token usage for cost awareness."""
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != self._today_date:
             if self._today_date and self._total_tokens_today > 0:
-                logger.info(f"Claude API usage yesterday: {self._total_tokens_today:,} tokens")
+                logger.info(
+                    f"Claude API usage yesterday: {self._total_tokens_today:,} tokens, "
+                    f"~${self._total_cost_today:.2f}"
+                )
             self._today_date = today
             self._total_tokens_today = 0
+            self._total_cost_today = 0.0
         self._total_tokens_today += tokens
-        # Soft daily token budget warning (hardcoded; make configurable if needed)
-        DAILY_TOKEN_WARNING_THRESHOLD = 500_000
-        if self._total_tokens_today > DAILY_TOKEN_WARNING_THRESHOLD:
+        if input_tokens or output_tokens:
+            self._total_cost_today += self._estimate_cost(input_tokens, output_tokens, model)
+        budget = self.settings.claude.daily_token_budget
+        if self._total_tokens_today > budget:
             logger.warning(
                 f"Claude API daily token usage ({self._total_tokens_today:,}) "
-                f"exceeds soft limit ({DAILY_TOKEN_WARNING_THRESHOLD:,})"
+                f"exceeds soft limit ({budget:,})"
             )
 
     @staticmethod
@@ -171,7 +187,7 @@ class ClaudeForecaster:
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                 ),
-                timeout=60,  # Hard timeout — don't block cycle for >60s
+                timeout=self.settings.claude.api_timeout_seconds,
             )
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
@@ -183,7 +199,12 @@ class ClaudeForecaster:
                     parse_failed=True, model_used=model, latency_ms=latency_ms,
                 )
             tokens_used = response.usage.input_tokens + response.usage.output_tokens
-            self._track_tokens(tokens_used)
+            self._track_tokens(
+                tokens_used,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                model=model,
+            )
 
             # Parse JSON response
             forecast = self._parse_response(raw_text)
@@ -199,7 +220,8 @@ class ClaudeForecaster:
             return forecast
 
         except asyncio.TimeoutError:
-            logger.warning("Claude API call timed out after 60s")
+            timeout = self.settings.claude.api_timeout_seconds
+            logger.warning(f"Claude API call timed out after {timeout}s")
             return ForecastResult(
                 probability=market.yes_price,
                 confidence_low=max(0, market.yes_price - 0.25),
@@ -210,12 +232,58 @@ class ClaudeForecaster:
                 parse_failed=True,
             )
         except anthropic.RateLimitError:
-            logger.warning("Claude API rate limited, returning market price as fallback")
+            # Retry up to 3 times with exponential backoff before falling back
+            for retry_attempt in range(1, 4):
+                wait = 2 ** retry_attempt
+                logger.warning(
+                    f"Claude API rate limited, retrying in {wait}s "
+                    f"(attempt {retry_attempt}/3)"
+                )
+                await asyncio.sleep(wait)
+                try:
+                    client = self._get_client()
+                    response = await asyncio.wait_for(
+                        client.messages.create(
+                            model=model,
+                            max_tokens=self.settings.claude.max_tokens,
+                            temperature=temperature,
+                            system=SYSTEM_PROMPT,
+                            messages=[{"role": "user", "content": prompt}],
+                        ),
+                        timeout=self.settings.claude.api_timeout_seconds,
+                    )
+                    latency_ms = int((time.monotonic() - start_time) * 1000)
+                    raw_text = self._extract_text(response)
+                    if raw_text is None:
+                        continue
+                    tokens_used = response.usage.input_tokens + response.usage.output_tokens
+                    self._track_tokens(
+                        tokens_used,
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        model=model,
+                    )
+                    forecast = self._parse_response(raw_text)
+                    forecast.model_used = model
+                    forecast.tokens_used = tokens_used
+                    forecast.latency_ms = latency_ms
+                    forecast.raw_response = raw_text
+                    logger.info(
+                        f"Claude rate limit retry {retry_attempt} succeeded for "
+                        f"'{market.question[:50]}...'"
+                    )
+                    return forecast
+                except anthropic.RateLimitError:
+                    continue
+                except Exception:
+                    break
+
+            logger.warning("Claude API rate limit retries exhausted, returning market price as fallback")
             return ForecastResult(
                 probability=market.yes_price,
                 confidence_low=max(0, market.yes_price - 0.25),
                 confidence_high=min(1, market.yes_price + 0.25),
-                reasoning="Rate limited — using market price as fallback",
+                reasoning="Rate limited — retries exhausted, using market price as fallback",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
                 parse_failed=True,
@@ -261,7 +329,7 @@ class ClaudeForecaster:
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": custom_prompt}],
                 ),
-                timeout=60,
+                timeout=self.settings.claude.api_timeout_seconds,
             )
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
@@ -342,7 +410,7 @@ class ClaudeForecaster:
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                 ),
-                timeout=60,
+                timeout=self.settings.claude.api_timeout_seconds,
             )
             latency_ms = int((time.monotonic() - start) * 1000)
             raw_text = self._extract_text(response)

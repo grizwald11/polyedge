@@ -86,6 +86,8 @@ class NewsResearcher:
         # searxng_url kept for backward compatibility
         self.searxng_url = searxng_url
         self._serper_disabled = False  # Set True after credit/auth failures
+        self._serper_disabled_at: float = 0.0  # Monotonic time of disable
+        self._serper_cooldown_seconds: float = 3600.0  # Re-enable after 1 hour
 
     def generate_queries(self, market_question: str) -> list[str]:
         """Generate 2-3 targeted search queries from a market question.
@@ -137,6 +139,15 @@ class NewsResearcher:
             results = await self._search_ddg(query)
             if results:
                 return results
+
+        # Re-enable Serper after cooldown
+        if self._serper_disabled and self._serper_disabled_at > 0:
+            import time as _time
+            elapsed = _time.monotonic() - self._serper_disabled_at
+            if elapsed >= self._serper_cooldown_seconds:
+                logger.info("Serper API cooldown expired — re-enabling")
+                self._serper_disabled = False
+                self._serper_disabled_at = 0.0
 
         # Fall back to Serper if configured and not disabled
         if self.serper_api_key and not self._serper_disabled:
@@ -211,8 +222,10 @@ class NewsResearcher:
                     detail = e.response.json().get("message", str(e.response.status_code))
                 except Exception:
                     detail = str(e.response.status_code)
-                logger.warning(f"Serper API disabled for this session: {detail}")
+                import time as _time
+                logger.warning(f"Serper API disabled (1h cooldown): {detail}")
                 self._serper_disabled = True
+                self._serper_disabled_at = _time.monotonic()
             else:
                 logger.warning(f"Serper search failed for '{query}': {e}")
             return []
@@ -230,6 +243,39 @@ class NewsResearcher:
                 url=item.get("link", ""),
             ))
         return results
+
+    def _is_stale(self, result: NewsResult, max_age_days: int = 7) -> bool:
+        """Check if a result's date indicates it is too old to be useful."""
+        if not result.date:
+            return False  # No date — can't determine staleness, keep it
+        date_lower = result.date.lower()
+        # Check for obviously old relative dates
+        import re
+        weeks_match = re.search(r"(\d+)\s*week", date_lower)
+        if weeks_match:
+            weeks = int(weeks_match.group(1))
+            if weeks * 7 > max_age_days:
+                return True
+        months_match = re.search(r"(\d+)\s*month", date_lower)
+        if months_match:
+            return True  # Any "X months ago" is too old
+        days_match = re.search(r"(\d+)\s*day", date_lower)
+        if days_match:
+            days = int(days_match.group(1))
+            if days > max_age_days:
+                return True
+        # Try parsing absolute dates
+        for fmt in ("%Y-%m-%d", "%b %d, %Y", "%B %d, %Y", "%m/%d/%Y"):
+            try:
+                from datetime import datetime, timezone
+                parsed = datetime.strptime(result.date.strip()[:20], fmt).replace(tzinfo=timezone.utc)
+                age_days = (datetime.now(timezone.utc) - parsed).days
+                if age_days > max_age_days:
+                    return True
+                return False
+            except ValueError:
+                continue
+        return False
 
     def _score_relevance(self, result: NewsResult, market_question: str) -> float:
         """Score a result's relevance to the market question.
@@ -298,15 +344,20 @@ class NewsResearcher:
         for query in queries:
             results = await self.search(query)
             for r in results:
-                if r.url not in seen_urls:
-                    seen_urls.add(r.url)
+                normalized = _normalize_url(r.url) if r.url else r.url
+                if normalized not in seen_urls:
+                    seen_urls.add(normalized)
                     all_results.append(r)
 
         if not all_results:
             logger.info(f"No news results for: {market_question[:60]}")
             return ""
 
-        # Deduplicate, score by relevance, keep top results
+        # Filter stale results, deduplicate, score by relevance, keep top results
+        fresh_results = [r for r in all_results if not self._is_stale(r)]
+        if fresh_results:
+            all_results = fresh_results
+        # else: keep all results if everything is stale (better than nothing)
         all_results = self._deduplicate(all_results)
         all_results.sort(
             key=lambda r: self._score_relevance(r, market_question), reverse=True
@@ -338,6 +389,20 @@ class NewsResearcher:
             context = context[:MAX_CONTEXT_CHARS].rsplit("\n", 1)[0] + "\n..."
 
         return context
+
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for deduplication — strip query params, fragments, www prefix."""
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if host.startswith("www."):
+            host = host[4:]
+        # Keep scheme, normalized host, and path; drop query and fragment
+        return urlunparse((parsed.scheme, host, parsed.path.rstrip("/"), "", "", ""))
+    except Exception:
+        return url
 
 
 def _extract_source(url: str) -> str:

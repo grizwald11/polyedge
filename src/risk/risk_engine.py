@@ -62,6 +62,7 @@ class RiskEngine:
         market: Market,
         proposed_size: float,
         proposed_cost: float,
+        pending_order_cost: float = 0.0,
     ) -> RiskCheckResult:
         """Run all 10 risk checks on a proposed trade.
 
@@ -70,6 +71,7 @@ class RiskEngine:
             market: Market being traded
             proposed_size: Number of contracts
             proposed_cost: Total cost in dollars (price * size)
+            pending_order_cost: Total cost of unfilled pending orders
 
         Returns:
             RiskCheckResult with pass/fail and details
@@ -78,17 +80,14 @@ class RiskEngine:
         warnings = []
         bankroll = self.bankroll
 
-        # 1. Balance check
-        # NOTE: total_exposure only counts filled positions — pending (unfilled)
-        # orders are NOT included.  A proper fix requires tracking open orders in
-        # the OrderRouter and summing their cost here.  Until then, the
-        # max_total_exposure_pct headroom provides a safety buffer.
+        # 1. Balance check — includes both filled positions and pending orders
         total_exposure = self.positions.get_total_exposure()
+        committed = total_exposure + pending_order_cost
         logger.debug(
-            "Exposure check: total_exposure=$%.2f (pending orders not included)",
-            total_exposure,
+            "Exposure check: filled=$%.2f + pending=$%.2f = $%.2f committed",
+            total_exposure, pending_order_cost, committed,
         )
-        available = bankroll - total_exposure
+        available = bankroll - committed
         if proposed_cost > available:
             failed.append(f"Insufficient balance: need ${proposed_cost:.2f}, available ${available:.2f}")
 
@@ -100,8 +99,8 @@ class RiskEngine:
                 f"${max_position:.2f} ({self.settings.trading.max_position_pct:.0%} limit)"
             )
 
-        # 3. Total exposure limit (max 40% of bankroll)
-        new_total = total_exposure + proposed_cost
+        # 3. Total exposure limit (max 40% of bankroll) — includes pending
+        new_total = committed + proposed_cost
         max_total = bankroll * self.settings.trading.max_total_exposure_pct
         if new_total > max_total:
             failed.append(

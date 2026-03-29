@@ -47,10 +47,27 @@ class OrderRouter:
         self.polymarket = polymarket  # Optional PolymarketClient
         self.db = db
         self.position_manager = position_manager
+        self._pending_order_cost: float = 0.0  # Total cost of unfilled pending orders
+        self._pending_orders: dict[str, float] = {}  # order_id -> cost
         self._session_confirmed = False  # Gate 3: first-trade confirmation
         self._session_confirm_time: float | None = None  # When gate 3 was confirmed
         self._session_confirm_ttl = 3600  # Gate 3 expires after 1 hour
         self._log_gate_status()
+
+    @property
+    def pending_order_cost(self) -> float:
+        """Total cost of unfilled pending orders."""
+        return self._pending_order_cost
+
+    def _add_pending(self, order_id: str, cost: float) -> None:
+        """Track a new pending (resting) order's cost."""
+        self._pending_orders[order_id] = cost
+        self._pending_order_cost = sum(self._pending_orders.values())
+
+    def _remove_pending(self, order_id: str) -> None:
+        """Remove a pending order (filled, cancelled, or expired)."""
+        self._pending_orders.pop(order_id, None)
+        self._pending_order_cost = sum(self._pending_orders.values())
 
     def _log_gate_status(self):
         """Log live trading gate status at startup for visibility."""
@@ -286,15 +303,18 @@ class OrderRouter:
                     order.fill_price = order.price
             elif final_status == "resting":
                 order.status = OrderStatus.OPEN
+                self._add_pending(order.id, order.cost)
                 self._log_order(order)
                 logger.info(
                     f"[LIVE] Order resting: {order.side.value} {int(order.size)}x "
-                    f"{order.token_id} @ ${order.price:.2f}"
+                    f"{order.token_id} @ ${order.price:.2f} "
+                    f"(pending_cost=${self._pending_order_cost:.2f})"
                 )
                 return OrderResult(success=True, order=order, trade=None)
             elif final_status in ("canceled", "cancelled"):
                 order.status = OrderStatus.CANCELLED
                 order.cancelled_at = now
+                self._remove_pending(order.id)
                 self._log_order(order)
                 return OrderResult(
                     success=False, order=order, error="Order was cancelled"
@@ -323,6 +343,7 @@ class OrderRouter:
                 timestamp=now,
             )
 
+            self._remove_pending(order.id)
             self._log_order(order)
             self.db.log_trade(trade)
 
@@ -461,14 +482,20 @@ class OrderRouter:
 
         max_attempts = self.settings.execution.max_poll_attempts
         poll_delay = self.settings.execution.order_poll_delay_seconds
+        poll_timeout = self.settings.execution.order_poll_timeout_seconds
         for attempt in range(max_attempts):
             await asyncio.sleep(poll_delay)
             try:
-                order_data = await self.kalshi.get_order(kalshi_order_id)
+                order_data = await asyncio.wait_for(
+                    self.kalshi.get_order(kalshi_order_id),
+                    timeout=poll_timeout,
+                )
                 if order_data:
                     status = order_data.get("status", "").lower()
                     if status in ("executed", "canceled", "cancelled", "expired"):
                         return status
+            except asyncio.TimeoutError:
+                logger.warning(f"Order poll attempt {attempt + 1} timed out after {poll_timeout}s")
             except Exception as e:
                 logger.warning(f"Order poll attempt {attempt + 1} failed: {e}")
 
@@ -537,12 +564,14 @@ class OrderRouter:
                 (datetime.now(timezone.utc).isoformat(), order_id),
             )
             conn.commit()
+            self._remove_pending(order_id)
             logger.info(f"[PAPER] Cancelled order {order_id}")
             return True
 
         try:
             result = await self.kalshi.cancel_order(order_id)
             if result is not None:
+                self._remove_pending(order_id)
                 conn = self.db._get_conn()
                 conn.execute(
                     "UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?",

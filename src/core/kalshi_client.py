@@ -30,6 +30,8 @@ class KalshiClient:
         host: str = "https://demo-api.kalshi.co/trade-api/v2",
         api_key_id: Optional[str] = None,
         private_key_path: Optional[str] = None,
+        max_concurrent: int = 5,
+        min_request_interval: float = 0.1,
     ):
         self.host = host.rstrip("/")
         self.api_key_id = api_key_id
@@ -37,6 +39,9 @@ class KalshiClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._private_key = None
         self._key_load_attempted: bool = False
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._min_request_interval = min_request_interval
+        self._last_request_time: float = 0.0
 
     def _load_private_key(self):
         """Load the RSA private key for API signing."""
@@ -130,52 +135,64 @@ class KalshiClient:
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
     ) -> Any:
-        """Make an authenticated request with retry logic."""
-        import random
-        client = await self._get_client()
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                headers = self._auth_headers(method, path)
-                if method.upper() == "GET":
-                    resp = await client.get(path, params=params, headers=headers)
-                elif method.upper() == "POST":
-                    resp = await client.post(path, json=json_body, headers=headers)
-                elif method.upper() == "DELETE":
-                    resp = await client.delete(path, headers=headers)
-                else:
-                    raise ValueError(f"Unsupported method: {method}")
+        """Make an authenticated request with retry logic and throttling.
 
-                if resp.status_code == 429:
-                    if attempt < max_retries - 1:
+        Uses a semaphore to limit concurrency and enforces a minimum interval
+        between requests to avoid triggering Kalshi's rate limits.
+        """
+        import random
+        async with self._semaphore:
+            # Enforce minimum interval between requests
+            now = time.monotonic()
+            elapsed = now - self._last_request_time
+            if elapsed < self._min_request_interval:
+                await asyncio.sleep(self._min_request_interval - elapsed)
+            self._last_request_time = time.monotonic()
+
+            client = await self._get_client()
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    headers = self._auth_headers(method, path)
+                    if method.upper() == "GET":
+                        resp = await client.get(path, params=params, headers=headers)
+                    elif method.upper() == "POST":
+                        resp = await client.post(path, json=json_body, headers=headers)
+                    elif method.upper() == "DELETE":
+                        resp = await client.delete(path, headers=headers)
+                    else:
+                        raise ValueError(f"Unsupported method: {method}")
+
+                    if resp.status_code == 429:
+                        if attempt < max_retries - 1:
+                            wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+                            logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
+                            await asyncio.sleep(wait)
+                            continue
+                        logger.error(f"Rate limited on {path} after {max_retries} attempts — giving up")
+                        raise httpx.HTTPStatusError(
+                            f"Rate limited (429) on {path} after {max_retries} retries",
+                            request=resp.request, response=resp,
+                        )
+                    resp.raise_for_status()
+                    if resp.status_code == 204:
+                        return {}
+                    return resp.json()
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code >= 500 and attempt < max_retries - 1:
                         wait = 2 ** (attempt + 1) + random.uniform(0, 1)
-                        logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
+                        logger.warning(f"Server error {e.response.status_code} on {path}, retrying in {wait:.1f}s")
                         await asyncio.sleep(wait)
                         continue
-                    logger.error(f"Rate limited on {path} after {max_retries} attempts — giving up")
-                    raise httpx.HTTPStatusError(
-                        f"Rate limited (429) on {path} after {max_retries} retries",
-                        request=resp.request, response=resp,
-                    )
-                resp.raise_for_status()
-                if resp.status_code == 204:
-                    return {}
-                return resp.json()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code >= 500 and attempt < max_retries - 1:
-                    wait = 2 ** (attempt + 1) + random.uniform(0, 1)
-                    logger.warning(f"Server error {e.response.status_code} on {path}, retrying in {wait:.1f}s")
-                    await asyncio.sleep(wait)
-                    continue
-                raise
-            except httpx.RequestError as e:
-                if attempt < max_retries - 1:
-                    wait = 2 ** (attempt + 1) + random.uniform(0, 1)
-                    logger.warning(f"Request error on {path}: {e}, retrying in {wait:.1f}s")
-                    await asyncio.sleep(wait)
-                    continue
-                raise
-        return None
+                    raise
+                except httpx.RequestError as e:
+                    if attempt < max_retries - 1:
+                        wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+                        logger.warning(f"Request error on {path}: {e}, retrying in {wait:.1f}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    raise
+            return None
 
     async def close(self):
         if self._client and not self._client.is_closed:
@@ -388,12 +405,12 @@ class KalshiClient:
             return None
 
     async def get_order(self, order_id: str) -> Optional[dict]:
-        """Get a single order by ID."""
+        """Get a single order by ID. Returns None if not found."""
         try:
             data = await self._request("GET", f"/portfolio/orders/{order_id}")
             if data and "order" in data:
                 return data["order"]
-            return data
+            return None
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             logger.error(f"Failed to get order {order_id}: {e}", exc_info=True)
             return None
