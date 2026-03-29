@@ -104,9 +104,9 @@ class ClaudeConfig(BaseModel):
     ensemble_weight: float = 0.85
     category_temperatures: dict[str, float] = Field(default_factory=lambda: {
         "Politics": 0.25,
-        "Fed": 0.20,
+        "Fed/Macro": 0.20,
         "Geopolitics": 0.30,
-        "Tech": 0.30,
+        "Tech/AI": 0.30,
         "Culture": 0.40,
     })
     cross_check_enabled: bool = True

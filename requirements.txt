@@ -16,7 +16,6 @@ anthropic==0.86.0
 
 # HTTP
 httpx==0.28.1
-aiohttp==3.13.3
 
 # Config
 pyyaml==6.0.3

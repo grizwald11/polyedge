@@ -238,3 +238,51 @@ class TestClaudeForecaster:
         result = await forecaster.assess_market(sample_market)
         assert result.parse_failed is True
         assert "timed out" in result.reasoning.lower()
+
+    def test_select_temperature_per_category(self, forecaster):
+        """Verify category-specific temperatures are correctly selected.
+
+        Config keys must match MarketCategory.value strings exactly
+        (e.g., "Fed/Macro" not "Fed"). This test guards against regression
+        if enum values or config keys change.
+        """
+        # Configured category temperatures
+        assert forecaster._select_temperature(MarketCategory.POLITICS) == 0.25
+        assert forecaster._select_temperature(MarketCategory.FED_MACRO) == 0.20
+        assert forecaster._select_temperature(MarketCategory.GEOPOLITICS) == 0.30
+        assert forecaster._select_temperature(MarketCategory.TECH_AI) == 0.30
+        assert forecaster._select_temperature(MarketCategory.CULTURE) == 0.40
+        # Unconfigured categories fall back to default temperature (0.3)
+        assert forecaster._select_temperature(MarketCategory.OTHER) == 0.3
+        assert forecaster._select_temperature(MarketCategory.SPORTS) == 0.3
+
+    @pytest.mark.asyncio
+    async def test_forecast_cache_invalidated_on_price_move(
+        self, forecaster, sample_market
+    ):
+        """Cache should be invalidated when market price moves >5%."""
+        mock_response = _mock_claude_response(0.42)
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        forecaster._client = mock_client
+        forecaster.news_researcher = AsyncMock()
+        forecaster.news_researcher.get_context = AsyncMock(return_value="")
+
+        # First call — should call Claude
+        result1 = await forecaster.assess_market(sample_market)
+        assert result1.probability == 0.42
+        assert mock_client.messages.create.await_count == 1
+
+        # Second call with same price — should use cache
+        result2 = await forecaster.assess_market(sample_market)
+        assert mock_client.messages.create.await_count == 1  # No new call
+
+        # Third call with large price move — should invalidate cache.
+        # Market.yes_price is a property derived from tokens, so we create
+        # a new market with a higher price to simulate a price move.
+        moved_market = sample_market.model_copy(deep=True)
+        for t in moved_market.tokens:
+            if t.outcome.value == "Yes":
+                t.price += 0.10  # Move YES price from 0.34 → 0.44
+        result3 = await forecaster.assess_market(moved_market)
+        assert mock_client.messages.create.await_count == 2  # New call made

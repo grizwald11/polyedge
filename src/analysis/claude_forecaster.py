@@ -151,12 +151,26 @@ class ClaudeForecaster:
         Returns:
             ForecastResult with probability estimate and reasoning
         """
-        # Check forecast cache — avoid re-calling Claude for same market
+        # Check forecast cache — avoid re-calling Claude for same market.
+        # Invalidate if the market price has moved >5% since the cached forecast,
+        # since a large price move means the market has new information and the
+        # old forecast may be stale.
         cache_key = f"assess:{market.ticker}"
         cached = self._forecast_cache.get(cache_key)
         if cached is not None:
-            logger.debug(f"Forecast cache hit for {market.ticker}")
-            return cached
+            cached_price = getattr(cached, "_cached_market_price", None)
+            price_moved = (
+                cached_price is not None
+                and abs(market.yes_price - cached_price) > 0.05
+            )
+            if price_moved:
+                logger.info(
+                    f"Forecast cache invalidated for {market.ticker}: "
+                    f"price moved from {cached_price:.2f} to {market.yes_price:.2f}"
+                )
+            else:
+                logger.debug(f"Forecast cache hit for {market.ticker}")
+                return cached
 
         model = self._select_model(position_value)
         category = classify_market(market)
@@ -241,8 +255,10 @@ class ClaudeForecaster:
                 )
                 forecast.high_divergence = True
 
-            # Cache successful forecasts to avoid redundant API calls
+            # Cache successful forecasts to avoid redundant API calls.
+            # Store the market price at cache time for price-based invalidation.
             if not forecast.parse_failed:
+                forecast._cached_market_price = market.yes_price  # type: ignore[attr-defined]
                 self._forecast_cache.set(cache_key, forecast)
             return forecast
 

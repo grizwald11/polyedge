@@ -234,12 +234,12 @@ def get_template(category: MarketCategory) -> str:
 def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
     """Sanitize text from external sources (market descriptions, news) before prompt injection.
 
-    Uses a two-layer defense:
-    1. Strip known prompt-injection patterns (role overrides, system tags, etc.)
-    2. Remove non-printable / control characters that could confuse the model.
-
-    If ANY injection pattern is detected, the entire surrounding sentence is
-    removed (not just the keyword) to prevent residual manipulation.
+    Uses a three-layer defense:
+    1. Truncate and strip control characters / zero-width unicode.
+    2. Detect and REMOVE entire sentences containing known injection patterns.
+    3. Character allowlist: strip any character outside the safe set (printable
+       ASCII + common accented letters + basic punctuation). This catches novel
+       injection techniques that bypass pattern matching.
     """
     import re
     # Truncate to prevent oversized injections
@@ -274,6 +274,12 @@ def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
             # Remove the entire sentence containing the injection
             sentence_pattern = r'[^.!?\n]*' + pattern + r'[^.!?\n]*[.!?\n]?'
             text = re.sub(sentence_pattern, '', text, flags=re.IGNORECASE)
+
+    # Layer 3: Character allowlist — only permit safe characters.
+    # Allows: printable ASCII (space through ~), common accented/international
+    # letters (Latin-1 Supplement, Latin Extended-A), basic punctuation, and
+    # standard whitespace (newline, tab). Everything else is stripped.
+    text = re.sub(r'[^\x20-\x7E\u00C0-\u024F\n\t]', '', text)
 
     return text.strip()
 
