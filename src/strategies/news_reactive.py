@@ -67,6 +67,17 @@ class NewsReactiveStrategy:
             if market is None:
                 continue
 
+            # Skip stale news — market has likely already repriced
+            MAX_NEWS_AGE_SECONDS = 3600  # 1 hour
+            if hasattr(item, 'published') and item.published:
+                try:
+                    age_seconds = (datetime.now(timezone.utc) - item.published).total_seconds()
+                    if age_seconds > MAX_NEWS_AGE_SECONDS:
+                        logger.debug(f"Skipping stale news ({age_seconds/60:.0f}m old): {item.title[:50]}")
+                        continue
+                except Exception:
+                    pass  # Can't determine age — proceed with caution
+
             signal = await self._assess_impact(item, market)
             if signal:
                 signals.append(signal)

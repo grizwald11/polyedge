@@ -21,7 +21,7 @@ from src.data.cache import TTLCache
 logger = logging.getLogger(__name__)
 
 MANIFOLD_SEARCH_URL = "https://api.manifold.markets/v0/search-markets"
-MIN_SIMILARITY_THRESHOLD = 0.35
+MIN_SIMILARITY_THRESHOLD = 0.50  # Increased from 0.35 to reduce false positive matches
 MIN_BETTORS = 5  # Minimum unique bettors for a credible signal
 
 

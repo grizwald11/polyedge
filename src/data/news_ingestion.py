@@ -61,6 +61,7 @@ class NewsIngestion:
         from collections import OrderedDict
         self._seen_urls: OrderedDict[str, None] = OrderedDict()
         self._max_seen_urls = 10000  # Cap to prevent unbounded memory growth
+        self._feed_failures: dict[str, int] = {}  # feed_url -> consecutive failure count
 
     async def poll_feeds(self) -> list[NewsItem]:
         """Poll all configured RSS feeds for new articles.
@@ -70,11 +71,22 @@ class NewsIngestion:
         try:
             import feedparser
         except ImportError:
-            logger.debug("feedparser not installed, skipping RSS polling")
+            logger.warning(
+                "feedparser not installed — RSS news feeds will be unavailable. "
+                "Install with: pip install feedparser"
+            )
             return []
 
         items: list[NewsItem] = []
+        cycle_count = getattr(self, '_poll_cycle_count', 0)
+        self._poll_cycle_count = cycle_count + 1
+
         for feed_url in self.rss_feeds:
+            # Skip feeds that have failed too many times (exponential backoff — H-10)
+            if self._feed_failures.get(feed_url, 0) >= 3:
+                if cycle_count % 10 != 0:  # Retry every 10 cycles
+                    continue
+
             try:
                 feed = feedparser.parse(feed_url)
                 for entry in feed.entries[:10]:
@@ -95,8 +107,14 @@ class NewsIngestion:
                         published=published,
                     )
                     items.append(item)
+                # Reset failure count on success
+                self._feed_failures[feed_url] = 0
             except Exception as e:
-                logger.warning(f"RSS feed failed {feed_url}: {e}")
+                self._feed_failures[feed_url] = self._feed_failures.get(feed_url, 0) + 1
+                logger.warning(
+                    f"RSS feed failed {feed_url} "
+                    f"(consecutive failures: {self._feed_failures[feed_url]}): {e}"
+                )
 
         return items
 

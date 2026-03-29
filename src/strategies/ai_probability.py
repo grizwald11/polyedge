@@ -209,7 +209,9 @@ class AIProbabilityStrategy:
                     predicted_at = datetime.fromisoformat(latest["predicted_at"])
                     age = datetime.now(timezone.utc) - predicted_at
                     price_move = abs(market.yes_price - latest["market_price_at_prediction"])
-                    if age < timedelta(hours=24) and price_move < 0.05:
+                    staleness_hours = getattr(self.settings.claude, 'reassessment_interval_hours', 24)
+                    staleness_price_move = getattr(self.settings.claude, 'reassessment_price_move', 0.05)
+                    if age < timedelta(hours=staleness_hours) and price_move < staleness_price_move:
                         logger.debug(
                             f"Skipping {market.ticker}: recent prediction "
                             f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f})"
@@ -221,6 +223,8 @@ class AIProbabilityStrategy:
         category = classify_market(market)
 
         # Category accuracy gating: skip categories where we're poorly calibrated
+        # Brier > 0.30 = worse than random guessing (0.25) → skip entirely
+        # Brier 0.20-0.30 = poor calibration → require higher edge (8% vs 5%)
         cat_brier = self._category_brier_scores.get(category.value)
         if cat_brier is not None and cat_brier > 0.30:
             logger.warning(
@@ -243,11 +247,18 @@ class AIProbabilityStrategy:
 
         # Get Claude's forecast (cross-check or regular)
         if use_cross_check:
-            forecast = await self.forecaster.cross_check_assess(
-                market=market,
-                news_context=news_context,
-                base_rate_context=base_rate_context,
-            )
+            try:
+                forecast = await self.forecaster.cross_check_assess(
+                    market=market,
+                    news_context=news_context,
+                    base_rate_context=base_rate_context,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Cross-check assessment failed for {market.ticker}: {e}",
+                    exc_info=True,
+                )
+                return None
             if forecast is None:
                 logger.info(f"Skipping {market.ticker}: cross-check disagreement too high")
                 return None
@@ -305,7 +316,23 @@ class AIProbabilityStrategy:
         adjustment = self._category_adjustments.get(category.value, 0.0)
         if adjustment != 0.0:
             original = forecast.probability
-            forecast.probability = max(0.01, min(0.99, forecast.probability + adjustment))
+            adjusted_prob = max(0.01, min(0.99, forecast.probability + adjustment))
+            # Create a copy with adjusted probability to avoid mutating the original
+            forecast = ForecastResult(
+                probability=adjusted_prob,
+                confidence_low=forecast.confidence_low,
+                confidence_high=forecast.confidence_high,
+                key_factors_for=forecast.key_factors_for,
+                key_factors_against=forecast.key_factors_against,
+                uncertainties=forecast.uncertainties,
+                reasoning=forecast.reasoning,
+                model_used=forecast.model_used,
+                tokens_used=forecast.tokens_used,
+                latency_ms=forecast.latency_ms,
+                raw_response=forecast.raw_response,
+                parse_failed=forecast.parse_failed,
+                high_divergence=forecast.high_divergence,
+            )
             logger.debug(
                 f"Calibration adjustment for {category.value}: "
                 f"{original:.3f} → {forecast.probability:.3f} (adj={adjustment:+.3f})"

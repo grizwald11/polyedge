@@ -41,11 +41,15 @@ class ClaudeForecaster:
         self._total_tokens_today: int = 0
         self._total_cost_today: float = 0.0  # Estimated USD cost
         self._today_date: str = ""
-        # Per-million-token pricing (input/output) by model family
+        # Per-million-token pricing (input/output) by model family.
+        # These are defaults; update when Anthropic changes pricing.
         self._cost_per_million: dict[str, tuple[float, float]] = {
             "claude-sonnet-4-6": (3.0, 15.0),
             "claude-opus-4-6": (15.0, 60.0),
         }
+        # Override from settings if configured
+        if hasattr(settings.claude, 'model_pricing') and settings.claude.model_pricing:
+            self._cost_per_million.update(settings.claude.model_pricing)
         # Forecast cache: avoids duplicate Claude calls for same market in a cycle
         from src.data.cache import TTLCache
         self._forecast_cache = TTLCache(ttl_seconds=self._CACHE_TTL_SECONDS)
@@ -308,6 +312,10 @@ class ClaudeForecaster:
                     f"(attempt {retry_attempt}/3)"
                 )
                 await asyncio.sleep(wait)
+                # Check budget before retry to prevent overrun
+                if self.is_budget_exceeded():
+                    logger.warning("Budget exceeded during rate limit retry — aborting")
+                    break
                 try:
                     client = self._get_client()
                     response = await asyncio.wait_for(
@@ -608,6 +616,7 @@ class ClaudeForecaster:
                 return ForecastResult(
                     probability=max(0.01, min(0.99, prob)),
                     reasoning=f"Parsed probability from prose (%). Raw: {raw_text[:200]}",
+                    parse_failed=True,
                 )
         if prob_matches:
             prob = float(prob_matches[-1])
@@ -615,6 +624,7 @@ class ClaudeForecaster:
             return ForecastResult(
                 probability=max(0.01, min(0.99, prob)),
                 reasoning=f"Parsed probability from prose. Raw: {raw_text[:200]}",
+                parse_failed=True,
             )
 
         logger.warning(f"Failed to parse Claude response as JSON: {raw_text[:200]}")
@@ -627,10 +637,6 @@ class ClaudeForecaster:
     def _build_forecast(self, data: dict) -> ForecastResult:
         """Build a ForecastResult from parsed JSON data."""
         raw_probability = float(data.get("probability", 0.5))
-        # Clamp to valid range for trading calculations.
-        # NOTE: raw_probability is not stored on ForecastResult to avoid a
-        # model change; if downstream analysis needs the unclamped value,
-        # add a `raw_probability` field to ForecastResult.
         probability = max(0.01, min(0.99, raw_probability))
 
         if raw_probability != probability:
@@ -638,12 +644,24 @@ class ClaudeForecaster:
                 f"Clamped probability from {raw_probability:.6f} to {probability:.2f}"
             )
 
+        # Safe CI extraction with fallback defaults
+        def _safe_float(value, default: float) -> float:
+            """Safely convert to float, returning default on failure."""
+            if value is None:
+                return default
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                logger.warning(f"Non-numeric CI value: {value!r} — using default {default}")
+                return default
+
+        ci_low_raw = _safe_float(data.get("confidence_low"), max(0, probability - 0.20))
+        ci_high_raw = _safe_float(data.get("confidence_high"), min(1, probability + 0.20))
+
         return ForecastResult(
             probability=probability,
-            # Default CI of ±0.20 is arbitrary; could be improved with
-            # category-specific defaults or calibration-derived widths.
-            confidence_low=max(0.0, min(1.0, float(data.get("confidence_low", max(0, probability - 0.20))))),
-            confidence_high=max(0.0, min(1.0, float(data.get("confidence_high", min(1, probability + 0.20))))),
+            confidence_low=max(0.0, min(1.0, ci_low_raw)),
+            confidence_high=max(0.0, min(1.0, ci_high_raw)),
             key_factors_for=data.get("key_factors_for", []),
             key_factors_against=data.get("key_factors_against", []),
             uncertainties=data.get("uncertainties", []),

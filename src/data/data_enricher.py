@@ -107,16 +107,40 @@ class DataEnricher:
                         f"polymarket:{market.question[:80]}",
                         self.polymarket.get_context(market.question, market.yes_price))
 
-        # Run remaining (non-cached) tasks concurrently with hard timeout
+        # Run remaining (non-cached) tasks concurrently with per-source timeouts
+        # to prevent priority inversion (C-12). Higher-priority sources get more time.
         if not tasks:
             # Everything was cached
             pass
         else:
+            TIER_TIMEOUTS = {
+                "news": 6.0,
+                "fred": 5.0,
+                "cleveland_fed": 4.0,
+                "fedwatch": 4.0,
+                "manifold": 4.0,
+                "metaculus": 4.0,
+                "polymarket": 3.0,
+            }
+
+            async def _timed_task(coro, name, timeout):
+                try:
+                    return await asyncio.wait_for(coro, timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Data source '{name}' timed out after {timeout}s")
+                    return None
+
             wrapped_tasks = [
-                asyncio.create_task(self._safe_fetch(name, coro))
+                asyncio.create_task(
+                    _timed_task(
+                        self._safe_fetch(name, coro),
+                        name,
+                        TIER_TIMEOUTS.get(name, 5.0),
+                    )
+                )
                 for name, coro in tasks.items()
             ]
-            done, pending = await asyncio.wait(wrapped_tasks, timeout=15)
+            done, pending = await asyncio.wait(wrapped_tasks, timeout=10)
 
         # Collect results from completed tasks and store in cache
         if tasks:

@@ -101,8 +101,9 @@ class TestKalshiRequests:
 
     @pytest.mark.asyncio
     async def test_429_exhausts_retries_raises(self):
-        """Regression: 429 on all attempts should raise, not silently return None."""
+        """Regression: 429 on all attempts should raise KalshiRateLimitError."""
         import httpx
+        from src.core.kalshi_client import KalshiRateLimitError
         client = KalshiClient()
         mock_http = AsyncMock()
         mock_http.is_closed = False
@@ -112,9 +113,8 @@ class TestKalshiRequests:
         mock_http.get = AsyncMock(return_value=mock_response)
         client._client = mock_http
 
-        result = await client._request("GET", "/markets")
-        # Should return None after exhausting retries (not raise)
-        assert result is None
+        with pytest.raises(KalshiRateLimitError):
+            await client._request("GET", "/markets")
         # Should have been called max_retries times (3)
         assert mock_http.get.call_count == 3
 

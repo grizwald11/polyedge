@@ -22,6 +22,9 @@ DEFAULT_TRAILING_STOP_ACTIVATE = 0.12  # Activate trailing stop after 12% gain
 DEFAULT_TRAILING_STOP_DISTANCE = 0.50  # Trail 50% of peak gain (e.g., peak +30% → exit at +15%)
 DEFAULT_TAKE_PROFIT_PCT = 0.80     # Take profit at 80% of max theoretical gain
 DEFAULT_CAPITAL_ROTATION_EDGE = 0.40  # When exposure >35%, exit profitable positions with <40% remaining edge
+# Slippage buffer: exits trigger slightly before the hard threshold
+# to account for execution slippage (typically 1-3%) — H-13
+SLIPPAGE_BUFFER = 0.02  # 2% buffer
 # Capital rotation frees up capital when portfolio is highly exposed by exiting
 # positions where most of the expected edge has already been captured (>60% realized).
 # The 0.40 threshold means: if only 40% of original edge remains AND total exposure
@@ -189,15 +192,21 @@ class PositionManager:
         if time_since_update > 300 and position.current_price > 0:
             price_delta = abs(price_for_side - position.current_price)
             if price_delta == 0:
+                position._price_stale = True
                 logger.warning(
                     f"Stale price detected for {market_id}: ${price_for_side:.2f} unchanged "
                     f"for {time_since_update:.0f}s — data feed may be dead"
                 )
             elif price_delta < 0.005:
+                position._price_stale = True
                 logger.warning(
                     f"Potentially stale price for {market_id}: moved only ${price_delta:.4f} "
                     f"in {time_since_update:.0f}s — data feed may be replaying old prices"
                 )
+            else:
+                position._price_stale = False
+        else:
+            position._price_stale = False
 
         # Use the price matching the position's side, but only if valid
         if position.direction in (Direction.BUY_NO, Direction.SELL_NO):
@@ -306,9 +315,11 @@ class PositionManager:
 
         # 1. Stop-loss check
         #    Require fresh price data (<2 min) to avoid false exits on stale prices.
+        #    Trigger slightly before threshold to account for slippage (H-13).
+        effective_stop_loss = stop_loss_pct - SLIPPAGE_BUFFER
         if position.unrealized_pnl < 0:
             loss_pct = abs(position.unrealized_pnl) / cost_basis
-            if loss_pct >= stop_loss_pct:
+            if loss_pct >= effective_stop_loss:
                 price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
                 if price_age > 120:
                     logger.warning(
@@ -316,7 +327,7 @@ class PositionManager:
                         f"loss={loss_pct:.0%}, price age={price_age:.0f}s"
                     )
                 else:
-                    return True, f"stop_loss: {loss_pct:.0%} loss exceeds {stop_loss_pct:.0%} threshold"
+                    return True, f"stop_loss: {loss_pct:.0%} loss exceeds {effective_stop_loss:.0%} threshold (incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
 
         # 2. Trailing stop: if we've had a significant gain and it's pulling back
         #    Require fresh price data (<2 min) for trailing stop to avoid

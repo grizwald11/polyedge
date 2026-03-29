@@ -43,6 +43,7 @@ class KellySizer:
         bankroll: float,
         current_exposure: float = 0.0,
         order_price: float | None = None,
+        market_liquidity: float | None = None,
     ) -> int:
         """Calculate optimal number of contracts to buy.
 
@@ -59,6 +60,9 @@ class KellySizer:
                 derived from probability - edge. Use this to ensure the
                 contract count stays within dollar caps when the order price
                 differs from the Kelly-derived market price.
+            market_liquidity: Total order book depth in dollars. Used to reduce
+                position size when the order would be large relative to
+                available liquidity (partial fill risk — H-11).
 
         Returns:
             Number of contracts (integers, minimum 1 if any edge exists)
@@ -168,6 +172,18 @@ class KellySizer:
             fee_dollars = fee_cents / 100.0
             if cost_price + fee_dollars <= kelly_dollars:
                 contracts = 1
+
+        # Reduce position size when order would be large relative to market liquidity.
+        # Orders >5% of book depth face higher partial-fill risk (H-11).
+        if market_liquidity is not None and market_liquidity > 0 and contracts > 0:
+            order_pct_of_book = (contracts * cost_price) / market_liquidity
+            if order_pct_of_book > 0.10:
+                liquidity_factor = 0.5  # Halve size if >10% of book
+                contracts = max(1, int(contracts * liquidity_factor))
+                logger.info(f"Liquidity adjustment: reduced to {contracts} contracts (order was {order_pct_of_book:.0%} of book)")
+            elif order_pct_of_book > 0.05:
+                liquidity_factor = 0.75
+                contracts = max(1, int(contracts * liquidity_factor))
 
         # Apply calibration-based multiplier — reduce sizing when forecasting is poor.
         # For multi-contract positions, scale down but floor at 1 contract.

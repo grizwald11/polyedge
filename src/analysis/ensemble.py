@@ -70,7 +70,8 @@ def ensemble_forecast(
         # On extreme-price markets, trust the market more — Claude divergence
         # here is usually wrong. Aggressively reduce Claude weight: floor at 25%,
         # and scale reduction by full divergence (not half).
-        effective_claude_weight = max(0.25, effective_claude_weight - divergence * 1.0)
+        # Gentler reduction: halve the divergence penalty (was 1.0, now 0.5)
+        effective_claude_weight = max(0.25, effective_claude_weight - divergence * 0.5)
     elif divergence > 0.20:
         # Strong divergence on mid-price markets: boost Claude weight
         effective_claude_weight = min(0.95, effective_claude_weight + 0.07)

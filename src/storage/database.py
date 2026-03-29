@@ -18,6 +18,12 @@ from src.core.models import Market, MarketSnapshot, Signal, Order, Trade, Calibr
 
 logger = logging.getLogger(__name__)
 
+
+def prices_equal(a: float, b: float, epsilon: float = 1e-6) -> bool:
+    """Compare prices with epsilon tolerance to handle float storage (H-20/L-1)."""
+    return abs(a - b) < epsilon
+
+
 SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """

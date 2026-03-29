@@ -49,6 +49,7 @@ def _make_order(paper=True) -> Order:
         status=OrderStatus.PENDING,
         strategy=StrategyName.AI_PROBABILITY,
         paper=paper,
+        kalshi_side="yes",
     )
 
 
@@ -56,6 +57,8 @@ class TestPaperFill:
     @pytest.mark.asyncio
     async def test_paper_fill_succeeds(self, paper_settings, mock_kalshi, tmp_db):
         router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        # Patch slippage to always fill at a fixed price for deterministic tests
+        router._simulate_slippage = lambda order: (True, order.price + 0.005)
         order = _make_order(paper=True)
 
         result = await router.route_order(order)
@@ -73,6 +76,8 @@ class TestPaperFill:
     @pytest.mark.asyncio
     async def test_paper_fill_logs_trade(self, paper_settings, mock_kalshi, tmp_db):
         router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        # Patch slippage to always fill for deterministic tests
+        router._simulate_slippage = lambda order: (True, order.price)
         order = _make_order(paper=True)
 
         await router.route_order(order)
@@ -85,6 +90,8 @@ class TestPaperFill:
     @pytest.mark.asyncio
     async def test_paper_fill_calculates_fee(self, paper_settings, mock_kalshi, tmp_db):
         router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        # Patch slippage to always fill for deterministic tests
+        router._simulate_slippage = lambda order: (True, order.price)
         order = _make_order(paper=True)
 
         result = await router.route_order(order)
@@ -221,6 +228,7 @@ class TestLiveBuyNoPrice:
             status=OrderStatus.PENDING,
             strategy=StrategyName.OBVIOUS_NO,
             paper=False,
+            kalshi_side="no",
         )
 
         await router.route_order(order)
@@ -269,6 +277,8 @@ class TestOrderCancellation:
     async def test_cancel_paper_order(self, paper_settings, mock_kalshi, tmp_db):
         """Paper orders can be cancelled by updating DB status."""
         router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        # Patch slippage to always fill for deterministic tests
+        router._simulate_slippage = lambda order: (True, order.price)
         order = _make_order(paper=True)
 
         # Route the paper order first to get it into DB

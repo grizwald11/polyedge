@@ -78,10 +78,15 @@ class TestCallbackRegistration:
     def test_remove_callback_nonexistent(self, ws_client):
         assert ws_client.remove_callback(999999) is False
 
-    def test_duplicate_registration_replaces(self, ws_client):
+    def test_duplicate_registration_creates_separate_entries(self, ws_client):
+        """With monotonic IDs, registering the same callback twice creates two
+        independent entries, each removable by its own ID (L-2 fix)."""
         cb = AsyncMock()
-        ws_client.on_price_update(cb)
-        ws_client.on_price_update(cb)
+        id1 = ws_client.on_price_update(cb)
+        id2 = ws_client.on_price_update(cb)
+        assert id1 != id2
+        assert len(ws_client._price_callbacks) == 2
+        ws_client.remove_callback(id1)
         assert len(ws_client._price_callbacks) == 1
 
 

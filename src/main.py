@@ -403,7 +403,7 @@ async def _generate_all_signals(
                 f"ALL STRATEGIES FAILED: {', '.join(_strategy_failures)}"
             )
         except Exception as e:
-            logger.debug(f"Failed to send strategy failure alert: {e}")
+            logger.error(f"Failed to send strategy failure alert: {e}", exc_info=True)
 
     return all_signals, ai_signals, no_signals
 
@@ -415,6 +415,46 @@ async def _execute_signals(
     calibration, fill_tracker, alert_manager, logger,
 ):
     """Execute trades for generated signals. Returns trades_executed count."""
+    # ── Signal deconfliction ──
+    # When multiple strategies generate signals for the same market,
+    # select the highest-quality signal (by abs(edge) * confidence)
+    # to prevent the "execution order lottery" (C-10).
+    from collections import defaultdict
+    signals_by_market: dict[str, list] = defaultdict(list)
+    for sig in all_signals:
+        signals_by_market[sig.market_id].append(sig)
+
+    deconflicted_signals: list = []
+    for market_id, sigs in signals_by_market.items():
+        if len(sigs) == 1:
+            deconflicted_signals.append(sigs[0])
+        else:
+            # Check for contradictions (some BUY_YES, some BUY_NO)
+            directions = {s.direction for s in sigs}
+            buy_yes = {Direction.BUY_YES, Direction.SELL_NO}
+            buy_no = {Direction.BUY_NO, Direction.SELL_YES}
+            has_yes = bool(directions & buy_yes)
+            has_no = bool(directions & buy_no)
+
+            if has_yes and has_no:
+                # Contradictory signals — skip this market entirely
+                strategy_names = [s.strategy.value for s in sigs]
+                logger.warning(
+                    f"Signal conflict on {market_id}: strategies {strategy_names} "
+                    f"disagree on direction — skipping market this cycle"
+                )
+                continue
+
+            # Same direction — pick the strongest signal
+            best = max(sigs, key=lambda s: abs(s.edge) * s.confidence)
+            logger.info(
+                f"Deconflicted {len(sigs)} signals for {market_id}: "
+                f"selected {best.strategy.value} (edge={best.edge:.1%})"
+            )
+            deconflicted_signals.append(best)
+
+    all_signals = deconflicted_signals
+
     # Separate obvious_no from other signals so they get their own trade slot
     edge_signals = [s for s in all_signals if s.strategy != StrategyName.OBVIOUS_NO]
     obvious_no_signals = [s for s in all_signals if s.strategy == StrategyName.OBVIOUS_NO]
@@ -599,7 +639,7 @@ async def scan_and_trade(
                     circuit_breaker.halt_reason or "Unknown"
                 )
             except Exception as e:
-                logger.warning(f"Failed to send circuit breaker alert: {e}")
+                logger.error(f"Failed to send circuit breaker alert: {e}", exc_info=True)
         return
 
     # 4. Scan markets
@@ -719,8 +759,18 @@ async def scan_and_trade(
             mismatches = await position_manager.sync_with_kalshi(kalshi)
             if mismatches:
                 logger.warning(f"Position sync found {mismatches} mismatches")
+            position_manager._consecutive_sync_failures = 0
         except Exception as e:
-            logger.debug(f"Position sync failed: {e}")
+            logger.error(f"Position sync failed: {e}", exc_info=True)
+            position_manager._consecutive_sync_failures = getattr(
+                position_manager, "_consecutive_sync_failures", 0
+            ) + 1
+            if position_manager._consecutive_sync_failures >= 3:
+                logger.critical(
+                    "Position sync failed 3+ consecutive times — halting trading. "
+                    "Positions may be desynced with Kalshi."
+                )
+                circuit_breaker.trigger_halt("Position sync failed 3+ times")
 
 
 async def run_trading_loop(
@@ -810,17 +860,22 @@ async def run_trading_loop(
         except asyncio.TimeoutError:
             logger.error(
                 f"Trade cycle timed out (>{settings.execution.cycle_timeout_seconds}s) — skipping. "
-                f"WARNING: orders submitted before timeout may be resting on exchange but untracked locally. "
-                f"Run position sync on next live cycle to reconcile.",
+                f"WARNING: orders submitted before timeout may be resting on exchange but untracked locally.",
                 exc_info=True,
             )
             # After timeout, sync positions to detect any orphaned orders
-            try:
-                mismatches = await position_manager.sync_with_kalshi(kalshi)
-                if mismatches:
-                    logger.warning(f"Post-timeout sync found {mismatches} position mismatches")
-            except Exception as sync_err:
-                logger.error(f"Post-timeout position sync failed: {sync_err}", exc_info=True)
+            if settings.trading.mode == "live":
+                try:
+                    mismatches = await position_manager.sync_with_kalshi(kalshi)
+                    if mismatches:
+                        logger.warning(f"Post-timeout sync found {mismatches} position mismatches")
+                except Exception as sync_err:
+                    logger.error(f"Post-timeout position sync failed: {sync_err}", exc_info=True)
+                    logger.critical(
+                        "CRITICAL: Post-timeout position sync also failed. "
+                        "Positions may be desynced. Triggering circuit breaker."
+                    )
+                    circuit_breaker.trigger_halt("Post-timeout position sync failed")
         except Exception as e:
             logger.error(f"Trade cycle failed: {e}", exc_info=True)
 
@@ -1226,6 +1281,12 @@ async def main():
             await kalshi.close()
         except Exception as e:
             logger.warning(f"Kalshi client close failed: {e}")
+
+        if polymarket_client is not None:
+            try:
+                await polymarket_client.close()
+            except Exception as e:
+                logger.warning(f"Polymarket client close failed: {e}")
 
         try:
             db.close()

@@ -19,8 +19,8 @@ from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-# Don't follow whales into positions older than 48 hours
-STALE_POSITION_HOURS = 48
+# Don't follow whales into positions older than 24 hours
+STALE_POSITION_HOURS = 24
 
 
 class WhaleTrackerStrategy:
@@ -111,7 +111,17 @@ class WhaleTrackerStrategy:
             # We can't buy cheaper than the whales — no edge
             return None
 
-        edge = price_edge
+        # Apply freshness decay: whale positions lose confidence over time
+        earliest_entry = getattr(consensus, 'earliest_entry', None)
+        if earliest_entry is not None:
+            hours_old = (datetime.now(timezone.utc) - earliest_entry).total_seconds() / 3600
+            # Decay: 100% confidence at 0h, ~50% at 24h, ~25% at 48h
+            freshness_factor = max(0.25, 1.0 / (1.0 + hours_old / 24.0))
+        else:
+            freshness_factor = 0.5  # Unknown age = conservative
+
+        # Reduce edge by freshness factor
+        edge = price_edge * freshness_factor
         # Whale entry price is our best estimate of true probability
         # (proven traders paid this price, implying they believe prob >= avg_entry)
         probability_estimate = min(0.99, avg_entry)

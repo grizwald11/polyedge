@@ -291,6 +291,12 @@ class MarketDiscovery:
             if not cursor:
                 break
 
+        if page >= max_pages - 1 and cursor:
+            logger.warning(
+                f"Market discovery hit page limit ({max_pages} pages, {len(all_markets)} markets). "
+                f"Some markets may be missing. Consider increasing max_pages."
+            )
+
         logger.info(
             f"Fetched {len(all_markets)} markets from "
             f"{events_targeted}/{events_seen} target events "

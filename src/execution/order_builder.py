@@ -192,7 +192,7 @@ class OrderBuilder:
         """Clamp price to valid Kalshi range (0.01-0.99)."""
         clamped = max(0.01, min(0.99, round(price, 2)))
         if clamped != round(price, 2):
-            logger.warning(f"Price clamped: ${price:.4f} → ${clamped:.2f}")
+            logger.debug(f"Price clamped: ${price:.4f} → ${clamped:.2f}")
         return clamped
 
     @staticmethod

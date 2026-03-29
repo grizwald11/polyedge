@@ -302,6 +302,8 @@ class TestScanAndTrade:
 
     @pytest.mark.asyncio
     async def test_duplicate_market_signals_deduped(self, settings, components):
+        """Contradictory signals (BUY_YES vs BUY_NO) for the same market
+        are skipped entirely by signal deconfliction (C-10)."""
         signals = [
             Signal(
                 strategy=StrategyName.AI_PROBABILITY,
@@ -330,8 +332,8 @@ class TestScanAndTrade:
         components["no_strategy"].scan_for_opportunities.return_value = signals[1:]
         components["settings"] = settings
         await scan_and_trade(**components)
-        # Only the first (higher edge) signal should trade
-        assert components["order_router"].route_order.call_count == 1
+        # Contradictory signals for same market are skipped entirely
+        assert components["order_router"].route_order.call_count == 0
 
     @pytest.mark.asyncio
     async def test_fill_tracker_checked_first(self, settings, components):

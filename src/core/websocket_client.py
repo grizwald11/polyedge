@@ -98,7 +98,8 @@ class KalshiWebSocket:
         self._cmd_id: int = 0
         self._running: bool = False
 
-        # Callbacks keyed by id to prevent duplicates and allow removal
+        # Callbacks keyed by monotonic counter to allow stable removal
+        self._next_callback_id: int = 0
         self._price_callbacks: dict[int, PriceCallback] = {}
         self._fill_callbacks: dict[int, FillCallback] = {}
         self._lifecycle_callbacks: dict[int, LifecycleCallback] = {}
@@ -133,17 +134,20 @@ class KalshiWebSocket:
     # ── Callback registration ──────────────────────
 
     def on_price_update(self, callback: PriceCallback) -> int:
-        cb_id = id(callback)
+        cb_id = self._next_callback_id
+        self._next_callback_id += 1
         self._price_callbacks[cb_id] = callback
         return cb_id
 
     def on_fill(self, callback: FillCallback) -> int:
-        cb_id = id(callback)
+        cb_id = self._next_callback_id
+        self._next_callback_id += 1
         self._fill_callbacks[cb_id] = callback
         return cb_id
 
     def on_lifecycle(self, callback: LifecycleCallback) -> int:
-        cb_id = id(callback)
+        cb_id = self._next_callback_id
+        self._next_callback_id += 1
         self._lifecycle_callbacks[cb_id] = callback
         return cb_id
 
@@ -201,9 +205,18 @@ class KalshiWebSocket:
                     consecutive_failures = 0
                     logger.info(f"WebSocket connected to {self.host}")
 
-                    # Resubscribe to all tickers
+                    # Resubscribe to all tickers with retry (H-2)
                     if self._subscriptions:
-                        await self._send_subscribe(list(self._subscriptions))
+                        for subscribe_attempt in range(3):
+                            try:
+                                await self._send_subscribe(list(self._subscriptions))
+                                break
+                            except Exception as e:
+                                if subscribe_attempt < 2:
+                                    logger.warning(f"Re-subscribe attempt {subscribe_attempt + 1} failed: {e}")
+                                    await asyncio.sleep(0.5)
+                                else:
+                                    logger.error(f"Failed to re-subscribe after 3 attempts: {e}")
 
                     # Run reconnect callbacks (e.g., market status sync via REST)
                     for cb in self._reconnect_callbacks:
@@ -363,11 +376,12 @@ class KalshiWebSocket:
             settlement = data.get("settlement_value")
             settlement_float = float(settlement) if settlement is not None else None
             if settlement_float is not None and not (0.0 <= settlement_float <= 1.0):
-                logger.warning(
-                    f"Settlement value {settlement_float} out of range [0, 1] "
-                    f"for {data.get('market_ticker', '?')} — clamping"
+                logger.error(
+                    f"Invalid settlement value {settlement_float} for market "
+                    f"{data.get('market_ticker', '?')} — "
+                    f"rejecting lifecycle update (expected 0.0-1.0)"
                 )
-                settlement_float = max(0.0, min(1.0, settlement_float))
+                return None  # Reject invalid settlement (H-19)
             return LifecycleUpdate(
                 market_ticker=data.get("market_ticker", ""),
                 status=data.get("status", ""),

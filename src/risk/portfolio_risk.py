@@ -34,6 +34,10 @@ class PortfolioRisk:
         Markets in the same Kalshi event (same event_ticker) are fully correlated.
         Returns total cost_basis of positions in the same event.
 
+        Cross-platform correlation (M-14): treats same-question markets on
+        different platforms as correlated by normalizing event tickers
+        (stripping platform prefixes).
+
         If event_ticker is unknown, falls back to treating the market as its
         own event (returns only that market's exposure). This prevents treating
         unknown markets as having zero correlation, which could allow
@@ -47,14 +51,28 @@ class PortfolioRisk:
             pos = self.positions.get_position(market_id)
             return pos.cost_basis if pos else 0.0
 
+        # Normalize event ticker to enable cross-platform correlation (M-14).
+        # e.g., "KALSHI:TRUMP-WINS" and "POLY:TRUMP-WINS" → "TRUMP-WINS"
+        normalized_ticker = self._normalize_event_ticker(event_ticker)
+
         total = 0.0
         for pos in self.positions.get_all_positions():
             pos_platform = pos.platform.value if hasattr(pos.platform, 'value') else str(pos.platform)
             pos_event = self._get_event_ticker(pos.market_id, platform=pos_platform)
-            if pos_event == event_ticker:
+            if pos_event and self._normalize_event_ticker(pos_event) == normalized_ticker:
                 total += pos.cost_basis
 
         return total
+
+    @staticmethod
+    def _normalize_event_ticker(event_ticker: str) -> str:
+        """Strip platform prefix from event ticker for cross-platform matching.
+
+        e.g., "KALSHI:TRUMP-WINS" → "TRUMP-WINS", "TRUMP-WINS" → "TRUMP-WINS"
+        """
+        if ":" in event_ticker:
+            return event_ticker.split(":", 1)[1]
+        return event_ticker
 
     def get_event_exposure(self, event_ticker: str) -> float:
         """Get total exposure for all positions in an event."""

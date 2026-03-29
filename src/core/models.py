@@ -29,8 +29,12 @@ def cents_to_dollars(cents: int | float) -> float:
 
 
 def dollars_to_cents(dollars: float) -> int:
-    """Convert dollars (0.01-0.99) to Kalshi cents (1-99)."""
-    return int(round(dollars * 100))
+    """Convert dollars (0.01-0.99) to Kalshi cents (1-99).
+
+    Uses Decimal to avoid floating-point rounding errors.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    return int(Decimal(str(dollars)).quantize(Decimal("0.01")) * 100)
 
 
 # ──────────────────────────────────────────────

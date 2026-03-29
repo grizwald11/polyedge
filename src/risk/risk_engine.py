@@ -199,6 +199,20 @@ class RiskEngine:
                 f"for {signal.strategy.value}"
             )
 
+        # 8d. Probability range validation — reject untradeable extremes
+        if signal.probability_estimate < 0.01 or signal.probability_estimate > 0.99:
+            failed.append(
+                f"Probability {signal.probability_estimate:.2f} outside tradeable range (0.01-0.99)"
+            )
+
+        # 8e. Edge vs theoretical maximum — edge can't exceed what's mathematically possible
+        max_possible_edge = min(signal.probability_estimate, 1.0 - signal.probability_estimate)
+        if signal.edge > max_possible_edge + 0.001:  # Small tolerance for float math
+            failed.append(
+                f"Edge {signal.edge:.2%} exceeds theoretical max "
+                f"{max_possible_edge:.2%} for probability {signal.probability_estimate:.2%}"
+            )
+
         # 9. Resolution date check
         days = market.days_to_resolution
         if days is not None and days < 1:

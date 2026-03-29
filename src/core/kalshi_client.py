@@ -18,6 +18,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class KalshiRateLimitError(Exception):
+    """Raised when Kalshi API rate limits are exhausted after retries."""
+    pass
+
+
 class KalshiClient:
     """Wrapper around Kalshi's REST API for trading operations.
 
@@ -42,6 +47,7 @@ class KalshiClient:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._min_request_interval = min_request_interval
         self._last_request_time: float = 0.0
+        self._consecutive_timeouts: int = 0
 
     def _load_private_key(self):
         """Load the RSA private key for API signing."""
@@ -165,13 +171,14 @@ class KalshiClient:
 
                     if resp.status_code == 429:
                         if attempt < max_retries - 1:
-                            wait = min(10, 2 ** (attempt + 1)) + random.uniform(0, 1)
+                            wait = min(10, 2 ** (attempt + 1)) + random.uniform(0, 2 ** attempt)
                             logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
                             await asyncio.sleep(wait)
                             continue
-                        logger.error(f"Rate limited on {path} after {max_retries} attempts — returning None")
-                        return None
+                        logger.error(f"Rate limited on {path} after {max_retries} attempts")
+                        raise KalshiRateLimitError(f"Rate limited on {path} after {max_retries} attempts")
                     resp.raise_for_status()
+                    self._consecutive_timeouts = 0
                     if resp.status_code == 204:
                         return {}
                     return resp.json()
@@ -183,6 +190,13 @@ class KalshiClient:
                         continue
                     raise
                 except httpx.RequestError as e:
+                    self._consecutive_timeouts += 1
+                    if self._consecutive_timeouts >= 3:
+                        logger.warning("3+ consecutive request errors — resetting HTTP connection pool")
+                        if self._client and not self._client.is_closed:
+                            await self._client.aclose()
+                        self._client = None
+                        self._consecutive_timeouts = 0
                     if attempt < max_retries - 1:
                         wait = 2 ** (attempt + 1) + random.uniform(0, 1)
                         logger.warning(f"Request error on {path}: {e}, retrying in {wait:.1f}s")
@@ -316,14 +330,21 @@ class KalshiClient:
         try:
             data = await self._request("GET", "/portfolio/balance")
             if data and "balance" in data:
-                # Kalshi returns balance in cents
-                balance = float(data["balance"]) / 100.0
+                # Validate balance is numeric before conversion
+                raw_balance = data["balance"]
+                try:
+                    balance = float(raw_balance) / 100.0
+                except (TypeError, ValueError):
+                    logger.error(f"Invalid balance value from Kalshi: {raw_balance!r}")
+                    return None
                 if balance < 0:
                     logger.warning(f"Kalshi returned negative balance: ${balance:.2f}")
                     return 0.0
+                if balance > 1_000_000:
+                    logger.warning(f"Kalshi returned unusually large balance: ${balance:.2f}")
                 return balance
             return None
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, KalshiRateLimitError) as e:
             logger.error(f"Failed to get balance: {e}", exc_info=True)
             return None
         except Exception as e:
@@ -337,7 +358,7 @@ class KalshiClient:
             if data and "market_positions" in data:
                 return data["market_positions"]
             return []
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, KalshiRateLimitError) as e:
             logger.error(f"Failed to get positions: {e}", exc_info=True)
             return []
         except Exception as e:
@@ -381,7 +402,7 @@ class KalshiClient:
                 logger.info(f"Order created: {action} {count} {side} on {ticker} at {yes_price}c")
                 return data["order"]
             return data
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, KalshiRateLimitError) as e:
             logger.error(f"Failed to create order: {e}", exc_info=True)
             return None
         except Exception as e:
@@ -394,7 +415,7 @@ class KalshiClient:
             data = await self._request("DELETE", f"/portfolio/orders/{order_id}")
             logger.info(f"Order cancelled: {order_id}")
             return data
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, KalshiRateLimitError) as e:
             logger.error(f"Failed to cancel order {order_id}: {e}", exc_info=True)
             return None
         except Exception as e:
@@ -408,7 +429,7 @@ class KalshiClient:
             if data and "order" in data:
                 return data["order"]
             return None
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, KalshiRateLimitError) as e:
             logger.error(f"Failed to get order {order_id}: {e}", exc_info=True)
             return None
         except Exception as e:
@@ -422,7 +443,7 @@ class KalshiClient:
             if data and "orders" in data:
                 return data["orders"]
             return []
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, KalshiRateLimitError) as e:
             logger.error(f"Failed to get open orders: {e}", exc_info=True)
             return []
         except Exception as e:

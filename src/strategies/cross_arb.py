@@ -450,17 +450,17 @@ class CrossArbStrategy:
                 import json
                 data = json.loads(row["relationship_data"])
 
-                # Price-based invalidation: if either market moved >10% since
+                # Price-based invalidation: if either market moved >25% since
                 # cache time, the relationship may have changed materially.
                 cached_price_a = data.get("cached_price_a", 0)
                 cached_price_b = data.get("cached_price_b", 0)
-                if cached_price_a > 0 and abs(price_a - cached_price_a) > 0.10:
+                if cached_price_a > 0 and abs(price_a - cached_price_a) > 0.25:
                     logger.debug(
                         f"Arb cache price-invalidated for {ticker_a}: "
                         f"{cached_price_a:.2f} → {price_a:.2f}"
                     )
                     return None
-                if cached_price_b > 0 and abs(price_b - cached_price_b) > 0.10:
+                if cached_price_b > 0 and abs(price_b - cached_price_b) > 0.25:
                     logger.debug(
                         f"Arb cache price-invalidated for {ticker_b}: "
                         f"{cached_price_b:.2f} → {price_b:.2f}"

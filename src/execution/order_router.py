@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.config import Settings
-from src.core.kalshi_client import KalshiClient
+from src.core.kalshi_client import KalshiClient, KalshiRateLimitError
 from src.core.models import (
     Order, OrderStatus, Platform, Side, Trade, dollars_to_cents,
     kalshi_maker_fee, kalshi_taker_fee, polymarket_fee, OrderType,
@@ -140,12 +140,14 @@ class OrderRouter:
 
         Returns (filled, fill_price). ~15% of limit orders miss entirely.
         Fills include 0-1 cent adverse slippage.
-        Uses order ID as seed for deterministic per-order randomness.
+        Uses non-deterministic randomness for realistic variance.
         """
         import random as _random
-        # Deterministic per-order PRNG seeded from order attributes
-        seed_str = f"{order.id}:{order.market_id}:{order.price}:{order.size}:{order.side.value}"
-        rng = _random.Random(seed_str)
+        # Use non-deterministic randomness for realistic paper trading variance.
+        # Previously used deterministic PRNG seeded from order attributes,
+        # but this biased paper trading results by producing identical
+        # slippage for the same order parameters across restarts.
+        rng = _random.Random()
 
         if rng.random() < self.PAPER_LIMIT_ORDER_MISS_RATE:
             return False, order.price
@@ -267,12 +269,14 @@ class OrderRouter:
         # avoiding fragile string matching on token_id.
         kalshi_side = order.kalshi_side
         if kalshi_side is None:
-            # Fallback for legacy orders missing kalshi_side — infer from token_id
-            kalshi_side = "yes" if "yes" in order.token_id.lower() else "no"
-            logger.warning(
-                f"Order {order.id} missing kalshi_side — inferred '{kalshi_side}' from token_id "
-                f"'{order.token_id}'. This fallback is fragile; ensure order_builder sets kalshi_side."
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = "Missing kalshi_side — order_builder must set this explicitly"
+            self._log_order(order)
+            logger.error(
+                f"Order {order.id} missing kalshi_side — rejected to prevent side mismatch. "
+                f"Ensure order_builder sets kalshi_side from Direction enum."
             )
+            return OrderResult(success=False, order=order, error="Missing kalshi_side")
         kalshi_type = "limit" if order.order_type == OrderType.GTC else "market"
         # Kalshi API always expects yes_price regardless of which side we buy.
         # For BUY_NO: order.price is the NO price, so yes_price = 1 - order.price.
@@ -305,10 +309,15 @@ class OrderRouter:
                 # Reconcile: check if the order was actually placed
                 result = await self._reconcile_after_timeout(order)
                 if result is None:
-                    order.status = OrderStatus.REJECTED
-                    order.rejection_reason = "Timeout creating order — no matching order found on Kalshi"
+                    order.status = OrderStatus.OPEN  # Assume order may exist — safer than REJECTED
+                    order.rejection_reason = "Timeout creating order — may exist on Kalshi (unconfirmed)"
                     self._log_order(order)
-                    return OrderResult(success=False, order=order, error="Timeout — order not found on Kalshi")
+                    logger.critical(
+                        f"ORPHANED ORDER RISK: order for {order.market_id} timed out and reconciliation "
+                        f"found no match. Order may still be processing on Kalshi. "
+                        f"Manual review required — check Kalshi dashboard."
+                    )
+                    return OrderResult(success=False, order=order, error="Timeout — order status unknown, manual review required")
 
             if result is None:
                 order.status = OrderStatus.REJECTED
@@ -354,7 +363,15 @@ class OrderRouter:
                 # Use actual fill price from API if available; fall back to order price
                 api_fill_price = result.get("avg_price")
                 if api_fill_price is not None:
-                    order.fill_price = api_fill_price / 100.0  # cents to dollars
+                    # Validate avg_price is numeric and in valid Kalshi range (1-99 cents)
+                    try:
+                        api_fill_price = float(api_fill_price)
+                        if not (0 < api_fill_price <= 100):
+                            raise ValueError(f"avg_price out of range: {api_fill_price}")
+                        order.fill_price = api_fill_price / 100.0
+                    except (TypeError, ValueError) as e:
+                        logger.error(f"Invalid avg_price from Kalshi: {result.get('avg_price')!r} — using order price")
+                        order.fill_price = order.price
                 else:
                     order.fill_price = order.price
             elif final_status == "resting":
@@ -571,7 +588,7 @@ class OrderRouter:
         Returns the final status string.
         """
         status = initial_data.get("status", "").lower()
-        if status in ("executed", "canceled", "cancelled", "expired"):
+        if status in ("executed", "canceled", "cancelled", "expired", "rejected", "failed"):
             return status
 
         if not kalshi_order_id:
@@ -589,7 +606,7 @@ class OrderRouter:
                 )
                 if order_data:
                     status = order_data.get("status", "").lower()
-                    if status in ("executed", "canceled", "cancelled", "expired"):
+                    if status in ("executed", "canceled", "cancelled", "expired", "rejected", "failed"):
                         return status
             except asyncio.TimeoutError:
                 logger.warning(f"Order poll attempt {attempt + 1} timed out after {poll_timeout}s")

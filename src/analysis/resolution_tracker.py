@@ -165,12 +165,21 @@ class ResolutionTracker:
 
         conn = self.db._get_conn()
         # Get unresolved predictions for this market+platform combination
-        rows = conn.execute(
-            """SELECT id, predicted_probability, market_price_at_prediction
-               FROM calibration_records
-               WHERE market_id = ? AND platform = ? AND actual_outcome IS NULL""",
-            (market_id, platform),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                """SELECT id, predicted_probability, market_price_at_prediction
+                   FROM calibration_records
+                   WHERE market_id = ? AND platform = ? AND actual_outcome IS NULL""",
+                (market_id, platform),
+            ).fetchall()
+        except Exception:
+            # Fallback for legacy records without platform column
+            rows = conn.execute(
+                """SELECT id, predicted_probability, market_price_at_prediction
+                   FROM calibration_records
+                   WHERE market_id = ? AND actual_outcome IS NULL""",
+                (market_id,),
+            ).fetchall()
 
         if not rows:
             return 0

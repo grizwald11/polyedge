@@ -43,6 +43,11 @@ from src.risk.kelly_sizer import KellySizer
 from src.risk.circuit_breaker import CircuitBreaker
 from src.storage.database import Database
 
+# Degradation factor: live trading typically underperforms backtests by 20-30%
+# due to survivorship bias, lookahead bias, and execution costs.
+# Apply this factor to live edge thresholds derived from backtest results.
+BACKTEST_DEGRADATION_FACTOR = 0.70  # Expect ~70% of backtest performance live
+
 
 # ──────────────────────────────────────────────
 # Data classes
@@ -105,6 +110,7 @@ class MockForecaster:
         self.noise = noise
         self._cache: dict[str, float] = {}
         self._outcomes: dict[str, bool] = {}
+        self._warned_lookahead = False
         self._load_cache()
 
     def _load_cache(self):
@@ -149,6 +155,12 @@ class MockForecaster:
             )
 
         if market_id in self._outcomes:
+            if not self._warned_lookahead:
+                logger.warning(
+                    "MockForecaster using outcome-derived mode — results have lookahead bias. "
+                    "Do NOT use for live trading decisions."
+                )
+                self._warned_lookahead = True
             import random
             actual = 1.0 if self._outcomes[market_id] else 0.0
             # Add noise to simulate imperfect prediction
@@ -501,7 +513,10 @@ class BacktestEngine:
                 mean_r = sum(daily_ret) / len(daily_ret)
                 var = sum((r - mean_r) ** 2 for r in daily_ret) / len(daily_ret)
                 std = var ** 0.5
-                result.sharpe_ratio = (mean_r / std) * (252 ** 0.5) if std > 0 else None
+                # NOTE: annualization factor assumes daily data points.
+                # If using hourly snapshots, adjust periods_per_year accordingly.
+                periods_per_year = 252  # Assumes daily equity snapshots
+                result.sharpe_ratio = (mean_r / std) * (periods_per_year ** 0.5) if std > 0 else None
                 result.daily_returns = daily_ret
 
         # Average edges
