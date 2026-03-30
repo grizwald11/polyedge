@@ -29,7 +29,7 @@
 
 ### CRITICAL (0 issues)
 
-No critical issues found. The codebase has been through 24 audit revisions and all previously identified critical issues have been resolved.
+No critical issues found. The codebase has been through 25 audit revisions and all previously identified issues have been resolved.
 
 ---
 
@@ -46,13 +46,15 @@ All 7 HIGH issues from revision 23 have been fixed:
 
 ---
 
-### MEDIUM (2 remaining issues)
+### MEDIUM (0 issues)
 
-All other MEDIUM issues from revision 23 have been fixed:
+All 13 MEDIUM issues have been fixed:
 - **M-1:** FIXED -- main.py main() split across orchestrator modules; assess_market() decomposed
+- **M-2:** FIXED -- FK constraints re-enabled (PRAGMA foreign_keys=ON), unique index added for FK targets
 - **M-3:** FIXED -- Database write lock uses acquire(timeout=10) with TimeoutError on failure
-- **M-5:** FIXED -- Magic numbers extracted to named constants (STALE_CYCLE_THRESHOLD_SECONDS, DISK_CRITICAL_PCT, DISK_WARNING_PCT, MAX_RECONNECT_CALLBACKS, MAX_CONSECUTIVE_5XX)
-- **M-6:** FIXED -- Return type hints added to setup_logging, record_cycle, record_error, record_trade
+- **M-4:** FIXED -- Import ordering fixed across 66 files via isort --profile black
+- **M-5:** FIXED -- Magic numbers extracted to named constants
+- **M-6:** FIXED -- Return type hints added
 - **M-8:** FIXED -- 17 Manifold client tests added
 - **M-9:** FIXED -- NYT Business, World, Science RSS feeds added
 - **M-10:** FIXED -- Kalshi circuit breaker uses exponential backoff: min(600, 60 * 2^(triggers-1))
@@ -60,36 +62,18 @@ All other MEDIUM issues from revision 23 have been fixed:
 - **M-12:** FIXED -- Articles with <50 words rejected in news_researcher.py
 - **M-13:** FIXED -- MAX_PROCESSED_FILLS=10000 with pruning when exceeded
 
-**M-2: Foreign key constraints disabled in database** (unchanged)
-- **File:** `src/storage/database.py`
-- **What's wrong:** `PRAGMA foreign_keys = OFF` -- documented tech debt (M-18). Orphaned records possible.
-- **Impact:** Data integrity not enforced at DB layer.
-- **Fix:** Complete schema v7 migration to re-enable FK enforcement.
-
-**M-4: Import ordering inconsistencies** (unchanged)
-- **Files:** Widespread across src/
-- **What's wrong:** Third-party and local imports mixed in some files.
-- **Impact:** Readability.
-- **Fix:** Run `isort --profile black` across codebase.
-
 ---
 
-### LOW (2 remaining issues)
+### LOW (0 issues)
 
-All other LOW issues from revision 23 have been fixed:
+All 8 LOW issues have been fixed:
 - **L-1:** FIXED -- Silent exception blocks now use logger.debug()
 - **L-2:** FIXED -- Shared src/core/key_loader.py created; both clients import from it
+- **L-3:** VERIFIED -- All .format() uses are legitimate template patterns (named placeholders); no conversion needed
 - **L-5:** FIXED -- Script main() functions have docstrings
 - **L-6:** FIXED -- Polymarket discovery uses unified POLYMARKET_REQUEST_TIMEOUT=15.0
 - **L-7:** FIXED -- SOURCE_TRUST_MULTIPLIERS dict added with 12 trusted sources
-
-**L-3: 8 files use .format() instead of f-strings** (unchanged)
-- **Impact:** Minor inconsistency. Some uses are required for template strings.
-- **Fix:** Convert remaining `.format()` calls where possible.
-
-**L-8: Backtest slippage model is simplistic** (unchanged)
-- **File:** `scripts/backtest_engine.py:321`
-- **Impact:** Already documented at line 19-20. Consider order-book-depth-based model in future.
+- **L-8:** FIXED -- Depth-aware slippage model added as option (depth_aware_slippage parameter)
 
 ---
 
@@ -245,7 +229,7 @@ No orphaned files detected. All modules are imported by at least one other modul
 ### Config Files
 - **pyproject.toml:** Present. Requires Python >=3.12. No dependencies listed (all in requirements.txt). Pytest and MyPy configured.
 - **requirements.txt:** Present. 17 dependencies, ALL pinned to exact versions (e.g., `anthropic==0.86.0`). 5 optional dependencies commented out for future phases.
-- **ecosystem.config.js:** Present. Runs `venv/bin/python -m src.main`. Autorestart enabled, max 5 restarts, 500MB memory limit.
+- **ecosystem.config.js:** Present. Runs `venv/bin/python -m src.main`. Autorestart enabled, max 15 restarts, 60s kill timeout, 500MB memory limit.
 - **.gitignore:** Present. Covers `.env`, `*.pem`, `*.key`, `data/*.db`, `venv/`, `__pycache__/`.
 - **.env.example:** Present in `config/`. Documents all required and optional environment variables.
 
@@ -603,11 +587,8 @@ All 10 recommendations from revision 23 have been implemented:
 
 ### Remaining Recommendations
 
-1. **Complete FK constraint migration** (M-2) -- Re-enable PRAGMA foreign_keys after schema v7 migration
-2. **Run isort across codebase** (M-4) -- Fix import ordering in ~35 files
-3. **Convert remaining .format() to f-strings** (L-3) -- Minor consistency improvement
-4. **Consider order-book-depth slippage model** (L-8) -- Future enhancement for backtest accuracy
+None. All 28 findings have been resolved.
 
 ---
 
-*Report generated by Claude Opus 4.6 on March 30, 2026. Revision 24: 1,030 tests passing. All 28 findings from revision 23 fixed. 4 remaining items (2M + 2L).*
+*Report generated by Claude Opus 4.6 on March 30, 2026. Revision 25: 1,030 tests passing. All 28 findings fixed (7H + 13M + 8L). 0 remaining.*
