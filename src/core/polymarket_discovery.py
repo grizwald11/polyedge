@@ -22,6 +22,9 @@ from src.core.market_discovery import classify_market_category
 
 logger = logging.getLogger(__name__)
 
+# Unified timeout for all Polymarket Gamma API requests
+POLYMARKET_REQUEST_TIMEOUT = 15.0
+
 # Polymarket tags → our MarketCategory
 POLYMARKET_TAG_MAP: dict[str, MarketCategory] = {
     "Politics": MarketCategory.POLITICS,
@@ -234,7 +237,7 @@ class PolymarketDiscovery:
         all_markets: list[dict] = []
         limit = 100
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=POLYMARKET_REQUEST_TIMEOUT) as client:
             for page in range(max_pages):
                 offset = page * limit
                 try:
@@ -272,7 +275,7 @@ class PolymarketDiscovery:
     async def get_market_by_condition_id(self, condition_id: str) -> Optional[dict]:
         """Fetch a single market by condition ID."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=POLYMARKET_REQUEST_TIMEOUT) as client:
                 response = await client.get(
                     f"{self.gamma_host}/markets",
                     params={"condition_id": condition_id},

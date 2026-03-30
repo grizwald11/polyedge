@@ -311,6 +311,7 @@ async def run_backtest(
 
 
 def main():
+    """Run backtesting pipeline: fetch settled markets, assess with Claude, score accuracy."""
     parser = argparse.ArgumentParser(
         description="Backtest Claude against settled Kalshi markets"
     )

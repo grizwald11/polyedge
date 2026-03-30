@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Health check threshold: if no cycle completed within this many seconds, status is "degraded"
+STALE_CYCLE_THRESHOLD_SECONDS = 600
+
 
 class Metrics:
     """Simple metrics tracker — logs structured JSON for monitoring."""
@@ -53,7 +56,7 @@ class Metrics:
 
     def record_cycle(
         self, duration_ms: float, trades: int, signals: int, positions: int
-    ):
+    ) -> None:
         """Record a completed scan cycle."""
         self._check_daily_reset()
         self.cycle_count += 1
@@ -75,7 +78,7 @@ class Metrics:
             })
         )
 
-    def record_error(self, component: str, error_msg: str):
+    def record_error(self, component: str, error_msg: str) -> None:
         """Record an error."""
         self._check_daily_reset()
         self.errors_today += 1
@@ -118,7 +121,7 @@ class Metrics:
     def record_trade(
         self, market_id: str, direction: str, size: int, price: float,
         predicted_edge: float = 0.0,
-    ):
+    ) -> None:
         """Record a trade execution."""
         logger.info(
             json.dumps({
@@ -188,7 +191,7 @@ class Metrics:
         """Basic health check — degraded if no cycle in 10 minutes."""
         if self.last_cycle_time is None:
             return True  # Just started, no cycles yet
-        return (time.time() - self.last_cycle_time) < 600
+        return (time.time() - self.last_cycle_time) < STALE_CYCLE_THRESHOLD_SECONDS
 
     def persist_to_db(self, db: "Database") -> None:
         """Persist current metrics snapshot to database for cross-restart analysis.

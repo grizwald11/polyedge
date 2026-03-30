@@ -33,6 +33,9 @@ BACKOFF_MULTIPLIER = 2.0
 # Stop reconnecting after this many consecutive failures (likely permanent auth/config issue)
 MAX_CONSECUTIVE_FAILURES = 10
 
+# Cap on reconnect callbacks to detect leaks
+MAX_RECONNECT_CALLBACKS = 50
+
 
 @dataclass
 class TickerUpdate:
@@ -170,7 +173,7 @@ class KalshiWebSocket:
         since markets may have closed/settled while disconnected.
         """
         # L-12: Guard against unbounded callback list growth
-        if len(self._reconnect_callbacks) >= 50:
+        if len(self._reconnect_callbacks) >= MAX_RECONNECT_CALLBACKS:
             logger.warning(
                 f"Reconnect callbacks list has {len(self._reconnect_callbacks)} entries — "
                 f"possible leak. Not adding new callback."
@@ -186,7 +189,7 @@ class KalshiWebSocket:
         lifecycle changes (close, settlement) that occurred while disconnected.
         """
         # L-12: Guard against unbounded callback list growth
-        if len(self._reconnect_callbacks) >= 50:
+        if len(self._reconnect_callbacks) >= MAX_RECONNECT_CALLBACKS:
             logger.warning(
                 f"Reconnect callbacks list has {len(self._reconnect_callbacks)} entries — "
                 f"possible leak. Not adding new callback."
@@ -524,19 +527,12 @@ class KalshiWebSocket:
     def _load_private_key(self):
         """Load the RSA private key for API signing.
 
-        # L-4: Consider extracting to shared src/core/key_loader.py
-        # This logic is duplicated in src/core/kalshi_client.py
+        Uses shared key_loader (L-2) to avoid duplication with kalshi_client.py.
         """
         if self._private_key is not None:
             return self._private_key
         if not self.private_key_path:
             return None
-        try:
-            from cryptography.hazmat.primitives.serialization import load_pem_private_key
-
-            with open(self.private_key_path, "rb") as f:
-                self._private_key = load_pem_private_key(f.read(), password=None)
-            return self._private_key
-        except Exception as e:
-            logger.error(f"Failed to load private key: {e}", exc_info=True)
-            return None
+        from src.core.key_loader import load_rsa_private_key
+        self._private_key = load_rsa_private_key(self.private_key_path)
+        return self._private_key

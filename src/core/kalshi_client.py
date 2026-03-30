@@ -18,6 +18,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Circuit breaker triggers after this many consecutive 5xx errors
+MAX_CONSECUTIVE_5XX = 5
+
 
 class KalshiRateLimitError(Exception):
     """Raised when Kalshi API rate limits are exhausted after retries."""
@@ -50,10 +53,14 @@ class KalshiClient:
         self._last_request_time: float = 0.0
         self._consecutive_timeouts: int = 0
         self._consecutive_5xx: int = 0
+        self._circuit_breaker_triggers: int = 0  # M-10: track for exponential backoff
         self._circuit_open_until: float = 0.0
 
     def _load_private_key(self):
-        """Load the RSA private key for API signing."""
+        """Load the RSA private key for API signing.
+
+        Uses shared key_loader (L-2) for the actual PEM loading.
+        """
         if self._private_key is not None:
             return self._private_key
         if self._key_load_attempted:
@@ -61,37 +68,16 @@ class KalshiClient:
         if not self.private_key_path:
             return None
         self._key_load_attempted = True
-        try:
+        from src.core.key_loader import load_rsa_private_key
+        self._private_key = load_rsa_private_key(
+            self.private_key_path, check_permissions=True
+        )
+        if self._private_key is not None:
             import os
-            import stat
-            from cryptography.hazmat.primitives.serialization import load_pem_private_key
-            # Check file permissions — private key should be owner-only (0o600)
-            key_stat = os.stat(self.private_key_path)
-            mode = key_stat.st_mode & 0o777
-            if mode & (stat.S_IRWXG | stat.S_IRWXO):
-                try:
-                    os.chmod(self.private_key_path, 0o600)
-                    logger.warning(
-                        f"Private key had permissive mode {oct(mode)} — fixed to 0o600. "
-                        f"Review file security."
-                    )
-                except OSError as chmod_err:
-                    raise RuntimeError(
-                        f"Private key file {self.private_key_path} has insecure permissions "
-                        f"{oct(mode)} and cannot be fixed: {chmod_err}. "
-                        f"Manually run: chmod 600 {self.private_key_path}"
-                    ) from chmod_err
-            with open(self.private_key_path, "rb") as f:
-                self._private_key = load_pem_private_key(f.read(), password=None)
             # Record the mtime at load time for freshness checking (M-6)
             self._key_load_mtime: float = os.stat(self.private_key_path).st_mtime
             logger.info("Loaded RSA private key for Kalshi auth")
-            return self._private_key
-        except RuntimeError:
-            raise  # Re-raise chmod failure — do not swallow security errors
-        except Exception as e:
-            logger.error(f"Failed to load private key: {e}", exc_info=True)
-            return None
+        return self._private_key
 
     def check_key_freshness(self) -> bool:
         """Check if the private key file has been modified since it was loaded.
@@ -278,6 +264,7 @@ class KalshiClient:
                     # Success — reset circuit breaker and timeout counters
                     self._consecutive_5xx = 0
                     self._consecutive_timeouts = 0
+                    self._circuit_breaker_triggers = 0
                     if resp.status_code == 204:
                         return {}
                     # H-10: Wrap JSON parsing in try/except
@@ -298,11 +285,14 @@ class KalshiClient:
                     # H-3: Track consecutive 5xx for circuit breaker
                     if e.response.status_code >= 500:
                         self._consecutive_5xx += 1
-                        if self._consecutive_5xx >= 5:
-                            self._circuit_open_until = time.monotonic() + 60.0
+                        if self._consecutive_5xx >= MAX_CONSECUTIVE_5XX:
+                            self._circuit_breaker_triggers += 1
+                            backoff_seconds = min(600, 60 * (2 ** (self._circuit_breaker_triggers - 1)))
+                            self._circuit_open_until = time.monotonic() + backoff_seconds
                             logger.error(
                                 f"Circuit breaker OPEN — {self._consecutive_5xx} consecutive 5xx errors. "
-                                f"Blocking requests for 60s."
+                                f"Blocking requests for {backoff_seconds}s "
+                                f"(trigger #{self._circuit_breaker_triggers})."
                             )
                         if attempt < max_retries - 1:
                             wait = 2 ** (attempt + 1) + random.uniform(0, 1)

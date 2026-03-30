@@ -183,23 +183,14 @@ class ClaudeForecaster:
             return caution
         return description
 
-    async def assess_market(
-        self,
-        market: Market,
-        news_context: str = "",
-        position_value: float = 0.0,
-        base_rate_context: str = "",
-    ) -> ForecastResult:
-        """Assess a market's true probability using Claude.
+    def _check_preconditions(
+        self, market: Market,
+    ) -> Optional[ForecastResult]:
+        """Check circuit breaker, budget limits, and cache before calling Claude.
 
-        Args:
-            market: The market to assess
-            news_context: Additional news/context to include
-            position_value: Expected position size (determines model selection)
-            base_rate_context: Historical base rate string for the category
-
-        Returns:
-            ForecastResult with probability estimate and reasoning
+        Returns a ForecastResult if an early return is needed (circuit open,
+        budget exceeded, or cache hit). Returns None if the caller should
+        proceed with the API call.
         """
         # Circuit breaker check — disable calls after 3 consecutive failures
         import time as _time
@@ -271,6 +262,20 @@ class ClaudeForecaster:
                 logger.debug(f"Forecast cache hit for {market.ticker}")
                 return cached
 
+        return None
+
+    async def _build_prompt(
+        self,
+        market: Market,
+        news_context: str,
+        base_rate_context: str,
+        position_value: float,
+    ) -> tuple[str, str, MarketCategory, float]:
+        """Build the Claude prompt with news enrichment and context.
+
+        Returns:
+            Tuple of (prompt, model, category, temperature)
+        """
         model = self._select_model(position_value)
         category = classify_market(market)
         temperature = self._select_temperature(category)
@@ -302,10 +307,27 @@ class ClaudeForecaster:
             base_rate_context=base_rate_context,
         )
 
-        start_time = time.monotonic()
+        return prompt, model, category, temperature
+
+    async def _call_claude(
+        self,
+        prompt: str,
+        model: str,
+        temperature: float,
+        timeout: float,
+    ):
+        """Call Claude API with retry logic for rate limits and connection errors.
+
+        Returns the raw API response object on success.
+
+        Raises:
+            asyncio.TimeoutError: On initial timeout (no retries for timeouts)
+            anthropic.AuthenticationError: On auth failure (non-retryable)
+            Exception: On unhandled errors after exhausting retries
+        """
+        client = self._get_client()
         try:
-            client = self._get_client()
-            response = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 client.messages.create(
                     model=model,
                     max_tokens=self.settings.claude.max_tokens,
@@ -313,68 +335,7 @@ class ClaudeForecaster:
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                 ),
-                timeout=self.settings.claude.api_timeout_seconds,
-            )
-
-            latency_ms = int((time.monotonic() - start_time) * 1000)
-            raw_text = self._extract_text(response)
-            if raw_text is None:
-                logger.warning("Claude API returned empty content for assess_market")
-                return ForecastResult(
-                    probability=0.5, reasoning="Empty API response",
-                    parse_failed=True, model_used=model, latency_ms=latency_ms,
-                )
-            tokens_used = response.usage.input_tokens + response.usage.output_tokens
-            self._track_tokens(
-                tokens_used,
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-                model=model,
-            )
-
-            # Parse JSON response
-            forecast = self._parse_response(raw_text)
-            forecast.model_used = model
-            forecast.tokens_used = tokens_used
-            forecast.latency_ms = latency_ms
-            forecast.raw_response = raw_text
-
-            logger.info(
-                f"Claude [{model}] assessed '{market.question[:50]}...' → "
-                f"{forecast.probability:.0%} (temp={temperature}, latency: {latency_ms}ms, tokens: {tokens_used})"
-            )
-            # Flag extreme divergence from market price at the forecaster level
-            # so downstream callers can make informed decisions.
-            max_div = self.settings.claude.max_divergence_from_market
-            divergence = abs(forecast.probability - market.yes_price)
-            if divergence > max_div:
-                logger.warning(
-                    f"High divergence: Claude ({forecast.probability:.0%}) vs market "
-                    f"({market.yes_price:.0%}) = {divergence:.0%} for '{market.question[:50]}...'"
-                )
-                forecast.high_divergence = True
-
-            # Cache successful forecasts to avoid redundant API calls.
-            # Store the market price at cache time for price-based invalidation.
-            if not forecast.parse_failed:
-                forecast._cached_market_price = market.yes_price  # type: ignore[attr-defined]
-                self._forecast_cache.set(cache_key, forecast)
-            # Successful call — reset circuit breaker failure counter
-            self._consecutive_failures = 0
-            return forecast
-
-        except asyncio.TimeoutError:
-            timeout = self.settings.claude.api_timeout_seconds
-            logger.warning(f"Claude API call timed out after {timeout}s")
-            self._record_api_failure()
-            return ForecastResult(
-                probability=market.yes_price,
-                confidence_low=max(0, market.yes_price - 0.25),
-                confidence_high=min(1, market.yes_price + 0.25),
-                reasoning="API call timed out after 60s",
-                model_used=model,
-                latency_ms=int((time.monotonic() - start_time) * 1000),
-                parse_failed=True,
+                timeout=timeout,
             )
         except anthropic.RateLimitError:
             # Retry up to 3 times with exponential backoff before falling back
@@ -399,29 +360,15 @@ class ClaudeForecaster:
                             system=SYSTEM_PROMPT,
                             messages=[{"role": "user", "content": prompt}],
                         ),
-                        timeout=self.settings.claude.api_timeout_seconds,
+                        timeout=timeout,
                     )
-                    latency_ms = int((time.monotonic() - start_time) * 1000)
                     raw_text = self._extract_text(response)
                     if raw_text is None:
                         continue
-                    tokens_used = response.usage.input_tokens + response.usage.output_tokens
-                    self._track_tokens(
-                        tokens_used,
-                        input_tokens=response.usage.input_tokens,
-                        output_tokens=response.usage.output_tokens,
-                        model=model,
-                    )
-                    forecast = self._parse_response(raw_text)
-                    forecast.model_used = model
-                    forecast.tokens_used = tokens_used
-                    forecast.latency_ms = latency_ms
-                    forecast.raw_response = raw_text
                     logger.info(
-                        f"Claude rate limit retry {retry_attempt} succeeded for "
-                        f"'{market.question[:50]}...'"
+                        f"Claude rate limit retry {retry_attempt} succeeded"
                     )
-                    return forecast
+                    return response
                 except anthropic.RateLimitError:
                     continue
                 except Exception as e:
@@ -429,17 +376,8 @@ class ClaudeForecaster:
                     break
 
             logger.warning("Claude API rate limit retries exhausted, returning market price as fallback")
-            # Rate limit exhausted counts as a failure for circuit breaker purposes
-            self._record_api_failure()
-            return ForecastResult(
-                probability=market.yes_price,
-                confidence_low=max(0, market.yes_price - 0.25),
-                confidence_high=min(1, market.yes_price + 0.25),
-                reasoning="Rate limited — retries exhausted, using market price as fallback",
-                model_used=model,
-                latency_ms=int((time.monotonic() - start_time) * 1000),
-                parse_failed=True,
-            )
+            raise  # Re-raise the original RateLimitError
+
         except anthropic.APIConnectionError as e:
             # M-11: Retryable connection error — backoff like rate limits
             for retry_attempt in range(1, 4):
@@ -459,30 +397,16 @@ class ClaudeForecaster:
                             system=SYSTEM_PROMPT,
                             messages=[{"role": "user", "content": prompt}],
                         ),
-                        timeout=self.settings.claude.api_timeout_seconds,
+                        timeout=timeout,
                     )
-                    latency_ms = int((time.monotonic() - start_time) * 1000)
                     raw_text = self._extract_text(response)
                     if raw_text is None:
                         continue
-                    tokens_used = response.usage.input_tokens + response.usage.output_tokens
-                    self._track_tokens(
-                        tokens_used,
-                        input_tokens=response.usage.input_tokens,
-                        output_tokens=response.usage.output_tokens,
-                        model=model,
-                    )
-                    forecast = self._parse_response(raw_text)
-                    forecast.model_used = model
-                    forecast.tokens_used = tokens_used
-                    forecast.latency_ms = latency_ms
-                    forecast.raw_response = raw_text
                     logger.info(
-                        f"Claude connection retry {retry_attempt} succeeded for "
-                        f"'{market.question[:50]}...'"
+                        f"Claude connection retry {retry_attempt} succeeded"
                     )
                     self._consecutive_failures = 0
-                    return forecast
+                    return response
                 except anthropic.APIConnectionError:
                     continue
                 except Exception as retry_e:
@@ -490,6 +414,143 @@ class ClaudeForecaster:
                     break
 
             logger.warning("Claude API connection retries exhausted, returning market price as fallback")
+            raise  # Re-raise the original APIConnectionError
+
+    def _parse_api_response(
+        self,
+        response,
+        market: Market,
+        model: str,
+        start_time: float,
+        temperature: float,
+    ) -> ForecastResult:
+        """Parse API response, track tokens, check divergence, and cache result.
+
+        Handles empty responses, token tracking, divergence flagging, and
+        caching of successful forecasts.
+
+        Args:
+            response: Raw Claude API response object
+            market: The market being assessed
+            model: Model name used for the call
+            start_time: Monotonic time when the call started
+            temperature: Temperature used for the call
+
+        Returns:
+            ForecastResult with all metadata populated
+        """
+        latency_ms = int((time.monotonic() - start_time) * 1000)
+        raw_text = self._extract_text(response)
+        if raw_text is None:
+            logger.warning("Claude API returned empty content for assess_market")
+            return ForecastResult(
+                probability=0.5, reasoning="Empty API response",
+                parse_failed=True, model_used=model, latency_ms=latency_ms,
+            )
+        tokens_used = response.usage.input_tokens + response.usage.output_tokens
+        self._track_tokens(
+            tokens_used,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            model=model,
+        )
+
+        # Parse JSON response
+        forecast = self._parse_response(raw_text)
+        forecast.model_used = model
+        forecast.tokens_used = tokens_used
+        forecast.latency_ms = latency_ms
+        forecast.raw_response = raw_text
+
+        logger.info(
+            f"Claude [{model}] assessed '{market.question[:50]}...' → "
+            f"{forecast.probability:.0%} (temp={temperature}, latency: {latency_ms}ms, tokens: {tokens_used})"
+        )
+        # Flag extreme divergence from market price at the forecaster level
+        # so downstream callers can make informed decisions.
+        max_div = self.settings.claude.max_divergence_from_market
+        divergence = abs(forecast.probability - market.yes_price)
+        if divergence > max_div:
+            logger.warning(
+                f"High divergence: Claude ({forecast.probability:.0%}) vs market "
+                f"({market.yes_price:.0%}) = {divergence:.0%} for '{market.question[:50]}...'"
+            )
+            forecast.high_divergence = True
+
+        # Cache successful forecasts to avoid redundant API calls.
+        # Store the market price at cache time for price-based invalidation.
+        cache_key = f"assess:{market.ticker}"
+        if not forecast.parse_failed:
+            forecast._cached_market_price = market.yes_price  # type: ignore[attr-defined]
+            self._forecast_cache.set(cache_key, forecast)
+        # Successful call — reset circuit breaker failure counter
+        self._consecutive_failures = 0
+        return forecast
+
+    async def assess_market(
+        self,
+        market: Market,
+        news_context: str = "",
+        position_value: float = 0.0,
+        base_rate_context: str = "",
+    ) -> ForecastResult:
+        """Assess a market's true probability using Claude.
+
+        Args:
+            market: The market to assess
+            news_context: Additional news/context to include
+            position_value: Expected position size (determines model selection)
+            base_rate_context: Historical base rate string for the category
+
+        Returns:
+            ForecastResult with probability estimate and reasoning
+        """
+        # Stage 1: Precondition checks (circuit breaker, budget, cache)
+        early_result = self._check_preconditions(market)
+        if early_result is not None:
+            return early_result
+
+        # Stage 2: Build prompt with news enrichment
+        prompt, model, category, temperature = await self._build_prompt(
+            market, news_context, base_rate_context, position_value,
+        )
+
+        # Stage 3: Call Claude API with retry logic
+        start_time = time.monotonic()
+        timeout = self.settings.claude.api_timeout_seconds
+        try:
+            response = await self._call_claude(prompt, model, temperature, timeout)
+
+            # Stage 4: Parse response, track tokens, check divergence, cache
+            return self._parse_api_response(
+                response, market, model, start_time, temperature,
+            )
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Claude API call timed out after {timeout}s")
+            self._record_api_failure()
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0, market.yes_price - 0.25),
+                confidence_high=min(1, market.yes_price + 0.25),
+                reasoning="API call timed out after 60s",
+                model_used=model,
+                latency_ms=int((time.monotonic() - start_time) * 1000),
+                parse_failed=True,
+            )
+        except anthropic.RateLimitError:
+            # Rate limit exhausted counts as a failure for circuit breaker purposes
+            self._record_api_failure()
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0, market.yes_price - 0.25),
+                confidence_high=min(1, market.yes_price + 0.25),
+                reasoning="Rate limited — retries exhausted, using market price as fallback",
+                model_used=model,
+                latency_ms=int((time.monotonic() - start_time) * 1000),
+                parse_failed=True,
+            )
+        except anthropic.APIConnectionError:
             self._record_api_failure()
             return ForecastResult(
                 probability=market.yes_price,
@@ -619,31 +680,14 @@ class ClaudeForecaster:
             )
             return None
 
-        model = self._select_model(position_value)
-        category = classify_market(market)
+        # Build prompt (also handles news enrichment and model selection)
+        prompt, model, category, _temperature = await self._build_prompt(
+            market, news_context, base_rate_context, position_value,
+        )
+
         temp_low = self.settings.claude.cross_check_temp_low
         temp_high = self.settings.claude.cross_check_temp_high
         threshold = self.settings.claude.cross_check_disagreement_threshold
-
-        # Enrich with news research
-        if not news_context:
-            news_context = await self.news_researcher.get_context(market.question)
-
-        close_date = ""
-        if market.end_date:
-            close_date = market.end_date.strftime("%Y-%m-%d %H:%M UTC")
-
-        resolution_criteria = self._validate_resolution_criteria(market.description)
-
-        prompt = build_prompt(
-            question=market.question,
-            resolution_criteria=resolution_criteria,
-            market_price=market.yes_price,
-            close_date=close_date,
-            category=category,
-            news_context=news_context or "No additional context available.",
-            base_rate_context=base_rate_context,
-        )
 
         async def _call_at_temp(temp: float) -> ForecastResult:
             client = self._get_client()

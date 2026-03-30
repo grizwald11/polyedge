@@ -828,7 +828,10 @@ class Database:
         """Log a completed trade. Ignores duplicates (same order_id + side)."""
         conn = self._get_conn()
         platform = trade.platform.value if hasattr(trade.platform, 'value') else str(trade.platform)
-        with self._write_lock:
+        if not self._write_lock.acquire(timeout=10):
+            logger.error("Database write lock timeout (10s) in log_trade — concurrent write contention")
+            raise TimeoutError("Database write lock acquisition timed out in log_trade")
+        try:
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO trades (order_id, market_id, platform, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -848,6 +851,8 @@ class Database:
             ))
             conn.commit()
             return cursor.lastrowid
+        finally:
+            self._write_lock.release()
 
     # ──────────────────────────────────────
     # Pending Order Operations (H-1)
@@ -860,22 +865,32 @@ class Database:
         On restart, load_pending_orders() rebuilds the dict from this table.
         """
         conn = self._get_conn()
-        with self._write_lock:
+        if not self._write_lock.acquire(timeout=10):
+            logger.error("Database write lock timeout (10s) in save_pending_order — concurrent write contention")
+            raise TimeoutError("Database write lock acquisition timed out in save_pending_order")
+        try:
             conn.execute(
                 "INSERT OR REPLACE INTO pending_orders (order_id, cost) VALUES (?, ?)",
                 (order_id, cost),
             )
             conn.commit()
+        finally:
+            self._write_lock.release()
 
     def delete_pending_order(self, order_id: str) -> None:
         """Remove a pending order record (order filled, cancelled, or expired)."""
         conn = self._get_conn()
-        with self._write_lock:
+        if not self._write_lock.acquire(timeout=10):
+            logger.error("Database write lock timeout (10s) in delete_pending_order — concurrent write contention")
+            raise TimeoutError("Database write lock acquisition timed out in delete_pending_order")
+        try:
             conn.execute(
                 "DELETE FROM pending_orders WHERE order_id = ?",
                 (order_id,),
             )
             conn.commit()
+        finally:
+            self._write_lock.release()
 
     def load_pending_orders(self) -> dict[str, float]:
         """Load all persisted pending orders on startup.
@@ -899,7 +914,10 @@ class Database:
         """Log the reason a position was exited."""
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
-        with self._write_lock:
+        if not self._write_lock.acquire(timeout=10):
+            logger.error("Database write lock timeout (10s) in log_exit_reason — concurrent write contention")
+            raise TimeoutError("Database write lock acquisition timed out in log_exit_reason")
+        try:
             conn.execute("""
                 INSERT INTO position_exits
                     (market_id, platform, strategy, exit_reason, exit_price,
@@ -910,6 +928,8 @@ class Database:
                 exit_price, position_size, realized_pnl, now,
             ))
             conn.commit()
+        finally:
+            self._write_lock.release()
 
     def has_recent_trade(self, market_id: str, seconds: int = 300) -> bool:
         """Check if a BUY trade was placed on this market within the last N seconds.

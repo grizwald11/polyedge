@@ -99,6 +99,22 @@ MAX_ARTICLE_CHARS = 3000  # Max chars to extract per article
 ARTICLE_FETCH_TIMEOUT = 5.0  # Seconds per article fetch
 DEDUP_SIMILARITY_THRESHOLD = 0.7
 
+# L-7: Source trust multipliers — higher-trust sources get boosted relevance scores
+SOURCE_TRUST_MULTIPLIERS: dict[str, float] = {
+    "reuters.com": 1.3,
+    "apnews.com": 1.3,
+    "nytimes.com": 1.2,
+    "washingtonpost.com": 1.2,
+    "bbc.com": 1.2,
+    "bbc.co.uk": 1.2,
+    "bloomberg.com": 1.2,
+    "ft.com": 1.15,
+    "wsj.com": 1.15,
+    "economist.com": 1.15,
+    "npr.org": 1.1,
+    "politico.com": 1.1,
+}
+
 # Common abbreviation → expanded form for broader news coverage
 _ENTITY_EXPANSIONS = [
     ("Fed ", "Federal Reserve "),
@@ -542,7 +558,11 @@ class NewsResearcher:
                         recency_bonus = 0.05
                         break
 
-        return min(1.0, overlap + recency_bonus)
+        # L-7: Apply source trust multiplier
+        source_lower = result.source.lower()
+        trust_multiplier = SOURCE_TRUST_MULTIPLIERS.get(source_lower, 1.0)
+
+        return min(1.0, (overlap + recency_bonus) * trust_multiplier)
 
     def _deduplicate(self, results: list[NewsResult]) -> list[NewsResult]:
         """Remove near-duplicate results based on title word overlap."""
@@ -612,6 +632,11 @@ class NewsResearcher:
         # Extract text using stdlib HTML parser (robust, not regex)
         text = _extract_text_from_html(html)
         if not text:
+            return ""
+
+        # M-12: Reject articles with fewer than 50 words (likely nav/ad fragments)
+        if len(text.split()) < 50:
+            logger.debug(f"Article too short ({len(text.split())} words): {url[:80]}")
             return ""
 
         # Extract sentences (>40 chars) for quality content

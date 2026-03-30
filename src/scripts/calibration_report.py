@@ -114,6 +114,7 @@ def format_report(analyzer: CalibrationAnalyzer) -> str:
 
 
 def main():
+    """Generate and display a calibration accuracy report from the database."""
     parser = argparse.ArgumentParser(description="PolyEdge Calibration Report")
     parser.add_argument("--db", default="data/markets.db", help="Database path")
     args = parser.parse_args()

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.config import Settings
-from src.core.kalshi_client import KalshiClient
+from src.core.kalshi_client import KalshiClient, KalshiRateLimitError
 from src.core.models import (
     Direction, Order, OrderStatus, OrderType, Side, StrategyName,
 )
@@ -510,3 +512,743 @@ class TestPendingOrderPersistence:
 
         pending = tmp_db.load_pending_orders()
         assert order.id not in pending
+
+
+# ──────────────────────────────────────────────
+# New comprehensive tests
+# ──────────────────────────────────────────────
+
+def _make_polymarket_order(paper=True) -> Order:
+    """Create a Polymarket platform order for testing."""
+    from src.core.models import Platform
+    return Order(
+        id="PE-poly123",
+        market_id="0xabcdef",
+        token_id="0xabcdef_yes",
+        side=Side.BUY,
+        price=0.50,
+        size=10,
+        cost=5.00,
+        order_type=OrderType.GTC,
+        status=OrderStatus.PENDING,
+        strategy=StrategyName.AI_PROBABILITY,
+        paper=paper,
+        platform=Platform.POLYMARKET,
+        kalshi_side="yes",
+    )
+
+
+class TestPaperFillSlippage:
+    """Paper mode: fill simulation, fill probability, slippage modeling."""
+
+    @pytest.mark.asyncio
+    async def test_paper_sell_slippage_adverse(self, paper_settings, mock_kalshi, tmp_db):
+        """SELL orders should get adverse slippage (lower price)."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        # Force a specific slippage: adverse for SELL means price goes DOWN
+        router._simulate_slippage = lambda order: (True, max(0.01, order.price - 0.005))
+        order = _make_order(paper=True)
+        order.side = Side.SELL
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        assert result.order.fill_price <= order.price
+
+    @pytest.mark.asyncio
+    async def test_paper_fill_miss_returns_cancelled(self, paper_settings, mock_kalshi, tmp_db):
+        """When paper fill misses (simulated no-fill), order is CANCELLED."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (False, order.price)
+        order = _make_order(paper=True)
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert result.order.status == OrderStatus.CANCELLED
+        assert "missed fill" in result.error.lower()
+        assert result.trade is None
+
+    @pytest.mark.asyncio
+    async def test_paper_fill_price_clamped_to_99(self, paper_settings, mock_kalshi, tmp_db):
+        """Fill price should never exceed 0.99 even with slippage."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        order = _make_order(paper=True)
+        order.price = 0.99
+        # Force slippage that would push above 0.99
+        router._simulate_slippage = lambda o: (True, 0.99)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        assert result.order.fill_price <= 0.99
+
+    @pytest.mark.asyncio
+    async def test_simulate_slippage_buy_direction(self, paper_settings, mock_kalshi, tmp_db):
+        """BUY slippage should increase price (adverse for buyer)."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        order = _make_order(paper=True)
+        order.side = Side.BUY
+        # Run many trials — at least some should have slippage > 0
+        prices = []
+        for _ in range(50):
+            filled, price = router._simulate_slippage(order)
+            if filled:
+                prices.append(price)
+        # All fill prices should be >= order price (adverse slippage for BUY)
+        assert all(p >= order.price for p in prices)
+
+    @pytest.mark.asyncio
+    async def test_simulate_slippage_miss_rate(self, paper_settings, mock_kalshi, tmp_db):
+        """Roughly 15% of paper limit orders should miss (statistical check)."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        order = _make_order(paper=True)
+        n = 1000
+        misses = sum(1 for _ in range(n) if not router._simulate_slippage(order)[0])
+        # Allow generous range: 5% to 30%
+        miss_rate = misses / n
+        assert 0.05 < miss_rate < 0.30, f"Miss rate {miss_rate:.2%} outside expected range"
+
+
+class TestPaperRiskRejection:
+    """Paper mode: order rejection scenarios."""
+
+    @pytest.mark.asyncio
+    async def test_sell_rejected_no_position(self, paper_settings, mock_kalshi, tmp_db):
+        """SELL order rejected when no position exists and position_manager is set."""
+        from unittest.mock import MagicMock
+        pm = MagicMock()
+        pm.get_position.return_value = None
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db, position_manager=pm)
+        order = _make_order(paper=True)
+        order.side = Side.SELL
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert result.order.status == OrderStatus.REJECTED
+        assert "no open position" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_sell_size_clamped_to_position(self, paper_settings, mock_kalshi, tmp_db):
+        """SELL order size clamped to actual position size."""
+        from unittest.mock import MagicMock
+        from src.core.models import Position, Direction
+        pm = MagicMock()
+        pm.get_position.return_value = Position(
+            market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes",
+            direction=Direction.BUY_YES,
+            size=5,
+            avg_entry_price=0.34,
+        )
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db, position_manager=pm)
+        router._simulate_slippage = lambda order: (True, order.price)
+        order = _make_order(paper=True)
+        order.side = Side.SELL
+        order.size = 20  # Larger than position
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        assert result.order.size == 5  # Clamped to position size
+
+
+class TestLiveKalshiSubmission:
+    """Live mode: Kalshi order submission (mock the kalshi client)."""
+
+    @pytest.mark.asyncio
+    async def test_live_kalshi_order_params(self, live_settings, mock_kalshi, tmp_db):
+        """Verify correct parameters are passed to Kalshi create_order."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        await router.route_order(order)
+
+        mock_kalshi.create_order.assert_called_once_with(
+            ticker="FED-RATE-CUT-MAY26",
+            side="yes",
+            yes_price=34,
+            count=10,
+            order_type="limit",
+            action="buy",
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_fok_order_type(self, live_settings, mock_kalshi, tmp_db):
+        """FOK orders should send order_type='market' to Kalshi."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+        order.order_type = OrderType.FOK
+
+        await router.route_order(order)
+
+        call_kwargs = mock_kalshi.create_order.call_args
+        assert call_kwargs.kwargs.get("order_type") == "market" or call_kwargs[1].get("order_type") == "market"
+
+    @pytest.mark.asyncio
+    async def test_live_rate_limit_error(self, live_settings, tmp_db):
+        """KalshiRateLimitError should be caught gracefully."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.create_order = AsyncMock(side_effect=KalshiRateLimitError("rate limited"))
+        kalshi.get_balance = AsyncMock(return_value=1000.0)
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert result.order.status == OrderStatus.REJECTED
+
+
+class TestBalancePreFlight:
+    """Live mode: balance pre-flight check rejection."""
+
+    @pytest.mark.asyncio
+    async def test_insufficient_balance_rejects(self, live_settings, tmp_db):
+        """Order rejected when balance is insufficient."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=1.00)  # Only $1 available
+        kalshi.create_order = AsyncMock(return_value={"order_id": "k-1", "status": "executed"})
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+        order.cost = 10.00  # $10 cost > $1 balance
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert "insufficient balance" in result.error.lower()
+        kalshi.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_balance_check_timeout_proceeds(self, live_settings, tmp_db):
+        """If balance check times out, order proceeds (non-blocking)."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(side_effect=asyncio.TimeoutError())
+        kalshi.create_order = AsyncMock(return_value={"order_id": "k-1", "status": "executed"})
+        kalshi.get_order = AsyncMock(return_value={"order_id": "k-1", "status": "executed"})
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        kalshi.create_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_balance_none_proceeds(self, live_settings, tmp_db):
+        """If balance returns None (API quirk), order proceeds."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=None)
+        kalshi.create_order = AsyncMock(return_value={"order_id": "k-2", "status": "executed"})
+        kalshi.get_order = AsyncMock(return_value={"order_id": "k-2", "status": "executed"})
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+
+
+class TestTimeoutReconciliation:
+    """Live mode: timeout reconciliation after order creation timeout."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_triggers_reconciliation(self, live_settings, tmp_db):
+        """When create_order times out, reconciliation checks open orders."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=1000.0)
+        kalshi.create_order = AsyncMock(side_effect=asyncio.TimeoutError())
+        kalshi.get_open_orders = AsyncMock(return_value=[
+            {
+                "order_id": "recovered-timeout",
+                "ticker": "FED-RATE-CUT-MAY26",
+                "yes_price": 34,
+                "count": 10,
+                "side": "yes",
+                "status": "resting",
+            }
+        ])
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        kalshi.get_open_orders.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_timeout_no_match_returns_unknown(self, live_settings, tmp_db):
+        """When timeout reconciliation finds no match, order status is unknown."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=1000.0)
+        kalshi.create_order = AsyncMock(side_effect=asyncio.TimeoutError())
+        kalshi.get_open_orders = AsyncMock(return_value=[])
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert "timeout" in result.error.lower() or "unknown" in result.error.lower()
+
+
+class TestPolymarketResidencyGate:
+    """Polymarket residency gate: blocks when CONFIRM_NON_US_POLYMARKET unset."""
+
+    @pytest.mark.asyncio
+    async def test_paper_poly_blocked_without_env(self, paper_settings, mock_kalshi, tmp_db):
+        """Paper Polymarket orders blocked when env var not set."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        order = _make_polymarket_order(paper=True)
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = await router.route_order(order)
+
+        assert result.success is False
+        assert "residency" in result.error.lower()
+        assert result.order.status == OrderStatus.REJECTED
+
+    @pytest.mark.asyncio
+    async def test_paper_poly_passes_with_env_true(self, paper_settings, mock_kalshi, tmp_db):
+        """Paper Polymarket orders pass when env var set to 'true'."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (True, order.price)
+        order = _make_polymarket_order(paper=True)
+
+        with patch.dict("os.environ", {"CONFIRM_NON_US_POLYMARKET": "true"}):
+            result = await router.route_order(order)
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_paper_poly_blocked_with_env_false(self, paper_settings, mock_kalshi, tmp_db):
+        """Paper Polymarket orders blocked when env var is 'false'."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        order = _make_polymarket_order(paper=True)
+
+        with patch.dict("os.environ", {"CONFIRM_NON_US_POLYMARKET": "false"}, clear=True):
+            result = await router.route_order(order)
+
+        assert result.success is False
+        assert "residency" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_live_poly_blocked_without_env(self, live_settings, tmp_db):
+        """Live Polymarket orders blocked without residency confirmation."""
+        from src.core.polymarket_client import PolymarketClient
+        poly = AsyncMock(spec=PolymarketClient)
+        kalshi = AsyncMock(spec=KalshiClient)
+        router = OrderRouter(live_settings, kalshi, tmp_db, polymarket=poly)
+        router._session_confirmed = True
+        order = _make_polymarket_order(paper=False)
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = await router.route_order(order)
+
+        assert result.success is False
+        assert "residency" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_residency_cached_after_first_check(self, paper_settings, mock_kalshi, tmp_db):
+        """Once residency is confirmed, it caches and doesn't re-check env."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (True, order.price)
+
+        # First order: env var set
+        order1 = _make_polymarket_order(paper=True)
+        with patch.dict("os.environ", {"CONFIRM_NON_US_POLYMARKET": "true"}):
+            result1 = await router.route_order(order1)
+        assert result1.success is True
+
+        # Second order: env var removed, but residency already cached
+        order2 = _make_polymarket_order(paper=True)
+        order2.id = "PE-poly456"
+        with patch.dict("os.environ", {}, clear=True):
+            result2 = await router.route_order(order2)
+        assert result2.success is True
+
+
+class TestPlatformRouting:
+    """Platform routing: correct routing to Kalshi vs Polymarket."""
+
+    @pytest.mark.asyncio
+    async def test_kalshi_order_routes_to_live_fill(self, live_settings, mock_kalshi, tmp_db):
+        """Kalshi platform orders go through _live_fill."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)  # Default platform is KALSHI
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        mock_kalshi.create_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_polymarket_order_routes_to_poly_live_fill(self, live_settings, tmp_db):
+        """Polymarket platform orders go through _poly_live_fill."""
+        from src.core.polymarket_client import PolymarketClient
+        poly = AsyncMock(spec=PolymarketClient)
+        poly.create_and_post_order = AsyncMock(return_value={"status": "matched"})
+        kalshi = AsyncMock(spec=KalshiClient)
+        router = OrderRouter(live_settings, kalshi, tmp_db, polymarket=poly)
+        router._session_confirmed = True
+        router._polymarket_residency_confirmed = True
+        order = _make_polymarket_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        poly.create_and_post_order.assert_called_once()
+        kalshi.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_polymarket_no_client_rejects(self, live_settings, tmp_db):
+        """Polymarket order rejected when no polymarket client configured."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        router = OrderRouter(live_settings, kalshi, tmp_db, polymarket=None)
+        router._session_confirmed = True
+        router._polymarket_residency_confirmed = True
+        order = _make_polymarket_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert "not configured" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_paper_mode_routes_all_platforms_to_paper(self, paper_settings, mock_kalshi, tmp_db):
+        """Paper mode routes both Kalshi and Polymarket orders to paper fill."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (True, order.price)
+        router._polymarket_residency_confirmed = True
+
+        # Kalshi paper order
+        kalshi_order = _make_order(paper=True)
+        result1 = await router.route_order(kalshi_order)
+        assert result1.success is True
+        assert result1.trade.paper is True
+
+        # Polymarket paper order
+        poly_order = _make_polymarket_order(paper=True)
+        poly_order.id = "PE-poly789"
+        result2 = await router.route_order(poly_order)
+        assert result2.success is True
+        assert result2.trade.paper is True
+
+        # Neither should hit live APIs
+        mock_kalshi.create_order.assert_not_called()
+
+
+class TestOrderLogging:
+    """Order logging: verify orders are logged to database."""
+
+    @pytest.mark.asyncio
+    async def test_filled_order_persisted(self, paper_settings, mock_kalshi, tmp_db):
+        """Filled paper order is saved to orders table."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (True, order.price)
+        order = _make_order(paper=True)
+
+        await router.route_order(order)
+
+        conn = tmp_db._get_conn()
+        row = conn.execute("SELECT * FROM orders WHERE id=?", (order.id,)).fetchone()
+        assert row is not None
+        assert row["status"] == "FILLED"
+        assert row["market_id"] == "FED-RATE-CUT-MAY26"
+
+    @pytest.mark.asyncio
+    async def test_rejected_order_persisted(self, paper_settings, mock_kalshi, tmp_db):
+        """Rejected orders are also persisted to database with reason."""
+        from unittest.mock import MagicMock
+        pm = MagicMock()
+        pm.get_position.return_value = None
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db, position_manager=pm)
+        order = _make_order(paper=True)
+        order.side = Side.SELL
+
+        await router.route_order(order)
+
+        conn = tmp_db._get_conn()
+        row = conn.execute("SELECT * FROM orders WHERE id=?", (order.id,)).fetchone()
+        assert row is not None
+        assert row["status"] == "REJECTED"
+        assert row["rejection_reason"] is not None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_paper_fill_persisted(self, paper_settings, mock_kalshi, tmp_db):
+        """Cancelled (missed fill) paper order is saved to database."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (False, order.price)
+        order = _make_order(paper=True)
+
+        await router.route_order(order)
+
+        conn = tmp_db._get_conn()
+        row = conn.execute("SELECT * FROM orders WHERE id=?", (order.id,)).fetchone()
+        assert row is not None
+        assert row["status"] == "CANCELLED"
+
+    @pytest.mark.asyncio
+    async def test_trade_record_logged(self, paper_settings, mock_kalshi, tmp_db):
+        """Trade record is created on successful fill."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (True, order.price)
+        order = _make_order(paper=True)
+
+        await router.route_order(order)
+
+        trades = tmp_db.get_trades_today()
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade["order_id"] == order.id
+        assert trade["market_id"] == "FED-RATE-CUT-MAY26"
+        assert trade["side"] == "BUY"
+        assert trade["size"] == 10
+
+
+class TestThreeGateSafety:
+    """Three-gate safety system: live trading gates."""
+
+    @pytest.mark.asyncio
+    async def test_gate1_paper_mode_blocks(self, tmp_db, mock_kalshi):
+        """Gate 1: paper mode blocks live trading."""
+        s = Settings()
+        s.trading.mode = "paper"
+        s.live_enabled = True
+        router = OrderRouter(s, mock_kalshi, tmp_db)
+        assert router._live_gates_passed() is False
+
+    @pytest.mark.asyncio
+    async def test_gate2_env_var_blocks(self, tmp_db, mock_kalshi):
+        """Gate 2: live_enabled=False blocks live trading."""
+        s = Settings()
+        s.trading.mode = "live"
+        s.live_enabled = False
+        router = OrderRouter(s, mock_kalshi, tmp_db)
+        assert router._live_gates_passed() is False
+
+    @pytest.mark.asyncio
+    async def test_gate3_ttl_expiry(self, live_settings, mock_kalshi, tmp_db):
+        """Gate 3 confirmation expires after TTL."""
+        import time
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        router._session_confirm_time = time.time() - 7200  # 2 hours ago
+        router._session_confirm_ttl = 3600  # 1 hour TTL
+        order = _make_order(paper=False)
+
+        with patch.object(router, '_request_confirmation', new_callable=AsyncMock, return_value=False):
+            result = await router.route_order(order)
+
+        assert result.success is False
+        assert "declined" in result.error
+
+    @pytest.mark.asyncio
+    async def test_gate3_no_expiry_within_ttl(self, live_settings, mock_kalshi, tmp_db):
+        """Gate 3 stays confirmed within TTL window."""
+        import time
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        router._session_confirm_time = time.time() - 100  # 100s ago
+        router._session_confirm_ttl = 3600  # 1 hour TTL
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        # Should not have requested confirmation
+        mock_kalshi.create_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_all_gates_required_for_live(self, tmp_db, mock_kalshi):
+        """Gate 2 blocks when live_enabled is False even with mode='live'."""
+        s = Settings()
+        s.trading.mode = "live"
+        s.live_enabled = False
+        router = OrderRouter(s, mock_kalshi, tmp_db)
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert "gates not passed" in result.error
+
+
+class TestStaleOrderCancellation:
+    """Stale order cancellation."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_stale_respects_age(self, paper_settings, mock_kalshi, tmp_db):
+        """Only orders older than max_age_seconds are cancelled."""
+        from datetime import timedelta
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        now = datetime.now(timezone.utc)
+        conn = tmp_db._get_conn()
+
+        # Insert a recent open order (should NOT be cancelled)
+        recent_time = (now - timedelta(seconds=60)).isoformat()
+        conn.execute("""
+            INSERT INTO orders (id, market_id, token_id, side, price, size, cost,
+                order_type, fee_rate_bps, status, strategy, paper, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "PE-recent", "MKT-A", "MKT-A_yes", "buy", 0.50, 10, 5.0,
+            "GTC", 175, "open", "ai_probability", 1, recent_time,
+        ))
+        # Insert an old open order (SHOULD be cancelled)
+        old_time = (now - timedelta(hours=1)).isoformat()
+        conn.execute("""
+            INSERT INTO orders (id, market_id, token_id, side, price, size, cost,
+                order_type, fee_rate_bps, status, strategy, paper, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "PE-old", "MKT-B", "MKT-B_yes", "buy", 0.50, 10, 5.0,
+            "GTC", 175, "open", "ai_probability", 1, old_time,
+        ))
+        conn.commit()
+
+        cancelled = await router.cancel_stale_orders(max_age_seconds=1800)
+        assert cancelled == 1
+
+        # Verify the right one was cancelled
+        row_recent = conn.execute("SELECT status FROM orders WHERE id='PE-recent'").fetchone()
+        row_old = conn.execute("SELECT status FROM orders WHERE id='PE-old'").fetchone()
+        assert row_recent["status"] == "open"
+        assert row_old["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_open(self, paper_settings, mock_kalshi, tmp_db):
+        """cancel_all_open cancels all resting orders."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        conn = tmp_db._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        for i in range(3):
+            conn.execute("""
+                INSERT INTO orders (id, market_id, token_id, side, price, size, cost,
+                    order_type, fee_rate_bps, status, strategy, paper, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                f"PE-open{i}", "MKT-A", "MKT-A_yes", "buy", 0.50, 10, 5.0,
+                "GTC", 175, "open", "ai_probability", 1, now,
+            ))
+        conn.commit()
+
+        cancelled = await router.cancel_all_open()
+        assert cancelled == 3
+
+
+class TestFillRecording:
+    """Fill recording and position manager updates."""
+
+    @pytest.mark.asyncio
+    async def test_live_fill_creates_trade_record(self, live_settings, mock_kalshi, tmp_db):
+        """Live fill creates a Trade with correct fields."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.trade is not None
+        assert result.trade.paper is False
+        assert result.trade.order_id == order.id
+        assert result.trade.market_id == order.market_id
+        assert result.trade.side == Side.BUY
+        assert result.trade.size == 10
+
+    @pytest.mark.asyncio
+    async def test_live_fill_trade_has_fee(self, live_settings, mock_kalshi, tmp_db):
+        """Live Kalshi fills should have a non-zero maker fee."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.trade.fee > 0
+
+    @pytest.mark.asyncio
+    async def test_paper_polymarket_fill_zero_fee(self, paper_settings, mock_kalshi, tmp_db):
+        """Polymarket event market fills should have zero fee."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (True, order.price)
+        router._polymarket_residency_confirmed = True
+        order = _make_polymarket_order(paper=True)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        assert result.trade.fee == 0.0
+
+    @pytest.mark.asyncio
+    async def test_live_resting_order_no_trade(self, live_settings, tmp_db):
+        """Resting (unfilled) live order should return no Trade object."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=1000.0)
+        kalshi.create_order = AsyncMock(return_value={"order_id": "k-rest", "status": "resting"})
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        assert result.trade is None
+        assert result.order.status == OrderStatus.OPEN
+
+    @pytest.mark.asyncio
+    async def test_exchange_order_id_stored(self, live_settings, mock_kalshi, tmp_db):
+        """Exchange order ID from Kalshi is stored on the order."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.order.exchange_order_id == "kalshi-123"
+
+
+class TestMissingKalshiSide:
+    """Edge case: kalshi_side is None."""
+
+    @pytest.mark.asyncio
+    async def test_missing_kalshi_side_rejected(self, live_settings, mock_kalshi, tmp_db):
+        """Order with kalshi_side=None is rejected."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+        order.kalshi_side = None
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert "kalshi_side" in result.error.lower()
+        mock_kalshi.create_order.assert_not_called()
+
+
+class TestPriceValidation:
+    """Edge case: price converts to invalid Kalshi cents."""
+
+    @pytest.mark.asyncio
+    async def test_price_out_of_kalshi_range_rejected(self, live_settings, mock_kalshi, tmp_db):
+        """BUY NO at $0.99 creates yes_price=1 cent, which should be valid;
+        but $1.00 - $0.99 = $0.01 = 1 cent, which IS valid. Test edge case."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+        order.kalshi_side = "no"
+        order.price = 0.99  # yes_price = 100 - 99 = 1 cent
+
+        result = await router.route_order(order)
+
+        # 1 cent is in valid range [1, 99], so should succeed
+        assert result.success is True

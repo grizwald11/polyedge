@@ -55,6 +55,9 @@ class NewsIngestion:
             "https://feeds.reuters.com/reuters/topNews",
             "https://feeds.reuters.com/reuters/businessNews",
             "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
+            "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+            "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+            "https://rss.nytimes.com/services/xml/rss/nyt/Science.xml",
         ]
         self.max_article_age_seconds = max_article_age_minutes * 60
         self.min_relevance = min_relevance

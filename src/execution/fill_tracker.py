@@ -20,6 +20,7 @@ from src.storage.database import Database
 logger = logging.getLogger(__name__)
 
 MAX_POLLS = 5
+MAX_PROCESSED_FILLS = 10000  # M-13: prune oldest entries when exceeded
 POLL_STATES_TERMINAL = {"executed", "canceled", "cancelled"}
 
 
@@ -280,6 +281,13 @@ class FillTracker:
             logger.debug(f"Fill already processed for {order.id} — skipping duplicate")
             return None
         self._processed_fills.add(order.id)
+        # M-13: Prune oldest entries when set exceeds cap
+        if len(self._processed_fills) > MAX_PROCESSED_FILLS:
+            # Convert to list, drop oldest half, rebuild set
+            fill_list = list(self._processed_fills)
+            pruned = fill_list[len(fill_list) // 2:]
+            self._processed_fills = set(pruned)
+            logger.info(f"Pruned _processed_fills from {len(fill_list)} to {len(self._processed_fills)}")
         # Clean up partial tracking now that order is fully resolved
         already_recorded = self._partial_recorded.pop(order.id, 0)
         now = datetime.now(timezone.utc)

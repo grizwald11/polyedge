@@ -292,7 +292,7 @@ def build_prompt(
     category: MarketCategory,
     news_context: str = "No additional context available.",
     base_rate_context: str = "",
-) -> str:
+) -> str:  # M-6: explicit return type
     """Build a complete prompt for Claude from market data.
 
     All external text (question, resolution criteria, news) is sanitized

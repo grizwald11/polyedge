@@ -531,13 +531,14 @@ class TestFetchArticleText:
         researcher = NewsResearcher()
 
         # Craft HTML with clearly identifiable first and later sentences
+        # Must exceed 50-word minimum article filter (M-12)
         html_content = (
             "<html><body>"
-            "<p>First sentence of the article, this is the important lede. "
-            "Second sentence provides more context about the event happening now. "
-            "Third sentence with extra details about the background. "
-            "Fourth sentence discusses further implications. "
-            "Fifth sentence wraps up the introduction.</p>"
+            "<p>First sentence of the article, this is the important lede that readers see first. "
+            "Second sentence provides more context about the event happening now and its wider significance. "
+            "Third sentence with extra details about the background and what led to this development unfolding today. "
+            "Fourth sentence discusses further implications for the economy and stock markets going forward this week. "
+            "Fifth sentence wraps up the introduction and previews what experts have to say about the situation.</p>"
             "</body></html>"
         )
         mock_response = self._make_html_response(html_content)
