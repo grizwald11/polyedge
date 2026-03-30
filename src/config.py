@@ -52,6 +52,7 @@ class TradingConfig(BaseModel):
     kelly_fraction: float = 0.5
     prefer_maker: bool = True
     daily_loss_limit_pct: float = 0.10
+    max_drawdown_pct: float = 0.20  # H-3: Halt if equity drops >20% from peak
     max_obvious_no_pct: float = 0.10
     obvious_no_probability_multiplier: float = 0.3  # Conservative P(YES) scaling for obvious-NO markets.
     # The multiplier scales the market's YES price when estimating true P(YES):
@@ -59,6 +60,7 @@ class TradingConfig(BaseModel):
     # At 0.3: YES=$0.03 → P(NO)=0.991. Accounts for illiquidity inflating YES prices.
     # Calibrate against historical obvious-NO resolutions. Range: 0.1 (very conservative) to 0.5.
     max_trades_per_cycle: int = 5  # Max trades per scan cycle to prevent overtrading
+    max_concurrent_positions: int = 6  # H-2: Hard cap on simultaneous open positions
     allow_position_additions: bool = True  # If False, block all trades on markets where a position already exists
     min_confidence: float = 0.55  # Minimum signal confidence required to trade
 

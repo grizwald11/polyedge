@@ -202,12 +202,19 @@ class TestCalibrationMultiplier:
         sizer.update_calibration_multiplier(0.15)
         assert sizer.calibration_multiplier == 1.0
 
-    def test_fair_brier_reduces_to_50(self, sizer):
+    def test_fair_brier_reduces_to_75(self, sizer):
+        """M-11: Fair Brier (0.20) now reduces to 75% (was 50%)."""
         sizer.update_calibration_multiplier(0.20)
+        assert sizer.calibration_multiplier == 0.75
+
+    def test_mediocre_brier_reduces_to_50(self, sizer):
+        """M-11: New mediocre band at 0.25 reduces to 50%."""
+        sizer.update_calibration_multiplier(0.25)
         assert sizer.calibration_multiplier == 0.50
 
     def test_poor_brier_reduces_to_25(self, sizer):
-        sizer.update_calibration_multiplier(0.25)
+        """M-11: Poor Brier (0.30) reduces to 25% (was 0.28)."""
+        sizer.update_calibration_multiplier(0.30)
         assert sizer.calibration_multiplier == 0.25
 
     def test_terrible_brier_halts_sizing(self, sizer):
@@ -215,7 +222,7 @@ class TestCalibrationMultiplier:
         assert sizer.calibration_multiplier == 0.0
 
     def test_terrible_brier_returns_zero_contracts(self, sizer):
-        """Brier > 0.28 (worse than random) should produce 0 contracts."""
+        """Brier > 0.30 (worse than random) should produce 0 contracts."""
         sizer.update_calibration_multiplier(0.35)
         contracts = sizer.calculate_position_size(0.10, 0.60, 500.0)
         assert contracts == 0

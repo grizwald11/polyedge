@@ -41,6 +41,7 @@ class ClaudeForecaster:
         self._total_tokens_today: int = 0
         self._total_cost_today: float = 0.0  # Estimated USD cost
         self._today_date: str = ""
+        self._call_count_today: int = 0  # L-5: Track call count for avg token estimate
         # Per-million-token pricing (input/output) by model family.
         # Defaults as of March 2026 — verify at https://www.anthropic.com/pricing
         # and override via settings.claude.model_pricing if prices change.
@@ -105,14 +106,22 @@ class ClaudeForecaster:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != self._today_date:
             if self._today_date and self._total_tokens_today > 0:
+                # L-5: Log actual avg tokens per call for budget estimate refinement
+                avg_tokens = (
+                    self._total_tokens_today / self._call_count_today
+                    if self._call_count_today > 0 else 0
+                )
                 logger.info(
-                    f"Claude API usage yesterday: {self._total_tokens_today:,} tokens, "
-                    f"~${self._total_cost_today:.2f}"
+                    f"Claude API usage yesterday: {self._total_tokens_today:,} tokens "
+                    f"across {self._call_count_today} calls "
+                    f"(avg {avg_tokens:,.0f} tokens/call), ~${self._total_cost_today:.2f}"
                 )
             self._today_date = today
             self._total_tokens_today = 0
             self._total_cost_today = 0.0
+            self._call_count_today = 0
         self._total_tokens_today += tokens
+        self._call_count_today += 1
         if input_tokens or output_tokens:
             self._total_cost_today += self._estimate_cost(input_tokens, output_tokens, model)
         budget = self.settings.claude.daily_token_budget

@@ -197,12 +197,14 @@ class FillTracker:
         already_recorded = self._partial_recorded.get(order.id, 0)
         delta = filled_count - already_recorded
         if delta < 0:
+            # H-6: Accept API fill corrections unconditionally. Previously we
+            # skipped lower counts, which left stale position data in the DB.
             logger.warning(
                 f"Non-monotonic filled_count for {order.id}: "
-                f"API={filled_count}, recorded={already_recorded} — using max defensively"
+                f"API={filled_count}, recorded={already_recorded} — "
+                f"accepting correction (H-6)"
             )
-            # Use max defensively: don't lose track of already-recorded fills
-            self._partial_recorded[order.id] = max(already_recorded, filled_count)
+            self._partial_recorded[order.id] = filled_count
             return None
         if delta == 0:
             return None

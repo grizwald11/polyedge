@@ -39,6 +39,9 @@ class Metrics:
         # M-21: Edge vs return correlation (bounded to last 1000 entries)
         self._edge_return_log: list[dict] = []
         self._max_edge_return_entries = 1000
+        # M-10: Track edges for ALL signals (generated + risk-gated)
+        self._all_signal_edges: list[float] = []
+        self._gated_signal_edges: list[float] = []
 
     def _check_daily_reset(self) -> None:
         """Reset daily counters at midnight UTC."""
@@ -86,13 +89,27 @@ class Metrics:
             })
         )
 
-    def record_signal_generated(self) -> None:
-        """Record a signal was generated (M-22)."""
-        self.signals_generated += 1
+    def record_signal_generated(self, edge: float = 0.0) -> None:
+        """Record a signal was generated (M-22).
 
-    def record_signal_risk_gated(self) -> None:
-        """Record a signal was blocked by risk gates (M-22)."""
+        Args:
+            edge: Predicted edge for this signal (M-10: tracked for all signals)
+        """
+        self.signals_generated += 1
+        self._all_signal_edges.append(edge)
+        if len(self._all_signal_edges) > self._max_edge_return_entries:
+            self._all_signal_edges = self._all_signal_edges[-self._max_edge_return_entries:]
+
+    def record_signal_risk_gated(self, edge: float = 0.0) -> None:
+        """Record a signal was blocked by risk gates (M-22).
+
+        Args:
+            edge: Predicted edge for the gated signal (M-10: tracks gated edges)
+        """
         self.signals_risk_gated += 1
+        self._gated_signal_edges.append(edge)
+        if len(self._gated_signal_edges) > self._max_edge_return_entries:
+            self._gated_signal_edges = self._gated_signal_edges[-self._max_edge_return_entries:]
 
     def record_signal_executed(self) -> None:
         """Record a signal was executed (M-22)."""
@@ -151,6 +168,14 @@ class Metrics:
             "signals_generated": self.signals_generated,
             "signals_risk_gated": self.signals_risk_gated,
             "signals_executed": self.signals_executed,
+            "avg_signal_edge": (
+                round(sum(self._all_signal_edges) / len(self._all_signal_edges), 4)
+                if self._all_signal_edges else None
+            ),
+            "avg_gated_edge": (
+                round(sum(self._gated_signal_edges) / len(self._gated_signal_edges), 4)
+                if self._gated_signal_edges else None
+            ),
             "seconds_since_last_cycle": (
                 round(seconds_since_last_cycle, 0)
                 if seconds_since_last_cycle is not None

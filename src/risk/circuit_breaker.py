@@ -28,6 +28,8 @@ class CircuitBreaker:
         self._consecutive_losing_days = 0
         self._last_day_checked: Optional[str] = None
         self._reduced_sizing = False
+        # H-3: Peak-to-trough drawdown tracking
+        self._high_water_mark: float = settings.trading.bankroll
         self._load_state()
 
     @property
@@ -60,6 +62,22 @@ class CircuitBreaker:
                 else:
                     return False
             else:
+                return False
+
+        # H-3: Max drawdown check — halt if equity drops >20% from peak
+        equity = bankroll + unrealized_pnl
+        if equity > self._high_water_mark:
+            self._high_water_mark = equity
+        if self._high_water_mark > 0:
+            drawdown = (self._high_water_mark - equity) / self._high_water_mark
+            max_dd = self.settings.trading.max_drawdown_pct
+            if drawdown >= max_dd:
+                reason = (
+                    f"Max drawdown hit: {drawdown:.1%} from peak "
+                    f"${self._high_water_mark:.2f} (limit {max_dd:.0%})"
+                )
+                self._halt(reason)
+                logger.critical(f"CIRCUIT BREAKER HALTED: {reason}")
                 return False
 
         # Check daily loss limit (realized + discounted unrealized).

@@ -90,6 +90,10 @@ CREATE TABLE IF NOT EXISTS signals (
     timestamp TEXT NOT NULL,
     acted_on INTEGER DEFAULT 0,
     order_id TEXT,
+    risk_passed INTEGER,          -- H-1/H-5: 1=passed, 0=rejected, NULL=not checked
+    risk_failed_checks TEXT DEFAULT '',  -- H-5: comma-separated failed gate names
+    risk_warnings TEXT DEFAULT '',       -- H-5: comma-separated warning messages
+    status TEXT DEFAULT 'generated',     -- H-1: generated|risk_gated|executed|skipped
     FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_signals_market ON signals(market_id);
@@ -567,6 +571,17 @@ class Database:
             conn.execute("ALTER TABLE cooldowns ADD COLUMN duration_seconds INTEGER")
             logger.info("Migration v10: added duration_seconds column to cooldowns")
 
+        # Migration v11: add risk gate columns to signals (H-1/H-5)
+        signal_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+        }
+        if "risk_passed" not in signal_cols:
+            conn.execute("ALTER TABLE signals ADD COLUMN risk_passed INTEGER")
+            conn.execute("ALTER TABLE signals ADD COLUMN risk_failed_checks TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE signals ADD COLUMN risk_warnings TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE signals ADD COLUMN status TEXT DEFAULT 'generated'")
+            logger.info("Migration v11: added risk gate columns to signals (H-1/H-5)")
+
         conn.commit()
 
     # ──────────────────────────────────────
@@ -771,8 +786,29 @@ class Database:
         """Mark a signal as acted on after successful trade execution."""
         conn = self._get_conn()
         conn.execute(
-            "UPDATE signals SET acted_on=1, order_id=? WHERE id=?",
+            "UPDATE signals SET acted_on=1, order_id=?, status='executed' WHERE id=?",
             (order_id, signal_id),
+        )
+        conn.commit()
+
+    def update_signal_risk_result(
+        self, signal_id: int, passed: bool,
+        failed_checks: list[str], warnings: list[str],
+    ) -> None:
+        """Record risk gate results for a signal (H-1/H-5)."""
+        conn = self._get_conn()
+        status = "generated" if passed else "risk_gated"
+        conn.execute(
+            """UPDATE signals
+               SET risk_passed=?, risk_failed_checks=?, risk_warnings=?, status=?
+               WHERE id=?""",
+            (
+                int(passed),
+                ", ".join(failed_checks),
+                ", ".join(warnings),
+                status,
+                signal_id,
+            ),
         )
         conn.commit()
 

@@ -188,6 +188,20 @@ class OrderRouter:
 
     async def _paper_fill(self, order: Order) -> OrderResult:
         """Simulate a fill in paper trading mode."""
+        # L-4: Apply Polymarket jurisdiction gate even in paper mode,
+        # so paper trading results are realistic about which markets are tradeable.
+        if order.platform == Platform.POLYMARKET and not self._polymarket_residency_confirmed:
+            import os
+            if os.environ.get("CONFIRM_NON_US_POLYMARKET", "").lower() != "true":
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = (
+                    "Polymarket residency gate: set CONFIRM_NON_US_POLYMARKET=true "
+                    "to confirm you are not a US resident (applies to paper trading too — L-4)"
+                )
+                self._log_order(order)
+                return OrderResult(success=False, order=order, error=order.rejection_reason)
+            self._polymarket_residency_confirmed = True
+
         now = datetime.now(timezone.utc)
 
         # Simulate realistic fill with possible slippage/miss
@@ -320,6 +334,24 @@ class OrderRouter:
                 f"(from order.price=${order.price:.4f}, side={kalshi_side})"
             )
             return OrderResult(success=False, order=order, error=order.rejection_reason)
+
+        # M-14: Balance pre-flight check — verify sufficient funds before submitting.
+        # Catches stale bankroll state that would result in a rejected API call.
+        try:
+            balance = await asyncio.wait_for(self.kalshi.get_balance(), timeout=5.0)
+            if balance is not None and order.cost > balance:
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = (
+                    f"Insufficient balance: order cost ${order.cost:.2f} > "
+                    f"available ${balance:.2f}"
+                )
+                self._log_order(order)
+                logger.warning(f"Balance pre-flight failed: {order.rejection_reason}")
+                return OrderResult(success=False, order=order, error=order.rejection_reason)
+        except (asyncio.TimeoutError, Exception) as e:
+            # Non-blocking: if balance check fails, proceed with order submission
+            # (the exchange will reject if insufficient anyway)
+            logger.debug(f"Balance pre-flight check skipped: {e}")
 
         try:
             # Hard timeout on order creation to prevent hanging indefinitely.

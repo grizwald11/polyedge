@@ -16,11 +16,14 @@ logger = logging.getLogger(__name__)
 
 # Brier score thresholds for calibration-based sizing
 # Note: 0.25 = random guessing — must reduce aggressively at/above that
-BRIER_EXCELLENT = 0.10  # Full sizing
-BRIER_GOOD = 0.18       # Full sizing
-BRIER_FAIR = 0.22       # Reduce to 50%
-BRIER_POOR = 0.28       # Reduce to 25%
-# Above 0.28 → halt trading (0% sizing)
+# M-11: Closed gap between GOOD and FAIR (was 0.18/0.22, now 0.18/0.20)
+# to add a MEDIOCRE band at 0.20-0.25 with 75% sizing.
+BRIER_EXCELLENT = 0.10  # 110% sizing (reward)
+BRIER_GOOD = 0.18       # 100% sizing
+BRIER_FAIR = 0.20       # 75% sizing (M-11: was 0.22, closed gap)
+BRIER_MEDIOCRE = 0.25   # 50% sizing (M-11: new band)
+BRIER_POOR = 0.30       # 25% sizing (M-11: was 0.28, aligned with random=0.25)
+# Above 0.30 → halt trading (0% sizing)
 
 
 class KellySizer:
@@ -256,7 +259,9 @@ class KellySizer:
         elif brier_score <= BRIER_GOOD:
             mult = 1.0
         elif brier_score <= BRIER_FAIR:
-            mult = 0.50
+            mult = 0.75  # M-11: was 0.50, now gentler step-down
+        elif brier_score <= BRIER_MEDIOCRE:
+            mult = 0.50  # M-11: new band for mediocre calibration
         elif brier_score <= BRIER_POOR:
             mult = 0.25
         else:

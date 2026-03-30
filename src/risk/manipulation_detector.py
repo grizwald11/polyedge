@@ -95,6 +95,11 @@ class ManipulationDetector:
         if flag is not None:
             return flag
 
+        # M-5: Check for slow manipulation (steady drift over 3+ snapshots)
+        flag = self._check_slow_drift(market_id, history, now)
+        if flag is not None:
+            return flag
+
         # Check for crossed/inverted book (YES + NO significantly != 1.0)
         flag = self._check_crossed_book(market, now)
         if flag is not None:
@@ -157,6 +162,60 @@ class ManipulationDetector:
 
         return None
 
+    def _check_slow_drift(
+        self,
+        market_id: str,
+        history: list[tuple[float, float]],
+        now: float,
+    ) -> ManipulationFlag | None:
+        """M-5: Detect slow manipulation — steady price drift over 3+ snapshots.
+
+        A monotonic price drift of >15% cumulative over 3+ consecutive snapshots
+        without any reversal suggests coordinated manipulation rather than
+        organic price discovery (which tends to oscillate).
+        """
+        if len(history) < 4:
+            return None
+
+        # Check last 5 snapshots (or fewer if unavailable)
+        # Require at least 4 points (3 moves) to distinguish slow drift from
+        # normal two-step price adjustments.
+        recent = history[-5:]
+        if len(recent) < 4:
+            return None
+
+        # Check if all moves are in the same direction (monotonic)
+        deltas = [recent[i][1] - recent[i - 1][1] for i in range(1, len(recent))]
+        all_up = all(d > 0.001 for d in deltas)
+        all_down = all(d < -0.001 for d in deltas)
+
+        if not (all_up or all_down):
+            return None
+
+        cumulative_move = abs(recent[-1][1] - recent[0][1])
+        time_span = recent[-1][0] - recent[0][0]
+
+        # Only flag if cumulative drift exceeds 15% and happened within 30 minutes
+        if cumulative_move >= 0.15 and time_span <= 1800:
+            direction = "up" if all_up else "down"
+            flag = ManipulationFlag(
+                market_id=market_id,
+                reason=(
+                    f"Slow drift: {len(deltas)} consecutive {direction} moves, "
+                    f"cumulative {cumulative_move:.0%} over {time_span:.0f}s "
+                    f"({recent[0][1]:.2f} → {recent[-1][1]:.2f})"
+                ),
+                detected_at=now,
+                price_move=cumulative_move,
+                previous_price=recent[0][1],
+                current_price=recent[-1][1],
+            )
+            self._flags[market_id] = flag
+            logger.warning("Manipulation flag: %s", flag.reason)
+            return flag
+
+        return None
+
     def _check_crossed_book(
         self,
         market: Market,
@@ -169,8 +228,10 @@ class ManipulationDetector:
 
         # Normal range is 0.98-1.02 for binary markets
         # Significant deviation suggests book manipulation or stale data
+        # M-6: Tightened from 8% to 5% — 8% allowed too much room for
+        # manipulated books to slip through undetected.
         deviation = abs(price_sum - 1.0)
-        if deviation > 0.08:
+        if deviation > 0.05:
             flag = ManipulationFlag(
                 market_id=market.ticker,
                 reason=(

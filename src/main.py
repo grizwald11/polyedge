@@ -445,6 +445,7 @@ async def _execute_signals(
     scanner, settings, bankroll, kelly_sizer, circuit_breaker,
     order_builder, order_router, risk_engine, position_manager,
     calibration, fill_tracker, alert_manager, logger,
+    metrics=None,
 ):
     """Execute trades for generated signals. Returns trades_executed count."""
     # ── Signal deconfliction ──
@@ -526,6 +527,9 @@ async def _execute_signals(
             continue
 
         signal_id = scanner.db.log_signal(signal)
+        # M-10: Track edge for all generated signals (including those that will be gated)
+        if metrics is not None:
+            metrics.record_signal_generated(edge=signal.edge)
 
         market = market_lookup.get(signal.market_id)
         if market is None:
@@ -566,7 +570,15 @@ async def _execute_signals(
         proposed_cost = order.cost
 
         risk_result = risk_engine.check_all(signal, market, contracts, proposed_cost)
+        # H-1/H-5: Persist risk gate results for every signal
+        scanner.db.update_signal_risk_result(
+            signal_id, risk_result.passed,
+            risk_result.failed_checks, risk_result.warnings,
+        )
         if not risk_result.passed:
+            # M-10: Track gated signal edges for comparison with executed edges
+            if metrics is not None:
+                metrics.record_signal_risk_gated(edge=signal.edge)
             continue
 
         result = await order_router.route_order(order)
@@ -610,6 +622,8 @@ async def _execute_signals(
             if not is_obvious_no:
                 edge_trades += 1
             acted_markets.add(signal.market_id)
+            if metrics is not None:
+                metrics.record_signal_executed()
 
     return trades_executed
 
@@ -655,8 +669,33 @@ async def scan_and_trade(
     _cycle_start = time.time()
     bankroll = settings.trading.bankroll
 
+    # L-7: Disk space check — warn if data partition is below 10%
+    try:
+        import shutil
+        db_path = settings.database.path
+        disk_usage = shutil.disk_usage(db_path if db_path != ":memory:" else ".")
+        free_pct = disk_usage.free / disk_usage.total
+        if free_pct < 0.05:
+            logger.critical(
+                f"DISK SPACE CRITICAL: {free_pct:.1%} free "
+                f"({disk_usage.free / (1024**3):.1f} GB) — database writes may fail"
+            )
+        elif free_pct < 0.10:
+            logger.warning(
+                f"Disk space low: {free_pct:.1%} free "
+                f"({disk_usage.free / (1024**3):.1f} GB)"
+            )
+    except Exception:
+        pass  # Non-critical check
+
     # 1. Sync bankroll
     bankroll = await _sync_bankroll(settings, kalshi, risk_engine, position_manager, bankroll, logger)
+
+    # H-7: Auto-check Kalshi key freshness every cycle
+    try:
+        kalshi.check_key_freshness()
+    except Exception as e:
+        logger.debug(f"Key freshness check: {e}")
 
     # 2. Check fills and cleanup stale orders
     await _check_fills_and_cleanup(fill_tracker, position_manager, order_router, settings, logger)
@@ -726,6 +765,7 @@ async def scan_and_trade(
         scanner, settings, bankroll, kelly_sizer, circuit_breaker,
         order_builder, order_router, risk_engine, position_manager,
         calibration, fill_tracker, alert_manager, logger,
+        metrics=metrics,
     )
 
     logger.info(

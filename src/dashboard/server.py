@@ -91,21 +91,38 @@ def create_app(
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        """Require API key when POLYEDGE_DASHBOARD_KEY is configured."""
+        """M-12: Require API key OR localhost origin for all requests.
+
+        When POLYEDGE_DASHBOARD_KEY is set, require it for all non-static paths.
+        When not set, only allow requests from localhost (127.0.0.1/::1) —
+        remote requests without a key are rejected.
+        """
+        if request.url.path.startswith("/static/"):
+            return await call_next(request)
+
         if _dashboard_key:
-            if not request.url.path.startswith("/static/"):
-                provided_key: Optional[str] = None
-                provided_key = request.query_params.get("key")
-                if not provided_key:
-                    auth_header = request.headers.get("Authorization", "")
-                    if auth_header.startswith("Bearer "):
-                        provided_key = auth_header[len("Bearer "):]
-                if provided_key != _dashboard_key:
-                    return Response(
-                        content='{"detail": "Unauthorized"}',
-                        status_code=401,
-                        media_type="application/json",
-                    )
+            provided_key: Optional[str] = None
+            provided_key = request.query_params.get("key")
+            if not provided_key:
+                auth_header = request.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer "):
+                    provided_key = auth_header[len("Bearer "):]
+            if provided_key != _dashboard_key:
+                return Response(
+                    content='{"detail": "Unauthorized"}',
+                    status_code=401,
+                    media_type="application/json",
+                )
+        else:
+            # M-12: No key configured — restrict to localhost only
+            client_host = getattr(request.client, "host", "") if request.client else ""
+            _localhost_hosts = {"127.0.0.1", "::1", "localhost", "", "testclient"}
+            if client_host not in _localhost_hosts:
+                return Response(
+                    content='{"detail": "Unauthorized — set POLYEDGE_DASHBOARD_KEY for remote access"}',
+                    status_code=401,
+                    media_type="application/json",
+                )
         return await call_next(request)
 
     # Static files

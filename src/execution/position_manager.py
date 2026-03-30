@@ -309,7 +309,9 @@ class PositionManager:
                 - pos.buy_fees, 4
             )
 
-        # Create a synthetic SELL trade to record the settlement in trade history
+        # Create a synthetic SELL trade to record the settlement in trade history.
+        # H-4: Include accumulated buy_fees to close the fee ledger — without this,
+        # P&L is overstated by the buy-side fees on settled positions.
         settlement_trade = Trade(
             order_id=f"settlement-{market_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
             market_id=market_id,
@@ -317,7 +319,7 @@ class PositionManager:
             side=Side.SELL,
             price=settlement_value,
             size=pos.size,
-            fee=0.0,
+            fee=pos.buy_fees,
             realized_pnl=realized_pnl,
             strategy=pos.strategy,
             paper=pos.paper,

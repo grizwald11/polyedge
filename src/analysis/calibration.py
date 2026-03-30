@@ -106,24 +106,37 @@ class CalibrationTracker:
         self,
         strategy: Optional[StrategyName] = None,
         days: Optional[int] = None,
+        use_time_decay: bool = True,
     ) -> Optional[float]:
         """Calculate Brier score for resolved predictions.
 
-        Brier score = mean((predicted - actual)^2)
+        Brier score = weighted_mean((predicted - actual)^2)
         Perfect = 0.0, random = 0.25, always wrong = 1.0
+
+        M-2: When use_time_decay=True, recent predictions are weighted more
+        heavily using exponential decay (half-life = 30 days). This ensures
+        the Brier score reflects current forecasting accuracy rather than
+        being diluted by stale predictions from months ago.
 
         Args:
             strategy: Filter by strategy (None = all)
             days: Only include predictions from last N days (None = all)
+            use_time_decay: Weight recent predictions more heavily (default True)
 
         Returns:
             Brier score or None if no resolved predictions
         """
+        import math
+
         records = self._get_resolved_records(strategy, days)
         if not records:
             return None
 
-        total = 0.0
+        now = datetime.now(timezone.utc)
+        HALF_LIFE_DAYS = 30.0  # M-2: half-life for exponential decay
+
+        weighted_total = 0.0
+        weight_sum = 0.0
         valid_count = 0
         skipped_null = 0
         skipped_bad = 0
@@ -147,7 +160,20 @@ class CalibrationTracker:
 
             brier = (predicted - outcome) ** 2
             self._bucket_brier_score(r, brier, bucket_scores)
-            total += brier
+
+            # M-2: Compute time-decay weight
+            if use_time_decay and r.get("predicted_at"):
+                try:
+                    pred_time = datetime.fromisoformat(r["predicted_at"])
+                    age_days = (now - pred_time).total_seconds() / 86400.0
+                    weight = math.exp(-math.log(2) * age_days / HALF_LIFE_DAYS)
+                except (ValueError, TypeError):
+                    weight = 1.0
+            else:
+                weight = 1.0
+
+            weighted_total += brier * weight
+            weight_sum += weight
             valid_count += 1
 
         if skipped_null or skipped_bad:
@@ -162,7 +188,7 @@ class CalibrationTracker:
         if valid_count == 0:
             return None
 
-        return total / valid_count
+        return weighted_total / weight_sum
 
     @staticmethod
     def _bucket_brier_score(

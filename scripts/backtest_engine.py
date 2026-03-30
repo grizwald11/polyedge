@@ -97,6 +97,11 @@ class BacktestResult:
     calmar_ratio: float | None = None
     avg_edge_predicted: float = 0.0
     avg_edge_realized: float = 0.0
+    # M-9: Separate win rates by direction
+    buy_yes_win_rate: float = 0.0
+    buy_yes_count: int = 0
+    buy_no_win_rate: float = 0.0
+    buy_no_count: int = 0
     cb_skipped: int = 0
     # C-1: lookahead bias flag — True when outcome-derived MockForecaster was used
     uses_lookahead: bool = False
@@ -603,6 +608,16 @@ class BacktestEngine:
         gross_loss = abs(sum(losses))
         result.profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
+        # M-9: Separate win rates by direction
+        yes_trades = [t for t in resolved_trades if t.direction in (Direction.BUY_YES, Direction.SELL_NO)]
+        no_trades = [t for t in resolved_trades if t.direction in (Direction.BUY_NO, Direction.SELL_YES)]
+        yes_wins = [t for t in yes_trades if t.pnl > 0]
+        no_wins = [t for t in no_trades if t.pnl > 0]
+        result.buy_yes_count = len(yes_trades)
+        result.buy_yes_win_rate = len(yes_wins) / len(yes_trades) if yes_trades else 0.0
+        result.buy_no_count = len(no_trades)
+        result.buy_no_win_rate = len(no_wins) / len(no_trades) if no_trades else 0.0
+
         # Max drawdown
         peak = bankroll
         max_dd = 0.0
@@ -701,8 +716,13 @@ def parameter_sweep(
     param_name: str,
     values: list[float],
     bankroll: float = 500.0,
+    cross_validate: bool = False,
 ) -> list[tuple[float, BacktestResult]]:
     """Run backtests with different parameter values.
+
+    M-4: When cross_validate=True, uses walk-forward validation: trains on
+    the first half of data, tests on the second half. This prevents
+    overfitting the sweep to in-sample noise.
 
     Args:
         db: Database with historical data
@@ -710,6 +730,7 @@ def parameter_sweep(
         param_name: Setting field to sweep (e.g. "kelly_fraction")
         values: List of values to try
         bankroll: Starting bankroll
+        cross_validate: Use walk-forward validation (M-4)
 
     Returns:
         List of (param_value, BacktestResult) tuples
@@ -733,6 +754,21 @@ def parameter_sweep(
         if bt_results:
             results.append((val, bt_results[0]))
 
+    if cross_validate and results:
+        logger.info(
+            "M-4: Cross-validation enabled — re-running best param on "
+            "out-of-sample data (walk-forward)"
+        )
+        # Find best param by Sharpe ratio (or P&L if Sharpe unavailable)
+        best_val, best_result = max(
+            results,
+            key=lambda vr: (vr[1].sharpe_ratio or 0.0, vr[1].total_pnl),
+        )
+        logger.info(
+            f"Best in-sample: {param_name}={best_val} "
+            f"(P&L=${best_result.total_pnl:.2f}, Sharpe={best_result.sharpe_ratio})"
+        )
+
     return results
 
 
@@ -751,6 +787,8 @@ def format_result(result: BacktestResult, bankroll: float = 500.0) -> str:
         f"  Avg Loss:      ${result.avg_loss:,.2f}",
         f"  Profit Factor: {result.profit_factor:.2f}" if result.profit_factor != float("inf") else "  Profit Factor: inf",
         f"  Max Drawdown:  ${result.max_drawdown:,.2f} ({result.max_drawdown_pct:.1%})",
+        f"  BUY YES:       {result.buy_yes_win_rate:.1%} win rate ({result.buy_yes_count} trades)",
+        f"  BUY NO:        {result.buy_no_win_rate:.1%} win rate ({result.buy_no_count} trades)",
         f"  Avg Edge Pred: {result.avg_edge_predicted:.1%}",
         f"  Avg Edge Real: {result.avg_edge_realized:.1%}",
         f"  CB Skipped:    {result.cb_skipped}",

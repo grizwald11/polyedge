@@ -226,6 +226,13 @@ class AIProbabilityStrategy:
 
         category = classify_market(market)
 
+        # M-8: Defense-in-depth — skip excluded categories even if scanner missed them.
+        # The scanner already filters, but strategies should enforce independently.
+        excluded = set(self.settings.scanning.exclude_categories)
+        if category.value in excluded:
+            logger.debug(f"Skipping {market.ticker}: category {category.value} is excluded")
+            return None
+
         # Category accuracy gating: skip categories where we're poorly calibrated
         # Brier > 0.30 = worse than random guessing (0.25) → skip entirely
         # Brier 0.20-0.30 = poor calibration → require higher edge (8% vs 5%)
@@ -374,6 +381,17 @@ class AIProbabilityStrategy:
 
         # Calculate edge
         edge = ensemble.edge  # positive = YES underpriced, negative = NO underpriced
+
+        # M-7: Edge significance check — reject when edge is smaller than
+        # the confidence interval half-width. If CI is 40-70% and edge is 5%,
+        # the edge is within the noise band and not statistically meaningful.
+        ci_half_width = ci_width / 2.0
+        if abs(edge) < ci_half_width and abs(edge) < 0.15:
+            logger.debug(
+                f"Edge significance rejection: {market.ticker} edge={abs(edge):.3f} < "
+                f"CI half-width={ci_half_width:.3f} — edge within noise band"
+            )
+            return None
 
         if abs(edge) < min_edge:
             # H-13: Log distinct reasons for edge rejection

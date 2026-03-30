@@ -38,9 +38,11 @@ class DataEnricher:
     def __init__(self, settings: Settings):
         self.settings = settings
         # Cache slow-changing data sources to avoid redundant API calls.
-        # TTLs: news (5 min), economic data (60 min), community forecasts (30 min).
+        # TTLs: news (2 min — M-3: reduced from 5 min for faster news-reactive
+        # trading; breaking news can move markets within minutes),
+        # economic data (60 min), community forecasts (30 min).
         from src.data.cache import TTLCache
-        self._news_cache = TTLCache(ttl_seconds=300)       # 5 min
+        self._news_cache = TTLCache(ttl_seconds=120)       # 2 min (M-3)
         self._econ_cache = TTLCache(ttl_seconds=3600)       # 60 min
         self._community_cache = TTLCache(ttl_seconds=1800)  # 30 min
         self.news_researcher = NewsResearcher(

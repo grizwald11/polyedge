@@ -125,6 +125,7 @@ class RiskEngine:
         self._check_cooldown(signal.market_id, failed)
         self._check_manipulation(market, failed)
         self._check_obvious_no_limit(signal, bankroll, proposed_cost, failed)
+        self._check_max_concurrent_positions(signal, failed)
 
         passed = len(failed) == 0
         result = RiskCheckResult(
@@ -384,6 +385,20 @@ class RiskEngine:
         # Then update in-memory
         self._cooldowns[market_id] = now
         self._cooldown_durations[market_id] = cd_duration
+
+    def _check_max_concurrent_positions(
+        self, signal: Signal, failed: list[str],
+    ) -> None:
+        """H-2: Hard cap on number of simultaneous open positions."""
+        max_positions = self.settings.trading.max_concurrent_positions
+        current_count = self.positions.get_position_count()
+        # Don't count if we already have a position in this market (position addition)
+        if self.positions.has_position(signal.market_id):
+            return
+        if current_count >= max_positions:
+            failed.append(
+                f"Max concurrent positions reached: {current_count} >= {max_positions}"
+            )
 
     def _get_min_edge(self, strategy: StrategyName) -> float:
         """Get minimum edge threshold for a strategy."""
