@@ -7,6 +7,9 @@ import asyncio
 
 import pytest
 
+# py-clob-client is optional — skip all tests if not installed
+pytest.importorskip("py_clob_client", reason="py-clob-client not installed")
+
 from src.core.polymarket_client import PolymarketClient
 
 

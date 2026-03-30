@@ -12,7 +12,7 @@ from __future__ import annotations
 import yaml
 from pathlib import Path
 
-from src.data.leaderboard import LeaderboardEntry, LeaderboardScraper
+from scripts.leaderboard import LeaderboardEntry, LeaderboardScraper
 
 
 def main():

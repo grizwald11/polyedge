@@ -68,8 +68,25 @@ class RiskEngine:
         return self.settings.trading.bankroll
 
     def update_bankroll(self, live_balance: float) -> None:
-        """Update bankroll from live balance sync."""
+        """Update bankroll from live balance sync. Persists to DB for crash recovery."""
         self._bankroll_override = live_balance
+        if self.db is not None:
+            try:
+                self.db.save_setting("live_bankroll", str(live_balance))
+            except Exception as e:
+                logger.debug(f"Failed to persist bankroll to DB: {e}")
+
+    def restore_bankroll(self) -> None:
+        """Restore live-synced bankroll from DB on startup."""
+        if self.db is None:
+            return
+        try:
+            stored = self.db.load_setting("live_bankroll")
+            if stored is not None:
+                self._bankroll_override = float(stored)
+                logger.info(f"Restored live bankroll from DB: ${self._bankroll_override:.2f}")
+        except (ValueError, TypeError) as e:
+            logger.debug(f"Could not restore bankroll from DB: {e}")
 
     def check_all(
         self,
@@ -79,7 +96,7 @@ class RiskEngine:
         proposed_cost: float,
         pending_order_cost: float = 0.0,
     ) -> RiskCheckResult:
-        """Run all 10 risk checks on a proposed trade.
+        """Run all 11 risk checks on a proposed trade.
 
         Args:
             signal: The trading signal
@@ -91,11 +108,52 @@ class RiskEngine:
         Returns:
             RiskCheckResult with pass/fail and details
         """
-        failed = []
-        warnings = []
+        failed: list[str] = []
+        warnings: list[str] = []
         bankroll = self.bankroll
 
-        # 1. Balance check — includes both filled positions and pending orders
+        committed = self._check_balance(bankroll, proposed_cost, pending_order_cost, failed)
+        self._check_position_size(bankroll, proposed_cost, failed)
+        self._check_total_exposure(bankroll, proposed_cost, committed, failed)
+        self._check_correlated_exposure(bankroll, signal, proposed_cost, failed, warnings)
+        self._check_circuit_breaker(failed)
+        self._check_liquidity(market, proposed_cost, failed, warnings)
+        self._check_existing_position(signal, failed, warnings)
+        self._check_signal_quality(signal, proposed_cost, failed)
+        self._check_resolution_date(market, failed, warnings)
+        self._check_cooldown(signal.market_id, failed)
+        self._check_manipulation(market, failed)
+        self._check_obvious_no_limit(signal, bankroll, proposed_cost, failed)
+
+        passed = len(failed) == 0
+        result = RiskCheckResult(
+            passed=passed,
+            failed_checks=failed,
+            warnings=warnings,
+            approved_size=proposed_size if passed else 0.0,
+        )
+
+        if not passed:
+            logger.info(
+                f"Risk REJECTED {signal.market_id}: {', '.join(failed)}"
+            )
+        elif warnings:
+            logger.info(
+                f"Risk PASSED {signal.market_id} with warnings: {', '.join(warnings)}"
+            )
+
+        return result
+
+    # -- Individual risk checks --------------------------------------------------
+
+    def _check_balance(
+        self, bankroll: float, proposed_cost: float, pending_order_cost: float,
+        failed: list[str],
+    ) -> float:
+        """1. Balance check — includes both filled positions and pending orders.
+
+        Returns committed capital for use in subsequent checks.
+        """
         total_exposure = self.positions.get_total_exposure()
         committed = total_exposure + pending_order_cost
         logger.debug(
@@ -105,8 +163,12 @@ class RiskEngine:
         available = bankroll - committed
         if proposed_cost > available:
             failed.append(f"Insufficient balance: need ${proposed_cost:.2f}, available ${available:.2f}")
+        return committed
 
-        # 2. Position size limit (max 5% of bankroll per position)
+    def _check_position_size(
+        self, bankroll: float, proposed_cost: float, failed: list[str],
+    ) -> None:
+        """2. Position size limit (max 5% of bankroll per position)."""
         max_position = bankroll * self.settings.trading.max_position_pct
         if proposed_cost > max_position:
             failed.append(
@@ -114,7 +176,11 @@ class RiskEngine:
                 f"${max_position:.2f} ({self.settings.trading.max_position_pct:.0%} limit)"
             )
 
-        # 3. Total exposure limit (max 40% of bankroll) — includes pending
+    def _check_total_exposure(
+        self, bankroll: float, proposed_cost: float, committed: float,
+        failed: list[str],
+    ) -> None:
+        """3. Total exposure limit (max 40% of bankroll) — includes pending."""
         new_total = committed + proposed_cost
         max_total = bankroll * self.settings.trading.max_total_exposure_pct
         if new_total > max_total:
@@ -123,7 +189,11 @@ class RiskEngine:
                 f"${max_total:.2f} ({self.settings.trading.max_total_exposure_pct:.0%} limit)"
             )
 
-        # 4. Correlated exposure (max 20% — event-based if available, else strategy-based)
+    def _check_correlated_exposure(
+        self, bankroll: float, signal: Signal, proposed_cost: float,
+        failed: list[str], warnings: list[str],
+    ) -> None:
+        """4. Correlated exposure (max 20% — event-based if available, else strategy-based)."""
         max_correlated = bankroll * self.settings.trading.max_correlated_exposure_pct
         if self.portfolio_risk is not None:
             correlated_exposure = self.portfolio_risk.get_correlated_exposure(signal.market_id)
@@ -131,10 +201,6 @@ class RiskEngine:
                 "Correlated exposure check (event-based): %s = $%.2f",
                 signal.market_id, correlated_exposure,
             )
-            # Warn if correlated_exposure == proposed_cost — this means only our own
-            # proposed position was counted, which happens when the market has no
-            # event_ticker and PortfolioRisk fell back to the market's own exposure.
-            # In that case correlated relationships to other markets may be missed.
             if correlated_exposure == proposed_cost and not self.portfolio_risk._get_event_ticker(signal.market_id):
                 warnings.append(
                     f"No event_ticker for {signal.market_id} — correlated exposure may be undercounted"
@@ -156,12 +222,17 @@ class RiskEngine:
                     f"${strategy_exposure + proposed_cost:.2f} > ${max_correlated:.2f}"
                 )
 
-        # 5. Circuit breaker
+    def _check_circuit_breaker(self, failed: list[str]) -> None:
+        """5. Circuit breaker."""
         if self.circuit_breaker.is_halted():
             halt_reason = self.circuit_breaker.halt_reason or "Unknown"
             failed.append(f"Circuit breaker active: {halt_reason}")
 
-        # 6. Market liquidity check
+    def _check_liquidity(
+        self, market: Market, proposed_cost: float,
+        failed: list[str], warnings: list[str],
+    ) -> None:
+        """6. Market liquidity check."""
         if market.liquidity > 0 and proposed_cost > market.liquidity * 0.10:
             failed.append(
                 f"Order too large for liquidity: ${proposed_cost:.2f} > "
@@ -170,41 +241,42 @@ class RiskEngine:
         elif market.liquidity > 0 and proposed_cost > market.liquidity * 0.05:
             warnings.append("Order >5% of book depth — expect slippage")
 
-        # 7. Existing position check (including cross-strategy hedge detection)
-        # By default (allow_position_additions=True), same- or opposite-direction
-        # additions are allowed with a warning.  Set allow_position_additions=False
-        # in config to hard-block any addition to an existing position.
-        if self.positions.has_position(signal.market_id):
-            existing = self.positions.get_position(signal.market_id)
-            if not self.settings.trading.allow_position_additions:
-                failed.append(f"Already have position in {signal.market_id}")
+    def _check_existing_position(
+        self, signal: Signal, failed: list[str], warnings: list[str],
+    ) -> None:
+        """7. Existing position check (including cross-strategy hedge detection)."""
+        if not self.positions.has_position(signal.market_id):
+            return
+        existing = self.positions.get_position(signal.market_id)
+        if not self.settings.trading.allow_position_additions:
+            failed.append(f"Already have position in {signal.market_id}")
+        else:
+            if existing and hasattr(existing, 'direction') and existing.direction != signal.direction:
+                warnings.append(
+                    f"Hedge detected: new {signal.direction.value} opposes existing "
+                    f"{existing.direction.value} in {signal.market_id}"
+                )
             else:
-                if existing and hasattr(existing, 'direction') and existing.direction != signal.direction:
-                    warnings.append(
-                        f"Hedge detected: new {signal.direction.value} opposes existing "
-                        f"{existing.direction.value} in {signal.market_id}"
-                    )
-                else:
-                    warnings.append(
-                        f"Adding to existing {signal.direction.value} position in {signal.market_id}"
-                    )
+                warnings.append(
+                    f"Adding to existing {signal.direction.value} position in {signal.market_id}"
+                )
 
-        # 8a. Minimum confidence check — reject signals with very low confidence
-        # to prevent trading on noisy or uncertain estimates.
+    def _check_signal_quality(
+        self, signal: Signal, proposed_cost: float, failed: list[str],
+    ) -> None:
+        """8a-e. Signal quality checks: confidence, cost, edge, probability range."""
+        # 8a. Minimum confidence
         min_confidence = self.settings.trading.min_confidence
         if signal.confidence < min_confidence:
             failed.append(
                 f"Confidence too low: {signal.confidence:.1%} < {min_confidence:.1%} minimum"
             )
 
-        # 8b. Minimum trade cost check — Kalshi minimum is 1 contract,
-        # so any non-zero size is valid. We only reject truly zero-cost trades.
+        # 8b. Minimum trade cost
         if proposed_cost <= 0:
             failed.append("Trade cost is zero")
 
-        # 8c. Edge minimum check — edge must be positive (we have a favorable view)
-        # and exceed the strategy-specific threshold. Negative edge means we agree
-        # with the market, so there's nothing to trade.
+        # 8c. Edge minimum
         min_edge = self._get_min_edge(signal.strategy)
         if not math.isfinite(signal.edge) or signal.edge <= 0:
             failed.append(
@@ -226,77 +298,66 @@ class RiskEngine:
                 f"for {signal.strategy.value}"
             )
 
-        # 8d. Probability range validation — reject untradeable extremes
+        # 8d. Probability range validation
         if signal.probability_estimate < 0.01 or signal.probability_estimate > 0.99:
             failed.append(
                 f"Probability {signal.probability_estimate:.2f} outside tradeable range (0.01-0.99)"
             )
 
-        # 8e. Edge vs theoretical maximum — edge can't exceed what's mathematically possible
+        # 8e. Edge vs theoretical maximum
         max_possible_edge = min(signal.probability_estimate, 1.0 - signal.probability_estimate)
-        if signal.edge > max_possible_edge + 0.001:  # Small tolerance for float math
+        if signal.edge > max_possible_edge + 0.001:
             failed.append(
                 f"Edge {signal.edge:.2%} exceeds theoretical max "
                 f"{max_possible_edge:.2%} for probability {signal.probability_estimate:.2%}"
             )
 
-        # 9. Resolution date check
+    def _check_resolution_date(
+        self, market: Market, failed: list[str], warnings: list[str],
+    ) -> None:
+        """9. Resolution date check."""
         days = market.days_to_resolution
         if days is not None and days < 1:
             failed.append(f"Market resolves in <1 day ({days:.1f} days)")
         elif days is not None and days > 365:
             warnings.append(f"Long-dated market: {days:.0f} days to resolution")
 
-        # 10. Cooldown check — duration depends on whether last exit was a loss
-        if signal.market_id in self._cooldowns:
-            last_exit = self._cooldowns[signal.market_id]
-            cd_duration = self._cooldown_durations.get(
-                signal.market_id, self.cooldown_seconds
-            )
-            elapsed = (datetime.now(timezone.utc) - last_exit).total_seconds()
-            if elapsed < cd_duration:
-                remaining = cd_duration - elapsed
-                failed.append(f"Cooldown active: {remaining:.0f}s remaining for {signal.market_id}")
-            else:
-                # Clean up expired cooldown
-                del self._cooldowns[signal.market_id]
-                self._cooldown_durations.pop(signal.market_id, None)
-                if self.db is not None:
-                    self.db.delete_cooldown(signal.market_id)
+    def _check_cooldown(self, market_id: str, failed: list[str]) -> None:
+        """10. Cooldown check — duration depends on whether last exit was a loss."""
+        if market_id not in self._cooldowns:
+            return
+        last_exit = self._cooldowns[market_id]
+        cd_duration = self._cooldown_durations.get(market_id, self.cooldown_seconds)
+        elapsed = (datetime.now(timezone.utc) - last_exit).total_seconds()
+        if elapsed < cd_duration:
+            remaining = cd_duration - elapsed
+            failed.append(f"Cooldown active: {remaining:.0f}s remaining for {market_id}")
+        else:
+            del self._cooldowns[market_id]
+            self._cooldown_durations.pop(market_id, None)
+            if self.db is not None:
+                self.db.delete_cooldown(market_id)
 
-        # 11. Manipulation detection — flag markets with suspicious activity
+    def _check_manipulation(self, market: Market, failed: list[str]) -> None:
+        """11. Manipulation detection — flag markets with suspicious activity."""
         manip_flag = self.manipulation_detector.check_market(market)
         if manip_flag is not None:
             failed.append(f"Manipulation flag: {manip_flag.reason}")
 
-        # Obvious NO specific: max 10% bankroll in obvious-no positions
-        if signal.strategy == StrategyName.OBVIOUS_NO:
-            no_exposure = self.positions.get_strategy_exposure(StrategyName.OBVIOUS_NO)
-            max_no = bankroll * self.settings.trading.max_obvious_no_pct
-            if no_exposure + proposed_cost > max_no:
-                failed.append(
-                    f"Obvious NO exposure limit: ${no_exposure + proposed_cost:.2f} > "
-                    f"${max_no:.2f} ({self.settings.trading.max_obvious_no_pct:.0%} limit)"
-                )
-
-        passed = len(failed) == 0
-        result = RiskCheckResult(
-            passed=passed,
-            failed_checks=failed,
-            warnings=warnings,
-            approved_size=proposed_size if passed else 0.0,
-        )
-
-        if not passed:
-            logger.info(
-                f"Risk REJECTED {signal.market_id}: {', '.join(failed)}"
+    def _check_obvious_no_limit(
+        self, signal: Signal, bankroll: float, proposed_cost: float,
+        failed: list[str],
+    ) -> None:
+        """Obvious NO specific: max 10% bankroll in obvious-no positions."""
+        if signal.strategy != StrategyName.OBVIOUS_NO:
+            return
+        no_exposure = self.positions.get_strategy_exposure(StrategyName.OBVIOUS_NO)
+        max_no = bankroll * self.settings.trading.max_obvious_no_pct
+        if no_exposure + proposed_cost > max_no:
+            failed.append(
+                f"Obvious NO exposure limit: ${no_exposure + proposed_cost:.2f} > "
+                f"${max_no:.2f} ({self.settings.trading.max_obvious_no_pct:.0%} limit)"
             )
-        elif warnings:
-            logger.info(
-                f"Risk PASSED {signal.market_id} with warnings: {', '.join(warnings)}"
-            )
-
-        return result
 
     def record_exit(self, market_id: str, pnl: float = 0.0):
         """Record a position exit for cooldown tracking.

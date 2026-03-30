@@ -119,7 +119,7 @@ class CircuitBreaker:
             return 0.5  # Quarter-Kelly (half of half-Kelly)
         return 1.0
 
-    def reset(self):
+    def reset(self) -> None:
         """Manually reset the circuit breaker."""
         self._halted = False
         self._halt_reason = None
@@ -129,7 +129,7 @@ class CircuitBreaker:
         self._persist_state()
         logger.info("Circuit breaker reset")
 
-    def reset_daily(self):
+    def reset_daily(self) -> None:
         """Reset daily halt (called at start of new trading day)."""
         if self._halted and "Daily loss limit" in (self._halt_reason or ""):
             self._halted = False
@@ -138,7 +138,7 @@ class CircuitBreaker:
             self._persist_state()
             logger.info("Circuit breaker: daily halt cleared for new day")
 
-    def record_daily_result(self, pnl: float):
+    def record_daily_result(self, pnl: float) -> None:
         """Record a day's P&L for consecutive loss tracking.
 
         Args:
@@ -154,7 +154,7 @@ class CircuitBreaker:
             self._reduced_sizing = False
         self._persist_state()
 
-    def _halt(self, reason: str):
+    def _halt(self, reason: str) -> None:
         """Halt all trading."""
         self._halted = True
         self._halt_reason = reason
@@ -162,7 +162,7 @@ class CircuitBreaker:
         self._persist_state()
         logger.warning(f"CIRCUIT BREAKER TRIGGERED: {reason}")
 
-    def _load_state(self):
+    def _load_state(self) -> None:
         """Load persisted state from database on startup."""
         state = self.db.load_circuit_breaker_state()
         if state is None:
@@ -186,7 +186,7 @@ class CircuitBreaker:
             if datetime.now(timezone.utc).date() > self._halt_time.date():
                 self.reset_daily()
 
-    def _persist_state(self):
+    def _persist_state(self) -> None:
         """Save current state to database."""
         self.db.save_circuit_breaker_state(
             consecutive_losing_days=self._consecutive_losing_days,
@@ -196,7 +196,7 @@ class CircuitBreaker:
             halt_time=self._halt_time.isoformat() if self._halt_time else None,
         )
 
-    def _update_consecutive_losses(self):
+    def _update_consecutive_losses(self) -> None:
         """Check consecutive losing day state (updated at day boundary via record_daily_result)."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if self._last_day_checked == today:

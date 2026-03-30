@@ -782,6 +782,26 @@ async def scan_and_trade(
         except Exception as e:
             logger.debug(f"Key freshness check failed: {e}")
 
+    # Check if any position markets have become closed/settled (M-13).
+    # If a market closes while we hold a position, alert and mark for exit.
+    market_by_ticker = {m.ticker: m for m in markets}
+    for pos in list(position_manager.get_all_positions()):
+        m = market_by_ticker.get(pos.market_id)
+        if m is not None and not m.active:
+            logger.warning(
+                f"Position market {pos.market_id} is no longer active "
+                f"(status={getattr(m, 'status', 'unknown')}) — marking for exit"
+            )
+            position_manager.mark_pending_exit(pos.market_id)
+            if alert_manager:
+                try:
+                    await alert_manager.send(
+                        f"MARKET CLOSED: {pos.market_id} — position held, marking for exit",
+                        level="warning",
+                    )
+                except Exception:
+                    pass  # Alert delivery is best-effort
+
     # Position sync with Kalshi every cycle in live mode to prevent desync.
     # Previously every 10 cycles (50 min gap) — too long, risks naked shorts
     # or double entries if fills arrive between syncs.
@@ -1171,6 +1191,7 @@ async def main():
     circuit_breaker = CircuitBreaker(settings, db)
     kelly_sizer = KellySizer(settings)
     risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db, portfolio_risk)
+    risk_engine.restore_bankroll()  # Restore live-synced bankroll from DB
 
     # Metrics
     metrics = Metrics()
@@ -1248,8 +1269,14 @@ async def main():
                     if position_manager.has_position(update.market_ticker):
                         logger.warning(
                             f"Market {update.market_ticker} settled via WebSocket "
-                            f"(status={update.status}) — marking for exit"
+                            f"(status={update.status}, settlement={update.settlement_value}) "
+                            f"— marking for exit"
                         )
+                        # Record settlement value for accurate P&L calculation
+                        if update.settlement_value is not None:
+                            position_manager.record_settlement(
+                                update.market_ticker, update.settlement_value
+                            )
                         position_manager.mark_pending_exit(update.market_ticker)
 
             ws_client.on_price_update(_on_price)

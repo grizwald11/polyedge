@@ -1325,6 +1325,33 @@ class Database:
         conn.commit()
 
     # ──────────────────────────────────────
+    # Key-value settings (for runtime state persistence)
+    # ──────────────────────────────────────
+
+    def save_setting(self, key: str, value: str) -> None:
+        """Persist a key-value setting (e.g., live bankroll)."""
+        conn = self._get_conn()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        conn.commit()
+
+    def load_setting(self, key: str) -> str | None:
+        """Load a persisted setting by key. Returns None if not found."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+            return row["value"] if row else None
+        except Exception:
+            return None  # Table may not exist yet
+
+    # ──────────────────────────────────────
     # Stats
     # ──────────────────────────────────────
 

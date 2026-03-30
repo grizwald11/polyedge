@@ -10,6 +10,10 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +21,7 @@ logger = logging.getLogger(__name__)
 class Metrics:
     """Simple metrics tracker — logs structured JSON for monitoring."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.cycle_count: int = 0
         self.trades_today: int = 0
         self.errors_today: int = 0
@@ -36,7 +40,7 @@ class Metrics:
         self._edge_return_log: list[dict] = []
         self._max_edge_return_entries = 1000
 
-    def _check_daily_reset(self):
+    def _check_daily_reset(self) -> None:
         """Reset daily counters at midnight UTC."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != self._daily_reset_date:
@@ -82,15 +86,15 @@ class Metrics:
             })
         )
 
-    def record_signal_generated(self):
+    def record_signal_generated(self) -> None:
         """Record a signal was generated (M-22)."""
         self.signals_generated += 1
 
-    def record_signal_risk_gated(self):
+    def record_signal_risk_gated(self) -> None:
         """Record a signal was blocked by risk gates (M-22)."""
         self.signals_risk_gated += 1
 
-    def record_signal_executed(self):
+    def record_signal_executed(self) -> None:
         """Record a signal was executed (M-22)."""
         self.signals_executed += 1
 
@@ -161,7 +165,7 @@ class Metrics:
             return True  # Just started, no cycles yet
         return (time.time() - self.last_cycle_time) < 600
 
-    def persist_to_db(self, db) -> None:
+    def persist_to_db(self, db: "Database") -> None:
         """Persist current metrics snapshot to database for cross-restart analysis.
 
         Stores a JSON snapshot in the metrics_snapshots table. Called at the end

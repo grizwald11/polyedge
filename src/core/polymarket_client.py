@@ -11,10 +11,18 @@ import logging
 from functools import partial
 from typing import Optional
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType as PolyOrderType
-
 logger = logging.getLogger(__name__)
+
+# Lazy import — py-clob-client is optional (only needed when Polymarket is enabled)
+try:
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import OrderArgs, OrderType as PolyOrderType
+    _PY_CLOB_AVAILABLE = True
+except ImportError:
+    _PY_CLOB_AVAILABLE = False
+    ClobClient = None  # type: ignore[assignment,misc]
+    OrderArgs = None  # type: ignore[assignment,misc]
+    PolyOrderType = None  # type: ignore[assignment,misc]
 
 
 class PolymarketClient:
@@ -31,31 +39,50 @@ class PolymarketClient:
         self._private_key = private_key
         self._chain_id = chain_id
         self._signature_type = signature_type
-        self._client: Optional[ClobClient] = None
+        self._client: Optional[object] = None
         self._initialized = False
+        self._disabled = not _PY_CLOB_AVAILABLE
+        if self._disabled:
+            logger.warning(
+                "py-clob-client not installed — Polymarket client disabled. "
+                "Install with: pip install py-clob-client"
+            )
 
     async def initialize(self):
         """Initialize the ClobClient and derive API credentials.
 
         Must be called before any trading operations.
+        Degrades gracefully if py-clob-client is not installed or credentials
+        are missing/invalid — logs an error and marks the client as disabled.
         """
         if self._initialized:
             return
+        if self._disabled:
+            logger.warning("Polymarket client disabled — skipping initialization")
+            return
 
-        loop = asyncio.get_running_loop()
-        self._client = await loop.run_in_executor(
-            None,
-            partial(
-                ClobClient,
-                self.host,
-                key=self._private_key,
-                chain_id=self._chain_id,
-                signature_type=self._signature_type,
-            ),
-        )
+        if not self._private_key:
+            logger.error(
+                "Polymarket private key not configured — client disabled. "
+                "Set POLYMARKET_PRIVATE_KEY in .env to enable."
+            )
+            self._disabled = True
+            return
 
-        # Derive or load API credentials
         try:
+            loop = asyncio.get_running_loop()
+            self._client = await loop.run_in_executor(
+                None,
+                partial(
+                    ClobClient,
+                    self.host,
+                    key=self._private_key,
+                    chain_id=self._chain_id,
+                    signature_type=self._signature_type,
+                ),
+            )
+
+            # Derive or load API credentials
             creds = await loop.run_in_executor(
                 None, self._client.create_or_derive_api_creds
             )
@@ -65,20 +92,30 @@ class PolymarketClient:
             self._initialized = True
             logger.info("Polymarket client initialized and API credentials derived")
         except Exception as e:
-            logger.error(f"Failed to derive Polymarket API credentials: {e}", exc_info=True)
-            raise
+            logger.error(
+                f"Polymarket client initialization failed — client disabled: {e}",
+                exc_info=True,
+            )
+            self._disabled = True
 
     async def _run(self, func, *args, **kwargs):
         """Run a synchronous ClobClient method in the executor."""
+        if self._disabled:
+            raise RuntimeError("PolymarketClient is disabled (py-clob-client not installed or init failed).")
         if not self._initialized:
             raise RuntimeError("PolymarketClient not initialized. Call initialize() first.")
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
+    @property
+    def is_available(self) -> bool:
+        """Return True if the client is initialized and operational."""
+        return self._initialized and not self._disabled
+
     async def health_check(self) -> bool:
         """Check if the CLOB API is reachable."""
         try:
-            if not self._client:
+            if self._disabled or not self._client:
                 return False
             result = await self._run(self._client.get_ok)
             return result == "OK"

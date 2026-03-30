@@ -5,6 +5,11 @@ Fed Funds rate, etc.) to enrich Claude's probability assessments on
 FED_MACRO and EARNINGS markets.
 
 Gracefully degrades if no FRED_API_KEY is configured.
+
+NOTE (accepted risk): FRED API requires the api_key as a query parameter
+(not in headers). This means the key appears in server access logs and
+HTTP proxy logs. FRED API keys are free and don't protect sensitive data,
+so this is an acceptable trade-off. See: https://fred.stlouisfed.org/docs/api/
 """
 
 from __future__ import annotations

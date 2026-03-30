@@ -118,18 +118,19 @@ _ENTITY_EXPANSIONS = [
     ("DNI ", "Director of National Intelligence "),
 ]
 
-# Check if ddgs (or legacy duckduckgo_search) is available
+# Check if ddgs (or legacy duckduckgo_search) is available.
+# The duckduckgo_search package was renamed to ddgs — suppress the rename warning.
+DDG_AVAILABLE = False
 try:
     from ddgs import DDGS
     DDG_AVAILABLE = True
 except ImportError:
     try:
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            from duckduckgo_search import DDGS
+            warnings.filterwarnings("ignore", message=".*renamed.*ddgs.*", category=RuntimeWarning)
+            from duckduckgo_search import DDGS  # type: ignore[no-redef]
         DDG_AVAILABLE = True
     except ImportError:
-        DDG_AVAILABLE = False
         logger.info("ddgs not installed — DDG search disabled")
 
 
@@ -322,6 +323,13 @@ class NewsResearcher:
                     )
                     response.raise_for_status()
                     data = response.json()
+                # Reset auth failure counter on any successful call
+                if self._serper_auth_failure_count > 0:
+                    logger.info(
+                        f"Serper API call succeeded — resetting auth failure counter "
+                        f"(was {self._serper_auth_failure_count})"
+                    )
+                    self._serper_auth_failure_count = 0
                 break  # Success
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429:
@@ -368,14 +376,23 @@ class NewsResearcher:
                     logger.warning(f"Serper search failed for '{query}': {e}")
                     return []
             except httpx.HTTPError as e:
+                # Sanitize error to avoid leaking API keys in logs
+                safe_err = str(e)
+                if self.serper_api_key and self.serper_api_key in safe_err:
+                    safe_err = safe_err.replace(self.serper_api_key, "***REDACTED***")
                 if attempt < max_retries:
                     wait = 2 ** attempt
-                    logger.debug(f"Serper network error, retrying in {wait}s: {e}")
+                    logger.debug(f"Serper network error, retrying in {wait}s: {safe_err}")
                     await asyncio.sleep(wait)
                     continue
-                logger.warning(f"Serper search failed for '{query}': {e}")
+                logger.warning(f"Serper search failed for '{query}': {safe_err}")
                 return []
 
+        return self._parse_serper_response(data)
+
+    @staticmethod
+    def _parse_serper_response(data: dict) -> list[NewsResult]:
+        """Parse Serper API JSON response into NewsResult objects."""
         results = []
         for item in data.get("organic", [])[:MAX_RESULTS_PER_QUERY]:
             results.append(NewsResult(

@@ -128,11 +128,11 @@ class CalibrationTracker:
         skipped_null = 0
         skipped_bad = 0
         bucket_scores: dict[str, list[float]] = {}
+
         for r in records:
             if r["actual_outcome"] is None:
                 skipped_null += 1
                 continue
-            # Compute Brier early so we can bucket it
             try:
                 outcome = float(r["actual_outcome"])
                 predicted = float(r["predicted_probability"])
@@ -144,32 +144,9 @@ class CalibrationTracker:
                 )
                 skipped_bad += 1
                 continue
+
             brier = (predicted - outcome) ** 2
-
-            # Track Brier by time bucket for informational purposes.
-            # All resolved predictions — including long-horizon ones — are
-            # included in the main Brier score to avoid systematic exclusion
-            # of multi-month forecasts.
-            staleness_days = None
-            if r.get("predicted_at") and r.get("resolved_at"):
-                try:
-                    pred_time = datetime.fromisoformat(r["predicted_at"])
-                    res_time = datetime.fromisoformat(r["resolved_at"])
-                    staleness_days = (res_time - pred_time).total_seconds() / 86400
-                except (ValueError, TypeError):
-                    pass  # Proceed with the record if dates are unparseable
-
-            if staleness_days is not None:
-                if staleness_days <= 30:
-                    time_bucket = "0-30d"
-                elif staleness_days <= 90:
-                    time_bucket = "30-90d"
-                else:
-                    time_bucket = "90d+"
-                if time_bucket not in bucket_scores:
-                    bucket_scores[time_bucket] = []
-                bucket_scores[time_bucket].append(brier)
-
+            self._bucket_brier_score(r, brier, bucket_scores)
             total += brier
             valid_count += 1
 
@@ -180,18 +157,43 @@ class CalibrationTracker:
                 f"{skipped_bad} skipped (bad data)"
             )
 
-        if bucket_scores:
-            for bucket, scores in sorted(bucket_scores.items()):
-                avg = sum(scores) / len(scores) if scores else 0.0
-                logger.info(
-                    f"Brier by time bucket [{bucket}]: "
-                    f"avg={avg:.4f}, count={len(scores)}"
-                )
+        self._log_bucket_scores(bucket_scores)
 
         if valid_count == 0:
             return None
 
         return total / valid_count
+
+    @staticmethod
+    def _bucket_brier_score(
+        record: dict, brier: float, bucket_scores: dict[str, list[float]],
+    ) -> None:
+        """Assign a Brier score to a time-staleness bucket for diagnostics."""
+        if not record.get("predicted_at") or not record.get("resolved_at"):
+            return
+        try:
+            pred_time = datetime.fromisoformat(record["predicted_at"])
+            res_time = datetime.fromisoformat(record["resolved_at"])
+            staleness_days = (res_time - pred_time).total_seconds() / 86400
+        except (ValueError, TypeError):
+            return
+        if staleness_days <= 30:
+            time_bucket = "0-30d"
+        elif staleness_days <= 90:
+            time_bucket = "30-90d"
+        else:
+            time_bucket = "90d+"
+        bucket_scores.setdefault(time_bucket, []).append(brier)
+
+    @staticmethod
+    def _log_bucket_scores(bucket_scores: dict[str, list[float]]) -> None:
+        """Log per-bucket Brier averages for diagnostics."""
+        for bucket, scores in sorted(bucket_scores.items()):
+            avg = sum(scores) / len(scores) if scores else 0.0
+            logger.info(
+                f"Brier by time bucket [{bucket}]: "
+                f"avg={avg:.4f}, count={len(scores)}"
+            )
 
     def get_calibration_bins(
         self,

@@ -285,6 +285,24 @@ class PositionManager:
         """Check if we already have a position in this market."""
         return market_id in self._positions
 
+    def record_settlement(self, market_id: str, settlement_value: float) -> None:
+        """Record settlement value for a market (from WebSocket lifecycle).
+
+        Updates the position's current price to the settlement value so that
+        unrealized P&L reflects the final outcome.
+        """
+        pos = self._positions.get(market_id)
+        if pos is None:
+            return
+        pos.current_price = settlement_value
+        pos.unrealized_pnl = round(
+            (settlement_value - pos.avg_entry_price) * pos.size, 4
+        )
+        logger.info(
+            f"Settlement recorded for {market_id}: value={settlement_value:.2f}, "
+            f"P&L=${pos.unrealized_pnl:.2f}"
+        )
+
     def mark_pending_exit(self, market_id: str) -> None:
         """Mark a position as having a resting exit order in flight."""
         self._pending_exits.add(market_id)

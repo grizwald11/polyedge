@@ -66,17 +66,26 @@ class KalshiClient:
             key_stat = os.stat(self.private_key_path)
             mode = key_stat.st_mode & 0o777
             if mode & (stat.S_IRWXG | stat.S_IRWXO):
-                logger.error(
-                    f"Private key has permissive mode {oct(mode)} — auto-fixed to 0o600. "
-                    f"Review file security."
-                )
-                os.chmod(self.private_key_path, 0o600)
+                try:
+                    os.chmod(self.private_key_path, 0o600)
+                    logger.warning(
+                        f"Private key had permissive mode {oct(mode)} — fixed to 0o600. "
+                        f"Review file security."
+                    )
+                except OSError as chmod_err:
+                    raise RuntimeError(
+                        f"Private key file {self.private_key_path} has insecure permissions "
+                        f"{oct(mode)} and cannot be fixed: {chmod_err}. "
+                        f"Manually run: chmod 600 {self.private_key_path}"
+                    ) from chmod_err
             with open(self.private_key_path, "rb") as f:
                 self._private_key = load_pem_private_key(f.read(), password=None)
             # Record the mtime at load time for freshness checking (M-6)
             self._key_load_mtime: float = os.stat(self.private_key_path).st_mtime
             logger.info("Loaded RSA private key for Kalshi auth")
             return self._private_key
+        except RuntimeError:
+            raise  # Re-raise chmod failure — do not swallow security errors
         except Exception as e:
             logger.error(f"Failed to load private key: {e}", exc_info=True)
             return None
