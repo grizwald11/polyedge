@@ -44,6 +44,7 @@ class KellySizer:
         current_exposure: float = 0.0,
         order_price: float | None = None,
         market_liquidity: float | None = None,
+        fee_rate: float = 0.0,
     ) -> int:
         """Calculate optimal number of contracts to buy.
 
@@ -63,6 +64,10 @@ class KellySizer:
             market_liquidity: Total order book depth in dollars. Used to reduce
                 position size when the order would be large relative to
                 available liquidity (partial fill risk — H-11).
+            fee_rate: Fee rate for the market (0.0 for fee-free event markets,
+                ~0.0175 for maker orders in fee-enabled markets). Defaults to
+                0.0 for backward compatibility — callers should pass the
+                appropriate rate based on market type.
 
         Returns:
             Number of contracts (integers, minimum 1 if any edge exists)
@@ -93,15 +98,20 @@ class KellySizer:
             )
             return 0
 
-        # Reject cheap contracts (<$0.10): tiny absolute moves wipe out
-        # the position, and Kelly produces huge contract counts that amplify losses.
-        # $0.05 was too low — contracts at $0.05-$0.10 still caused major losses
-        # (KXDHSFUND at $0.05, KXTRUMPADMINLEAVE at $0.15, etc.).
+        # Risk-based check for cheap contracts. Blanket rejection at $0.10 was
+        # too aggressive — it excluded valid high-edge trades in the $0.03-$0.10
+        # range. Instead, use tiered rules:
+        #   < $0.03: always reject (too volatile for reliable sizing)
+        #   $0.03-$0.10: require 10% edge (higher bar to compensate for volatility)
+        #   >= $0.10: normal min-edge checks apply downstream
         cost_price_check = order_price if order_price and order_price > 0 else market_price
-        if cost_price_check < 0.10:
+        if cost_price_check < 0.03:
+            logger.debug("Price below $0.03 — too volatile for reliable sizing")
+            return 0
+        # For $0.03-$0.10 range, require higher edge (10% instead of 5%)
+        if cost_price_check < 0.10 and edge < 0.10:
             logger.debug(
-                f"Kelly: rejecting ultra-cheap contract @ ${cost_price_check:.2f} "
-                f"(prob={probability:.3f}, edge={edge:.3f})"
+                f"Low-price contract ({cost_price_check:.2f}) requires 10% edge, got {edge:.1%}"
             )
             return 0
 
@@ -121,11 +131,37 @@ class KellySizer:
         # Dollar amount to risk
         kelly_dollars = half_kelly * bankroll
 
-        # Cap 1: Max position percentage
+        # Use the actual order price for contract conversion so that
+        # contracts * price never exceeds the dollar cap.
+        cost_price = order_price if order_price and order_price > 0 else market_price
+
+        # Step 1: Apply LIQUIDITY adjustment BEFORE position/exposure caps.
+        # This ensures the risk engine sees the true post-liquidity order size
+        # rather than the raw Kelly amount. Without this, the caps are checked
+        # against an inflated figure and the liquidity reduction happens too late.
+        if market_liquidity is not None and market_liquidity > 0 and kelly_dollars > 0:
+            # Estimate raw contract count to compute book impact
+            raw_contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
+            if raw_contracts > 0:
+                order_pct_of_book = (raw_contracts * cost_price) / market_liquidity
+                if order_pct_of_book > 0.10:
+                    kelly_dollars *= 0.5  # Halve dollar budget if >10% of book
+                    logger.info(
+                        f"Liquidity adjustment: halving kelly_dollars to ${kelly_dollars:.2f} "
+                        f"(order was {order_pct_of_book:.0%} of book)"
+                    )
+                elif order_pct_of_book > 0.05:
+                    kelly_dollars *= 0.75
+                    logger.debug(
+                        f"Liquidity adjustment: reducing kelly_dollars to ${kelly_dollars:.2f} "
+                        f"(order was {order_pct_of_book:.0%} of book)"
+                    )
+
+        # Step 2: Cap 1 — Max position percentage
         max_position = bankroll * self.settings.trading.max_position_pct
         kelly_dollars = min(kelly_dollars, max_position)
 
-        # Cap 2: Don't exceed remaining exposure room
+        # Step 3: Cap 2 — Don't exceed remaining exposure room
         max_total = bankroll * self.settings.trading.max_total_exposure_pct
         remaining = max_total - current_exposure
         if remaining <= 0:
@@ -136,9 +172,7 @@ class KellySizer:
             return 0
         kelly_dollars = min(kelly_dollars, remaining)
 
-        # Convert dollars to contracts using the actual order price so that
-        # contracts * price never exceeds the dollar cap.
-        cost_price = order_price if order_price and order_price > 0 else market_price
+        # Convert dollars to contracts
         contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
 
         # Hard check: ensure contracts * cost_price doesn't exceed position cap
@@ -156,7 +190,7 @@ class KellySizer:
             lo, hi, best = 0, contracts, 0
             while lo <= hi:
                 mid = (lo + hi) // 2
-                fee_cents = math.ceil(self.fee_rate * mid * cost_price * (1.0 - cost_price))
+                fee_cents = math.ceil(fee_rate * mid * cost_price * (1.0 - cost_price))
                 fee_dollars = fee_cents / 100.0
                 if mid * cost_price + fee_dollars <= kelly_dollars:
                     best = mid
@@ -168,22 +202,10 @@ class KellySizer:
         # Minimum 1 contract if we have any edge and room,
         # but only if the single contract cost + fee stays within kelly_dollars.
         if contracts == 0 and kelly_fraction > 0 and remaining >= cost_price:
-            fee_cents = math.ceil(self.fee_rate * 1 * cost_price * (1.0 - cost_price)) if 0 < cost_price < 1 else 0
+            fee_cents = math.ceil(fee_rate * 1 * cost_price * (1.0 - cost_price)) if 0 < cost_price < 1 else 0
             fee_dollars = fee_cents / 100.0
             if cost_price + fee_dollars <= kelly_dollars:
                 contracts = 1
-
-        # Reduce position size when order would be large relative to market liquidity.
-        # Orders >5% of book depth face higher partial-fill risk (H-11).
-        if market_liquidity is not None and market_liquidity > 0 and contracts > 0:
-            order_pct_of_book = (contracts * cost_price) / market_liquidity
-            if order_pct_of_book > 0.10:
-                liquidity_factor = 0.5  # Halve size if >10% of book
-                contracts = max(1, int(contracts * liquidity_factor))
-                logger.info(f"Liquidity adjustment: reduced to {contracts} contracts (order was {order_pct_of_book:.0%} of book)")
-            elif order_pct_of_book > 0.05:
-                liquidity_factor = 0.75
-                contracts = max(1, int(contracts * liquidity_factor))
 
         # Apply calibration-based multiplier — reduce sizing when forecasting is poor.
         # For multi-contract positions, scale down but floor at 1 contract.

@@ -75,8 +75,11 @@ class NewsReactiveStrategy:
                     if age_seconds > MAX_NEWS_AGE_SECONDS:
                         logger.debug(f"Skipping stale news ({age_seconds/60:.0f}m old): {item.title[:50]}")
                         continue
-                except Exception:
-                    pass  # Can't determine age — proceed with caution
+                except (TypeError, ValueError, OverflowError) as age_err:
+                    logger.debug(
+                        f"Could not determine news age for '{item.title[:50]}': {age_err}",
+                        exc_info=True,
+                    )  # Can't determine age — proceed with caution
 
             signal = await self._assess_impact(item, market)
             if signal:

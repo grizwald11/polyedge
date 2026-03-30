@@ -24,7 +24,7 @@ MAX_QUERIES = 4
 MAX_CONTEXT_CHARS = 4000  # ~1000 tokens — increased to reduce mid-article truncation
 MAX_RELEVANT_RESULTS = 5
 MAX_ARTICLE_FETCH = 3  # Fetch full text for top N results
-MAX_ARTICLE_CHARS = 1500  # Max chars to extract per article
+MAX_ARTICLE_CHARS = 3000  # Max chars to extract per article
 ARTICLE_FETCH_TIMEOUT = 5.0  # Seconds per article fetch
 DEDUP_SIMILARITY_THRESHOLD = 0.7
 
@@ -93,6 +93,7 @@ class NewsResearcher:
         self._serper_disabled = False  # Set True after credit/auth failures
         self._serper_disabled_at: float = 0.0  # Monotonic time of disable
         self._serper_cooldown_seconds: float = 3600.0  # Re-enable after 1 hour
+        self._serper_auth_failure_count: int = 0  # Consecutive 4xx auth failures
 
     def generate_queries(self, market_question: str) -> list[str]:
         """Generate 2-3 targeted search queries from a market question.
@@ -145,14 +146,16 @@ class NewsResearcher:
             if results:
                 return results
 
-        # Re-enable Serper after cooldown
-        if self._serper_disabled and self._serper_disabled_at > 0:
+        # Re-enable Serper after cooldown — but not if permanently disabled
+        # (3+ consecutive auth failures sets _serper_disabled_at to float("inf"))
+        if self._serper_disabled and 0 < self._serper_disabled_at < float("inf"):
             import time as _time
             elapsed = _time.monotonic() - self._serper_disabled_at
             if elapsed >= self._serper_cooldown_seconds:
                 logger.info("Serper API cooldown expired — re-enabling")
                 self._serper_disabled = False
                 self._serper_disabled_at = 0.0
+                self._serper_auth_failure_count = 0  # Reset counter after successful cooldown
 
         # Fall back to Serper if configured and not disabled
         if self.serper_api_key and not self._serper_disabled:
@@ -244,12 +247,28 @@ class NewsResearcher:
                 elif e.response.status_code in (400, 401, 403):
                     try:
                         detail = e.response.json().get("message", str(e.response.status_code))
-                    except Exception:
+                    except (ValueError, KeyError, AttributeError):
                         detail = str(e.response.status_code)
                     import time as _time
-                    logger.warning(f"Serper API disabled (1h cooldown): {detail}")
-                    self._serper_disabled = True
-                    self._serper_disabled_at = _time.monotonic()
+                    self._serper_auth_failure_count += 1
+                    if self._serper_auth_failure_count >= 3:
+                        # 3 consecutive auth failures → permanently disable Serper.
+                        # This prevents indefinite hourly retry storms on invalid keys.
+                        logger.error(
+                            f"Serper API permanently disabled after "
+                            f"{self._serper_auth_failure_count} consecutive auth failures "
+                            f"({e.response.status_code}): {detail}. "
+                            f"Check SERPER_API_KEY configuration."
+                        )
+                        self._serper_disabled = True
+                        self._serper_disabled_at = float("inf")  # Never re-enable via cooldown
+                    else:
+                        logger.warning(
+                            f"Serper API auth failure #{self._serper_auth_failure_count} "
+                            f"(1h cooldown): {detail}"
+                        )
+                        self._serper_disabled = True
+                        self._serper_disabled_at = _time.monotonic()
                     return []
                 elif e.response.status_code >= 500 and attempt < max_retries:
                     wait = 2 ** attempt
@@ -279,11 +298,26 @@ class NewsResearcher:
             ))
         return results
 
-    def _is_stale(self, result: NewsResult, max_age_days: int = 7, category: str = "") -> bool:
+    def _is_stale(
+        self,
+        result: NewsResult,
+        max_age_days: int = 7,
+        category: str = "",
+        fetch_timestamp: Optional[float] = None,
+    ) -> bool:
         """Check if a result's date indicates it is too old to be useful.
 
         Uses category-aware thresholds: Fed/macro news goes stale faster
         than culture/politics news.
+
+        Args:
+            result: The news result to check
+            max_age_days: Default maximum age in days
+            category: Market category for threshold override
+            fetch_timestamp: Monotonic timestamp when this article was first seen.
+                When the article date cannot be parsed, this is used as a fallback:
+                if fetch_timestamp is provided and the article has been in the system
+                for >7 days, it is considered stale (conservative default).
         """
         # Category-specific staleness thresholds (more time-sensitive categories
         # get shorter windows to avoid injecting outdated context into Claude)
@@ -324,7 +358,21 @@ class NewsResearcher:
                 return False
             except ValueError:
                 continue
-        # All date formats exhausted — keep article but log for visibility
+        # All date formats exhausted — apply conservative fallback.
+        # If the article has been in the system for more than 7 days (determined
+        # via fetch_timestamp), treat it as stale rather than risking injecting
+        # outdated context into Claude's probability assessments.
+        UNPARSEABLE_DATE_MAX_AGE_DAYS = 7
+        if fetch_timestamp is not None:
+            import time as _time
+            age_in_system_days = (_time.monotonic() - fetch_timestamp) / 86400
+            if age_in_system_days > UNPARSEABLE_DATE_MAX_AGE_DAYS:
+                logger.info(
+                    f"Could not parse date '{result.date}' for '{result.title[:50]}...' "
+                    f"and article has been in system {age_in_system_days:.1f} days "
+                    f"— marking stale (conservative policy)"
+                )
+                return True
         logger.info(
             f"Could not parse date '{result.date}' for '{result.title[:50]}...' "
             f"— keeping article (staleness unknown)"
@@ -405,8 +453,11 @@ class NewsResearcher:
                 if "text/html" not in content_type and "application/xhtml" not in content_type:
                     return ""
                 html = resp.text
+        except (httpx.HTTPError, httpx.TimeoutException, OSError) as e:
+            logger.debug(f"Article fetch failed for {url}: {e}", exc_info=True)
+            return ""
         except Exception as e:
-            logger.debug(f"Article fetch failed for {url}: {e}")
+            logger.warning(f"Unexpected error fetching article {url}: {e}", exc_info=True)
             return ""
 
         # Extract text: strip script/style tags, then HTML tags
@@ -421,10 +472,12 @@ class NewsResearcher:
         if not sentences:
             return ""
 
-        # Take a contiguous block of sentences from the middle (skip boilerplate header/footer)
-        start = min(3, len(sentences) // 4)  # Skip first few (often nav/header text)
-        block = " ".join(sentences[start:])
-        return block[:MAX_ARTICLE_CHARS]
+        # Include first 2 sentences (headline/lede) + largest paragraph block
+        first_part = " ".join(sentences[:2])
+        start = min(3, len(sentences) // 4)
+        middle_part = " ".join(sentences[start:])
+        combined = first_part + " " + middle_part
+        return combined[:MAX_ARTICLE_CHARS]
 
     async def _enrich_with_article_text(self, results: list[NewsResult]) -> list[NewsResult]:
         """Fetch full article text for top results and append to snippets."""
@@ -486,7 +539,7 @@ class NewsResearcher:
         try:
             all_results = await self._enrich_with_article_text(all_results)
         except Exception as e:
-            logger.debug(f"Article enrichment failed: {e}")
+            logger.debug(f"Article enrichment failed: {e}", exc_info=True)
 
         context = self._format_context(all_results)
         logger.info(

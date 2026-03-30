@@ -62,10 +62,12 @@ class CircuitBreaker:
             else:
                 return False
 
-        # Check daily loss limit (realized + discounted unrealized)
-        # Unrealized losses are temporary — weight at 30% to avoid false halts
+        # Check daily loss limit (realized + discounted unrealized).
+        # Weight unrealized losses at 50% — balances between being too aggressive
+        # (100%, which would halt on normal intraday fluctuations) and too lenient
+        # (30%, which delays halt when positions are deeply underwater).
         daily_pnl = self.db.get_daily_pnl()
-        daily_pnl += unrealized_pnl * 0.3
+        daily_pnl += unrealized_pnl * 0.5
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
 
         if daily_pnl < -daily_limit:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from src.config import Settings
 from src.core.kalshi_client import KalshiClient, KalshiRateLimitError
@@ -18,6 +18,10 @@ from src.core.models import (
     kalshi_maker_fee, kalshi_taker_fee, polymarket_fee, OrderType,
 )
 from src.storage.database import Database
+
+if TYPE_CHECKING:
+    from src.core.polymarket_client import PolymarketClient
+    from src.execution.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +45,7 @@ class OrderResult:
 class OrderRouter:
     """Routes orders to paper or live execution."""
 
-    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager: Optional[object] = None, polymarket: Optional[object] = None):
+    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager: Optional[PositionManager] = None, polymarket: Optional[PolymarketClient] = None):
         self.settings = settings
         self.kalshi = kalshi
         self.polymarket = polymarket  # Optional PolymarketClient
@@ -54,6 +58,7 @@ class OrderRouter:
         self._session_confirm_time: float | None = None  # When gate 3 was confirmed
         self._session_confirm_ttl = self.GATE3_CONFIRMATION_TTL_SECONDS
         self._polymarket_residency_confirmed = False  # Polymarket jurisdiction gate
+        self._restore_pending_orders()
         self._log_gate_status()
 
     @property
@@ -61,20 +66,40 @@ class OrderRouter:
         """Total cost of unfilled pending orders."""
         return self._pending_order_cost
 
-    def _add_pending(self, order_id: str, cost: float) -> None:
-        """Track a new pending (resting) order's cost.
+    def _restore_pending_orders(self) -> None:
+        """Restore in-memory pending order state from DB on startup (H-1).
 
-        Note: Caller should hold self._pending_lock when concurrent access
-        is possible (e.g., fill callbacks running during order placement).
-        In practice, the single-threaded asyncio loop serializes these calls.
+        Called synchronously from __init__ before the event loop is running.
+        Rebuilds _pending_orders and _pending_order_cost from persisted DB rows
+        so resting orders survive process restarts without losing cost accounting.
         """
-        self._pending_orders[order_id] = cost
-        self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
+        pending = self.db.load_pending_orders()
+        if pending:
+            self._pending_orders = pending
+            self._pending_order_cost = round(sum(pending.values()), 4)
+            logger.info(
+                f"Restored {len(pending)} pending orders from DB "
+                f"(total cost=${self._pending_order_cost:.2f})"
+            )
 
-    def _remove_pending(self, order_id: str) -> None:
-        """Remove a pending order (filled, cancelled, or expired)."""
-        self._pending_orders.pop(order_id, None)
-        self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
+    async def _add_pending(self, order_id: str, cost: float) -> None:
+        """Track a new pending (resting) order's cost and persist to DB (H-1, H-3).
+
+        Acquires _pending_lock to guard against concurrent fill callbacks.
+        Persists to DB before updating in-memory state so crashes between
+        the two operations never result in lost pending order records.
+        """
+        async with self._pending_lock:
+            self.db.save_pending_order(order_id, cost)
+            self._pending_orders[order_id] = cost
+            self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
+
+    async def _remove_pending(self, order_id: str) -> None:
+        """Remove a pending order (filled, cancelled, or expired) and delete from DB (H-1, H-3)."""
+        async with self._pending_lock:
+            self.db.delete_pending_order(order_id)
+            self._pending_orders.pop(order_id, None)
+            self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
 
     def _log_gate_status(self):
         """Log live trading gate status at startup for visibility."""
@@ -331,17 +356,47 @@ class OrderRouter:
             # track or poll the order, risking orphaned positions on Kalshi.
             kalshi_order_id = (result.get("order_id") or "").strip()
             if not kalshi_order_id:
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = "Kalshi API did not return order_id"
-                self._log_order(order)
-                logger.error(
-                    f"Kalshi order response missing order_id: {result}",
-                    exc_info=True,
+                # Recovery attempt: fetch open orders and match by ticker + price + side
+                logger.warning(
+                    f"Kalshi order response missing order_id for {order.market_id} — "
+                    f"attempting recovery via get_open_orders()"
                 )
-                return OrderResult(
-                    success=False, order=order,
-                    error="Kalshi API did not return order_id",
-                )
+                try:
+                    open_orders = await asyncio.wait_for(
+                        self.kalshi.get_open_orders(),
+                        timeout=10.0,
+                    )
+                    for oo in open_orders:
+                        price_match = abs(oo.get("yes_price", 0) / 100 - order.price) < 0.01
+                        side_match = oo.get("side", "").lower() == (order.kalshi_side or "").lower()
+                        if (
+                            oo.get("ticker") == order.market_id
+                            and price_match
+                            and side_match
+                        ):
+                            recovered_id = (oo.get("order_id") or "").strip()
+                            if recovered_id:
+                                kalshi_order_id = recovered_id
+                                logger.warning(
+                                    f"Orphaned order recovery succeeded: matched order_id={kalshi_order_id} "
+                                    f"for {order.market_id} via open orders list"
+                                )
+                                result = oo
+                                break
+                except Exception as rec_err:
+                    logger.error(f"Orphaned order recovery failed: {rec_err}", exc_info=True)
+
+                if not kalshi_order_id:
+                    order.status = OrderStatus.REJECTED
+                    order.rejection_reason = "Kalshi API did not return order_id"
+                    self._log_order(order)
+                    logger.error(
+                        f"Kalshi order response missing order_id and recovery found no match: {result}"
+                    )
+                    return OrderResult(
+                        success=False, order=order,
+                        error="Kalshi API did not return order_id",
+                    )
 
             # Validate that response contains expected fields
             if "status" not in result:
@@ -376,7 +431,7 @@ class OrderRouter:
                     order.fill_price = order.price
             elif final_status == "resting":
                 order.status = OrderStatus.OPEN
-                self._add_pending(order.id, order.cost)
+                await self._add_pending(order.id, order.cost)
                 self._log_order(order)
                 logger.info(
                     f"[LIVE] Order resting: {order.side.value} {int(order.size)}x "
@@ -387,7 +442,7 @@ class OrderRouter:
             elif final_status in ("canceled", "cancelled"):
                 order.status = OrderStatus.CANCELLED
                 order.cancelled_at = now
-                self._remove_pending(order.id)
+                await self._remove_pending(order.id)
                 self._log_order(order)
                 return OrderResult(
                     success=False, order=order, error="Order was cancelled"
@@ -416,7 +471,7 @@ class OrderRouter:
                 timestamp=now,
             )
 
-            self._remove_pending(order.id)
+            await self._remove_pending(order.id)
             self._log_order(order)
             self.db.log_trade(trade)
 
@@ -681,7 +736,7 @@ class OrderRouter:
                 (datetime.now(timezone.utc).isoformat(), order_id),
             )
             conn.commit()
-            self._remove_pending(order_id)
+            await self._remove_pending(order_id)
             logger.info(f"[PAPER] Cancelled order {order_id}")
             return True
 
@@ -697,7 +752,7 @@ class OrderRouter:
         try:
             result = await self.kalshi.cancel_order(exchange_id)
             if result is not None:
-                self._remove_pending(order_id)
+                await self._remove_pending(order_id)
                 conn = self.db._get_conn()
                 conn.execute(
                     "UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?",

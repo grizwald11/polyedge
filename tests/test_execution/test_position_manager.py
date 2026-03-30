@@ -282,7 +282,7 @@ class TestFeeTracking:
         pm = PositionManager(tmp_db, bankroll=500.0)
         trade = _make_trade(price=0.40, size=10)  # fee=0.02
         pos = pm.update_from_trade(trade)
-        # cost_basis = size * avg_entry + buy_fees = 10*0.40 + 0.02 = 4.02
+        # cost_basis = size * avg_entry + total_fees = 10*0.40 + 0.02 = 4.02
         assert pos.cost_basis == pytest.approx(4.02)
 
 
@@ -478,3 +478,103 @@ class TestPeakPnlTracking:
 
         pm.update_price("FED-RATE-CUT-MAY26", yes_price=0.40)
         assert pm.get_position("FED-RATE-CUT-MAY26").peak_pnl == 0.0
+
+
+class TestDBLoadConsistencyValidation:
+    """H-11: _load_positions_from_db must validate consistency on restart."""
+
+    def test_negative_size_position_removed_on_load(self, tmp_db):
+        """A position that ends up negative after replay should be discarded."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        # Log a BUY of 5 followed by a SELL of 10 (more than held)
+        buy = Trade(
+            order_id="PE-buy-h11",
+            market_id="H11-MKT",
+            token_id="H11-MKT_yes",
+            side=Side.BUY,
+            price=0.40,
+            size=5.0,
+            fee=0.01,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=True,
+            timestamp=now,
+        )
+        # Note: we log the sell with size=10 directly to DB to bypass the in-memory clamp
+        tmp_db.log_trade(buy)
+        # Force-insert an oversized sell directly
+        conn = tmp_db._get_conn()
+        conn.execute("""
+            INSERT INTO trades (order_id, market_id, token_id, side, price, size,
+                fee, realized_pnl, strategy, paper, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "PE-sell-h11", "H11-MKT", "H11-MKT_yes", "SELL", 0.50, 10.0,
+            0.01, 0.0, "ai_probability", 1,
+            (now.replace(second=now.second + 1) if now.second < 59
+             else now).isoformat(),
+        ))
+        conn.commit()
+
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        # Position should not exist (clamped sell closes it; or negative removed)
+        assert not pm.has_position("H11-MKT")
+
+    def test_oversized_sell_in_db_is_clamped_on_load(self, tmp_db):
+        """A SELL that exceeds accumulated BUY at replay time is clamped, not crashed."""
+        from datetime import datetime, timezone
+        import time
+        t1 = datetime.now(timezone.utc)
+        buy = Trade(
+            order_id="PE-buy-h11b",
+            market_id="H11B-MKT",
+            token_id="H11B-MKT_yes",
+            side=Side.BUY,
+            price=0.40,
+            size=10.0,
+            fee=0.01,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=True,
+            timestamp=t1,
+        )
+        tmp_db.log_trade(buy)
+        # Inject a sell with size=20 (double the buy)
+        conn = tmp_db._get_conn()
+        conn.execute("""
+            INSERT INTO trades (order_id, market_id, token_id, side, price, size,
+                fee, realized_pnl, strategy, paper, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "PE-sell-h11b", "H11B-MKT", "H11B-MKT_yes", "SELL", 0.50, 20.0,
+            0.01, 0.0, "ai_probability", 1,
+            t1.isoformat(),
+        ))
+        conn.commit()
+
+        # Must not raise; position should be closed
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        # Position is fully closed after clamped sell
+        assert not pm.has_position("H11B-MKT")
+
+    def test_valid_trades_load_correctly(self, tmp_db):
+        """Normal (valid) trades should still load into positions as expected."""
+        from datetime import datetime, timezone
+        t = Trade(
+            order_id="PE-valid-h11",
+            market_id="VALID-MKT",
+            token_id="VALID-MKT_yes",
+            side=Side.BUY,
+            price=0.35,
+            size=8.0,
+            fee=0.01,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=True,
+            timestamp=datetime.now(timezone.utc),
+        )
+        tmp_db.log_trade(t)
+
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        assert pm.has_position("VALID-MKT")
+        pos = pm.get_position("VALID-MKT")
+        assert pos.size == 8.0
+        assert pos.avg_entry_price == pytest.approx(0.35)

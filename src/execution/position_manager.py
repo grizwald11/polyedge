@@ -14,21 +14,45 @@ from src.core.models import (
 )
 from src.storage.database import Database
 
-# Exit thresholds
-DEFAULT_STOP_LOSS_PCT = 0.30       # Exit if unrealized loss > 30% of cost basis
-DEFAULT_MAX_HOLD_DAYS = 21         # Exit if held > 21 days — frees capital faster
-DEFAULT_EDGE_GONE_THRESHOLD = 0.20 # Exit if remaining edge < 20% of original
-DEFAULT_TRAILING_STOP_ACTIVATE = 0.12  # Activate trailing stop after 12% gain
-DEFAULT_TRAILING_STOP_DISTANCE = 0.50  # Trail 50% of peak gain (e.g., peak +30% → exit at +15%)
-DEFAULT_TAKE_PROFIT_PCT = 0.80     # Take profit at 80% of max theoretical gain
-DEFAULT_CAPITAL_ROTATION_EDGE = 0.40  # When exposure >35%, exit profitable positions with <40% remaining edge
+# Exit thresholds — all configurable via PositionManager constructor kwargs.
+# Rationale for each default is documented inline.
+DEFAULT_STOP_LOSS_PCT = 0.30
+# 30%: Binary markets can recover from drawdowns, but a 30% loss on cost basis
+# indicates the thesis is likely wrong. Prevents runaway losses while allowing
+# normal price volatility.
+
+DEFAULT_MAX_HOLD_DAYS = 21
+# 21 days: Frees capital faster than holding to near-expiry. Most of the edge
+# in a correctly-assessed market is captured in the first few weeks; holding
+# longer ties up capital that could be redeployed into fresh opportunities.
+
+DEFAULT_EDGE_GONE_THRESHOLD = 0.20
+# 20%: Exit when less than 20% of the original estimated edge remains. At this
+# point the expected return no longer justifies continued capital allocation.
+
+DEFAULT_TRAILING_STOP_ACTIVATE = 0.12
+# 12%: Activate trailing stop only after locking in at least a 12% gain.
+# Below this threshold, normal price noise would trigger too many premature exits.
+
+DEFAULT_TRAILING_STOP_DISTANCE = 0.50
+# 50%: Trail 50% of peak gain (e.g., peak +30% → exit at +15%). Captures most
+# of the upside while protecting against sharp reversals near market resolution.
+
+DEFAULT_TAKE_PROFIT_PCT = 0.80
+# 80%: Take profit when 80% of the maximum theoretical gain is realized
+# (e.g., bought YES at $0.60, take profit at ~$0.92). Avoids diminishing returns
+# of holding to $0.99 while significantly reducing late-stage resolution risk.
+
+DEFAULT_CAPITAL_ROTATION_EDGE = 0.40
+# 40%: When total exposure exceeds 35%, exit positions where less than 40% of
+# original edge remains. Prioritizes deploying capital into higher-edge
+# opportunities over squeezing the last few percent from nearly-exhausted positions.
+
 # Slippage buffer: exits trigger slightly before the hard threshold
 # to account for execution slippage (typically 1-3%) — H-13
-SLIPPAGE_BUFFER = 0.02  # 2% buffer
-# Capital rotation frees up capital when portfolio is highly exposed by exiting
-# positions where most of the expected edge has already been captured (>60% realized).
-# The 0.40 threshold means: if only 40% of original edge remains AND total exposure
-# exceeds 35%, consider exiting to redeploy capital into higher-edge opportunities.
+SLIPPAGE_BUFFER = 0.02
+# 2%: Ensures exit orders actually execute at or before the hard threshold after
+# typical market spread and order routing latency.
 
 if __name__ != "__main__":
     from typing import TYPE_CHECKING
@@ -329,12 +353,14 @@ class PositionManager:
                 else:
                     return True, f"stop_loss: {loss_pct:.0%} loss exceeds {effective_stop_loss:.0%} threshold (incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
 
-        # 2. Trailing stop: if we've had a significant gain and it's pulling back
-        #    Require fresh price data (<2 min) for trailing stop to avoid
-        #    false exits on stale prices.
+        # 2. Trailing stop: if we've had a significant gain and it's pulling back.
+        #    Apply SLIPPAGE_BUFFER: activate slightly later (higher threshold) to
+        #    avoid triggering on momentary price dips that fill above the stop.
+        #    Require fresh price data (<2 min) for trailing stop to avoid false exits.
+        effective_trailing_activate = self._trailing_stop_activate + SLIPPAGE_BUFFER
         if position.peak_pnl > 0 and cost_basis > 0:
             peak_gain_pct = position.peak_pnl / cost_basis
-            if peak_gain_pct >= self._trailing_stop_activate:
+            if peak_gain_pct >= effective_trailing_activate:
                 trail_floor = position.peak_pnl * self._trailing_stop_distance
                 if position.unrealized_pnl < trail_floor:
                     price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
@@ -347,20 +373,25 @@ class PositionManager:
                         return True, (
                             f"trailing_stop: current P&L ${position.unrealized_pnl:.2f} "
                             f"dropped below trail floor ${trail_floor:.2f} "
-                            f"(peak ${position.peak_pnl:.2f})"
+                            f"(peak ${position.peak_pnl:.2f}, "
+                            f"activate threshold {effective_trailing_activate:.0%} incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
                         )
 
-        # 3. Take-profit: capture gains when near max theoretical payout
+        # 3. Take-profit: capture gains when near max theoretical payout.
+        #    Apply SLIPPAGE_BUFFER: trigger slightly earlier (lower threshold) to
+        #    ensure the limit order fills near the target rather than overshooting.
         # BUY_YES/BUY_NO: max gain = (1.0 - entry) * size (payout is $1.00)
         # SELL_YES/SELL_NO: max gain = entry * size (payout is $0.00)
+        effective_take_profit = self._take_profit_pct - SLIPPAGE_BUFFER
         if position.direction in (Direction.BUY_YES, Direction.BUY_NO):
             max_gain = (1.0 - position.avg_entry_price) * position.size
         else:
             max_gain = position.avg_entry_price * position.size
-        if max_gain > 0 and position.unrealized_pnl >= max_gain * self._take_profit_pct:
+        if max_gain > 0 and position.unrealized_pnl >= max_gain * effective_take_profit:
             return True, (
                 f"take_profit: captured {position.unrealized_pnl / max_gain:.0%} of max gain "
-                f"(${position.unrealized_pnl:.2f} / ${max_gain:.2f})"
+                f"(${position.unrealized_pnl:.2f} / ${max_gain:.2f}, "
+                f"threshold {effective_take_profit:.0%} incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
             )
 
         # 4. Time-based exit
@@ -375,11 +406,17 @@ class PositionManager:
             if days_left is not None and days_left < 1 and position.unrealized_pnl < 0:
                 return True, f"expiry_exit: market closes in {days_left:.1f} days, position underwater"
 
-        # 5. Edge-gone check
+        # 5. Edge-gone check.
+        #    Apply SLIPPAGE_BUFFER: use a slightly higher threshold so we exit
+        #    before the edge fully evaporates, accounting for execution slippage.
+        effective_edge_gone = edge_gone_threshold + SLIPPAGE_BUFFER
         if market is not None:
             remaining_edge = self._calculate_remaining_edge(position, market)
-            if remaining_edge < edge_gone_threshold:
-                return True, f"edge_gone: remaining edge {remaining_edge:.1%} < {edge_gone_threshold:.1%}"
+            if remaining_edge < effective_edge_gone:
+                return True, (
+                    f"edge_gone: remaining edge {remaining_edge:.1%} < "
+                    f"{effective_edge_gone:.1%} threshold (incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
+                )
 
         # 6. Capital rotation: when portfolio is crowded, exit profitable positions
         #    where most of the edge has been captured to free capital for new trades.
@@ -598,7 +635,12 @@ class PositionManager:
         return mismatches
 
     def _load_positions_from_db(self):
-        """Reconstruct open positions from trade history on startup."""
+        """Reconstruct open positions from trade history on startup.
+
+        Replays all trades chronologically. After reconstruction, validates
+        positions for consistency (H-11): warns on negative size or sell trades
+        that exceeded accumulated BUY size at the time of the trade.
+        """
         conn = self.db._get_conn()
         rows = conn.execute(
             "SELECT order_id, market_id, token_id, side, price, size, "
@@ -608,6 +650,9 @@ class PositionManager:
 
         if not rows:
             return
+
+        # Track running BUY totals per market to validate SELL trades at replay time
+        running_buy_totals: dict[str, float] = {}
 
         for row in rows:
             try:
@@ -624,11 +669,46 @@ class PositionManager:
                     paper=bool(row["paper"]),
                     timestamp=datetime.fromisoformat(row["timestamp"]),
                 )
+
+                market_id = trade.market_id
+                if trade.side == Side.BUY:
+                    running_buy_totals[market_id] = (
+                        running_buy_totals.get(market_id, 0.0) + trade.size
+                    )
+                elif trade.side == Side.SELL:
+                    accumulated = running_buy_totals.get(market_id, 0.0)
+                    if trade.size > accumulated + 1e-9:
+                        logger.warning(
+                            f"DB consistency: SELL size {trade.size:.0f} exceeds "
+                            f"accumulated BUY {accumulated:.0f} for {market_id} "
+                            f"(order_id={trade.order_id}) — clamping to {accumulated:.0f}"
+                        )
+                        trade.size = max(0.0, accumulated)
+                    running_buy_totals[market_id] = max(
+                        0.0, running_buy_totals.get(market_id, 0.0) - trade.size
+                    )
+
+                if trade.size < 0:
+                    logger.warning(
+                        f"DB consistency: negative size {trade.size} for "
+                        f"{market_id} (order_id={trade.order_id}) — skipping"
+                    )
+                    continue
+
                 self.update_from_trade(trade)
             except (ValueError, KeyError, TypeError) as e:
                 logger.warning(
                     f"Skipping corrupted trade row (order_id={row.get('order_id', '?')}): {e}"
                 )
+
+        # Post-load validation: warn on any positions with negative size
+        for market_id, pos in list(self._positions.items()):
+            if pos.size < 0:
+                logger.warning(
+                    f"DB consistency: position {market_id} has negative size "
+                    f"{pos.size:.4f} after replay — removing invalid position"
+                )
+                self._positions.pop(market_id, None)
 
         if self._positions:
             logger.info(f"Loaded {len(self._positions)} open positions from DB")

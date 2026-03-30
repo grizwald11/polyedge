@@ -3,6 +3,14 @@
 Initializes all components and runs the scan → assess → trade loop.
 Phase 3: Paper trading with AI probability + obvious NO strategies
 through the risk engine and execution pipeline.
+
+# TODO (L-1): This file is ~1,300 lines and should be split into focused modules
+# in a future refactor. Suggested breakdown:
+#   - src/orchestrator/startup.py  — component initialization and health checks
+#   - src/orchestrator/scan_cycle.py — the scan → assess → signal loop
+#   - src/orchestrator/trade_cycle.py — risk check → size → execute flow
+#   - src/orchestrator/lifecycle.py — shutdown, signal handling, daily reporting
+# Defer until paper trading is stable to avoid introducing regressions.
 """
 
 from __future__ import annotations
@@ -1188,8 +1196,33 @@ async def main():
                 if trade:
                     position_manager.update_from_trade(trade)
 
+            async def _on_ws_reconnect():
+                """Sync tracked market statuses via REST after WebSocket reconnects.
+
+                Markets may have closed or settled while disconnected — query
+                Kalshi REST API to catch any missed lifecycle changes.
+                """
+                logger.info("WebSocket reconnected — syncing tracked market statuses via REST")
+                try:
+                    tracked = list(ws_client._subscriptions)
+                    for ticker in tracked:
+                        try:
+                            market_data = await kalshi.get_market(ticker)
+                            if market_data:
+                                status = market_data.get("status", "")
+                                if status in ("closed", "determined", "finalized"):
+                                    logger.info(
+                                        f"Reconnect sync: market {ticker} is now '{status}' "
+                                        f"(may have settled while disconnected)"
+                                    )
+                        except Exception as me:
+                            logger.warning(f"Reconnect sync failed for {ticker}: {me}")
+                except Exception as e:
+                    logger.warning(f"Reconnect market status sync failed: {e}")
+
             ws_client.on_price_update(_on_price)
             ws_client.on_fill(_on_fill)
+            ws_client.register_reconnect_sync(_on_ws_reconnect)
             ws_task = asyncio.create_task(ws_client.connect())
             logger.info(f"WebSocket client starting: {ws_host}")
         except Exception as e:

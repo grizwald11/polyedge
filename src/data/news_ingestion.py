@@ -62,6 +62,7 @@ class NewsIngestion:
         self._seen_urls: OrderedDict[str, None] = OrderedDict()
         self._max_seen_urls = 10000  # Cap to prevent unbounded memory growth
         self._feed_failures: dict[str, int] = {}  # feed_url -> consecutive failure count
+        self._feed_last_retry_cycle: dict[str, int] = {}  # feed_url -> cycle number of last retry attempt
 
     async def poll_feeds(self) -> list[NewsItem]:
         """Poll all configured RSS feeds for new articles.
@@ -82,10 +83,15 @@ class NewsIngestion:
         self._poll_cycle_count = cycle_count + 1
 
         for feed_url in self.rss_feeds:
-            # Skip feeds that have failed too many times (exponential backoff — H-10)
-            if self._feed_failures.get(feed_url, 0) >= 3:
-                if cycle_count % 10 != 0:  # Retry every 10 cycles
+            # Exponential backoff for failed feeds: wait 2^(failures-2) cycles before retrying.
+            # e.g., 3 failures → wait 2 cycles, 4 failures → 4 cycles, 5+ failures → capped at 100.
+            failed = self._feed_failures.get(feed_url, 0)
+            if failed >= 3:
+                wait_cycles = min(100, 2 ** (failed - 2))
+                last_retry = self._feed_last_retry_cycle.get(feed_url, -wait_cycles)
+                if cycle_count - last_retry < wait_cycles:
                     continue
+                self._feed_last_retry_cycle[feed_url] = cycle_count
 
             try:
                 feed = feedparser.parse(feed_url)

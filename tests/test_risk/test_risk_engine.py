@@ -99,7 +99,10 @@ class TestCheckAll:
         assert result.passed is False
         assert any("Circuit breaker" in c for c in result.failed_checks)
 
-    def test_fails_existing_position(self, engine, signal, market, position_manager):
+    def test_existing_position_warns_but_passes_by_default(
+        self, engine, signal, market, position_manager
+    ):
+        """With allow_position_additions=True (default), same-direction addition warns but passes."""
         from src.core.models import Side, Trade
         trade = Trade(
             order_id="PE-x", market_id="FED-RATE-CUT-MAY26",
@@ -109,6 +112,56 @@ class TestCheckAll:
         position_manager.update_from_trade(trade)
 
         result = engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is True
+        assert not any("Already have position" in c for c in result.failed_checks)
+        assert any("Adding to existing" in w for w in result.warnings)
+
+    def test_existing_position_hedge_warns_but_passes_by_default(
+        self, engine, market, position_manager, settings
+    ):
+        """With allow_position_additions=True (default), a hedge warns but passes."""
+        from src.core.models import Direction, Side, Trade
+        # Establish a BUY_YES position
+        trade = Trade(
+            order_id="PE-x", market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes", side=Side.BUY,
+            price=0.34, size=5, strategy=StrategyName.AI_PROBABILITY, paper=True,
+        )
+        position_manager.update_from_trade(trade)
+
+        # Now signal a BUY_NO (hedge)
+        hedge_signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="FED-RATE-CUT-MAY26",
+            direction=Direction.BUY_NO,
+            edge=0.08,
+            probability_estimate=0.58,
+            market_price=0.66,
+            confidence=0.7,
+        )
+        result = engine.check_all(hedge_signal, market, proposed_size=10, proposed_cost=6.60)
+        assert result.passed is True
+        assert not any("Already have position" in c for c in result.failed_checks)
+        assert any("Hedge detected" in w for w in result.warnings)
+
+    def test_existing_position_fails_when_additions_disabled(
+        self, signal, market, position_manager, circuit_breaker, tmp_db
+    ):
+        """With allow_position_additions=False, any addition to an existing position is rejected."""
+        from src.config import Settings, TradingConfig
+        from src.core.models import Side, Trade
+
+        strict_settings = Settings(trading=TradingConfig(allow_position_additions=False))
+        strict_engine = RiskEngine(strict_settings, position_manager, circuit_breaker, tmp_db)
+
+        trade = Trade(
+            order_id="PE-x", market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes", side=Side.BUY,
+            price=0.34, size=5, strategy=StrategyName.AI_PROBABILITY, paper=True,
+        )
+        position_manager.update_from_trade(trade)
+
+        result = strict_engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
         assert result.passed is False
         assert any("Already have position" in c for c in result.failed_checks)
 

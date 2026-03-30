@@ -127,3 +127,115 @@ class TestKalshiRequests:
 
         await client.close()
         mock_http.aclose.assert_called_once()
+
+
+class TestRetryAfterHeader:
+    """H-16: 429 responses should respect the Retry-After header."""
+
+    @pytest.mark.asyncio
+    async def test_429_uses_retry_after_header_when_present(self):
+        """When Retry-After is present, wait that many seconds instead of backoff."""
+        import httpx
+        from src.core.kalshi_client import KalshiRateLimitError
+
+        client = KalshiClient()
+        mock_http = AsyncMock()
+        mock_http.is_closed = False
+
+        # First two calls return 429 with Retry-After=5, third succeeds
+        rate_limited_response = MagicMock()
+        rate_limited_response.status_code = 429
+        rate_limited_response.headers = {"Retry-After": "5"}
+        rate_limited_response.request = MagicMock()
+
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.json.return_value = {"data": "ok"}
+        success_response.raise_for_status = MagicMock()
+        success_response.headers = {}
+
+        mock_http.get = AsyncMock(side_effect=[rate_limited_response, rate_limited_response, success_response])
+        client._client = mock_http
+
+        sleep_calls = []
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep):
+            result = await client._request("GET", "/markets")
+
+        assert result == {"data": "ok"}
+        # Both retry sleeps should use Retry-After=5 not backoff formula
+        assert len(sleep_calls) == 2
+        assert all(s == 5.0 for s in sleep_calls), f"Expected sleep=5.0 from Retry-After, got {sleep_calls}"
+
+    @pytest.mark.asyncio
+    async def test_429_falls_back_to_backoff_without_retry_after(self):
+        """When Retry-After header is absent, use formula-based backoff."""
+        import httpx
+        from src.core.kalshi_client import KalshiRateLimitError
+
+        client = KalshiClient()
+        mock_http = AsyncMock()
+        mock_http.is_closed = False
+
+        rate_limited_response = MagicMock()
+        rate_limited_response.status_code = 429
+        rate_limited_response.headers = {}  # No Retry-After
+        rate_limited_response.request = MagicMock()
+
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.json.return_value = {"ok": True}
+        success_response.raise_for_status = MagicMock()
+        success_response.headers = {}
+
+        mock_http.get = AsyncMock(side_effect=[rate_limited_response, success_response])
+        client._client = mock_http
+
+        sleep_calls = []
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep):
+            result = await client._request("GET", "/markets")
+
+        assert result == {"ok": True}
+        assert len(sleep_calls) == 1
+        # Backoff formula: min(10, 2**(0+1)) + jitter → at least 2.0
+        assert sleep_calls[0] >= 2.0
+
+    @pytest.mark.asyncio
+    async def test_429_uses_backoff_when_retry_after_invalid(self):
+        """When Retry-After header is unparseable, fall back to formula backoff."""
+        from src.core.kalshi_client import KalshiRateLimitError
+
+        client = KalshiClient()
+        mock_http = AsyncMock()
+        mock_http.is_closed = False
+
+        rate_limited_response = MagicMock()
+        rate_limited_response.status_code = 429
+        rate_limited_response.headers = {"Retry-After": "not-a-number"}
+        rate_limited_response.request = MagicMock()
+
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.json.return_value = {"ok": True}
+        success_response.raise_for_status = MagicMock()
+        success_response.headers = {}
+
+        mock_http.get = AsyncMock(side_effect=[rate_limited_response, success_response])
+        client._client = mock_http
+
+        sleep_calls = []
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep):
+            result = await client._request("GET", "/markets")
+
+        assert result == {"ok": True}
+        assert len(sleep_calls) == 1
+        # Should use formula backoff, not crash
+        assert sleep_calls[0] >= 2.0

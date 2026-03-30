@@ -2,6 +2,8 @@
 
 Uses raw sqlite3 with helper methods (no heavy ORM for simplicity).
 WAL mode allows concurrent reads during writes.
+
+# NOTE: Database is unencrypted. Enable FileVault on macOS or use SQLCipher for at-rest encryption.
 """
 
 from __future__ import annotations
@@ -225,6 +227,13 @@ CREATE TABLE IF NOT EXISTS cross_platform_pairs (
     PRIMARY KEY (kalshi_ticker, poly_condition_id)
 );
 
+-- Pending orders (resting limit orders not yet filled)
+-- Persisted so state survives restarts (H-1).
+CREATE TABLE IF NOT EXISTS pending_orders (
+    order_id TEXT PRIMARY KEY,
+    cost REAL NOT NULL
+);
+
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -259,11 +268,17 @@ class Database:
         # SQLite requires the parent to have a UNIQUE constraint on the referenced
         # column(s), and composite PK (ticker, platform) doesn't satisfy FK refs
         # to markets(ticker) alone. App logic enforces referential integrity.
-        # TECH DEBT: Migrate child tables to composite FK (market_id, platform)
-        # to re-enable database-level referential integrity. Until then, orphaned
-        # records are possible if markets are deleted without cascading.
+        # TODO (M-18): Re-enable FK enforcement. Migration plan:
+        #   1. Add a new schema version (v7) that alters signals, orders, trades,
+        #      calibration_records, and whale_trades to use a composite FK:
+        #      (market_id TEXT, platform TEXT, FOREIGN KEY (market_id, platform)
+        #       REFERENCES markets(ticker, platform) ON DELETE CASCADE)
+        #   2. Backfill the platform column in all child tables (default 'kalshi').
+        #   3. Replace this PRAGMA foreign_keys=OFF with PRAGMA foreign_keys=ON.
+        #   4. Add test coverage for FK cascade delete behavior.
+        #   Until then, use cleanup_orphaned_records() for application-level integrity.
         conn.execute("PRAGMA foreign_keys=OFF")
-        logger.debug("FK enforcement off (tech debt: child tables need composite FK migration)")
+        logger.debug("FK enforcement off (tech debt: child tables need composite FK migration — see M-18)")
         conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
         return conn
@@ -521,6 +536,16 @@ class Database:
             )
             logger.info("Migration v8: created position_exits table")
 
+        # Migration v9: pending_orders table for crash-recovery of resting orders (H-1)
+        if "pending_orders" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_orders (
+                    order_id TEXT PRIMARY KEY,
+                    cost REAL NOT NULL
+                )
+            """)
+            logger.info("Migration v9: created pending_orders table")
+
         conn.commit()
 
     # ──────────────────────────────────────
@@ -766,6 +791,43 @@ class Database:
             ))
             conn.commit()
             return cursor.lastrowid
+
+    # ──────────────────────────────────────
+    # Pending Order Operations (H-1)
+    # ──────────────────────────────────────
+
+    def save_pending_order(self, order_id: str, cost: float) -> None:
+        """Persist a resting (open) order so it survives process restarts.
+
+        Called by OrderRouter after adding an order to the in-memory pending dict.
+        On restart, load_pending_orders() rebuilds the dict from this table.
+        """
+        conn = self._get_conn()
+        with self._write_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO pending_orders (order_id, cost) VALUES (?, ?)",
+                (order_id, cost),
+            )
+            conn.commit()
+
+    def delete_pending_order(self, order_id: str) -> None:
+        """Remove a pending order record (order filled, cancelled, or expired)."""
+        conn = self._get_conn()
+        with self._write_lock:
+            conn.execute(
+                "DELETE FROM pending_orders WHERE order_id = ?",
+                (order_id,),
+            )
+            conn.commit()
+
+    def load_pending_orders(self) -> dict[str, float]:
+        """Load all persisted pending orders on startup.
+
+        Returns dict of order_id -> cost for rebuilding _pending_orders in OrderRouter.
+        """
+        conn = self._get_conn()
+        rows = conn.execute("SELECT order_id, cost FROM pending_orders").fetchall()
+        return {row["order_id"]: row["cost"] for row in rows}
 
     def log_exit_reason(
         self,

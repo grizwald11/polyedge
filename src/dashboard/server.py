@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -20,7 +21,8 @@ logger = logging.getLogger(__name__)
 # Only import FastAPI if available
 try:
     from fastapi import FastAPI, Request
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
     FASTAPI_AVAILABLE = True
 except ImportError:
@@ -59,6 +61,56 @@ def create_app(
         return None
 
     app = FastAPI(title="PolyEdge Dashboard", version="2.0")
+
+    # L-2: Warn if running on HTTP (not HTTPS) — only safe when restricted to localhost
+    logger.warning("Dashboard running on HTTP — use HTTPS in production or restrict to localhost")
+
+    # L-11: CORS — restrict to localhost origins only (read-only GET methods)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:8080", "http://127.0.0.1:8080"],
+        allow_methods=["GET"],
+        allow_headers=["*"],
+    )
+
+    # ─── Authentication Middleware ─────────────────
+    _dashboard_key = os.environ.get("POLYEDGE_DASHBOARD_KEY")
+    if not _dashboard_key:
+        logger.warning(
+            "POLYEDGE_DASHBOARD_KEY is not set — dashboard is unauthenticated. "
+            "Set this environment variable to enable API key protection."
+        )
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        """Require API key when POLYEDGE_DASHBOARD_KEY is configured.
+
+        Accepts the key via:
+          - Query parameter: ?key=<value>
+          - Authorization header: Bearer <value>
+        Static assets (/static/) are always allowed through.
+        """
+        if _dashboard_key:
+            # Always allow static assets
+            if not request.url.path.startswith("/static/"):
+                provided_key: Optional[str] = None
+
+                # Check query parameter
+                provided_key = request.query_params.get("key")
+
+                # Check Authorization header (Bearer token)
+                if not provided_key:
+                    auth_header = request.headers.get("Authorization", "")
+                    if auth_header.startswith("Bearer "):
+                        provided_key = auth_header[len("Bearer "):]
+
+                if provided_key != _dashboard_key:
+                    return Response(
+                        content='{"detail": "Unauthorized"}',
+                        status_code=401,
+                        media_type="application/json",
+                    )
+        return await call_next(request)
 
     # Static files
     static_dir = Path(__file__).parent / "static"

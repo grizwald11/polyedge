@@ -60,27 +60,27 @@ class TestDailyLossLimit:
 
 
 class TestUnrealizedPnlInDailyLimit:
-    """Unrealized P&L from open positions counts at 30% weight toward daily limit."""
+    """Unrealized P&L from open positions counts at 50% weight toward daily limit."""
 
     def test_unrealized_loss_triggers_halt(self, cb, tmp_db):
-        # Realized = -40, unrealized = -80 * 0.3 = -24, total = -64 > 10% of 500 = 50
+        # Realized = -40, unrealized = -40 * 0.5 = -20, total = -60 > 10% of 500 = 50
         _log_losing_trade(tmp_db, pnl=-40.0)
-        assert cb.check(500.0, unrealized_pnl=-80.0) is False
+        assert cb.check(500.0, unrealized_pnl=-40.0) is False
         assert cb.is_halted() is True
 
     def test_unrealized_loss_alone_insufficient(self, cb):
-        # Only unrealized = -30 * 0.3 = -9, no realized losses, under limit
+        # Only unrealized = -30 * 0.5 = -15, no realized losses, under $50 limit
         assert cb.check(500.0, unrealized_pnl=-30.0) is True
 
     def test_unrealized_profit_offsets(self, cb, tmp_db):
-        # Realized = -40, unrealized = +20 * 0.3 = +6, net = -34, under limit
+        # Realized = -40, unrealized = +20 * 0.5 = +10, net = -30, under limit
         _log_losing_trade(tmp_db, pnl=-40.0)
         assert cb.check(500.0, unrealized_pnl=20.0) is True
 
     def test_discounted_unrealized_under_limit(self, cb, tmp_db):
-        # Realized = -30, unrealized = -25 * 0.3 = -7.5, total = -37.5, under $50 limit
+        # Realized = -30, unrealized = -15 * 0.5 = -7.5, total = -37.5, under $50 limit
         _log_losing_trade(tmp_db, pnl=-30.0)
-        assert cb.check(500.0, unrealized_pnl=-25.0) is True
+        assert cb.check(500.0, unrealized_pnl=-15.0) is True
 
 
 class TestConsecutiveLosses:

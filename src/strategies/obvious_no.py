@@ -90,7 +90,7 @@ class ObviousNoStrategy:
         # market illiquidity inflating YES prices on absurd markets.
         # Calibrate this against historical obvious-NO resolutions.
         # At YES=$0.03: P(NO)=0.991, at YES=$0.05: P(NO)=0.985
-        obvious_no_multiplier = getattr(self.settings.trading, 'obvious_no_probability_multiplier', 0.3)
+        obvious_no_multiplier = self.settings.trading.obvious_no_probability_multiplier
         probability_estimate = min(0.99, 1.0 - yes_price * obvious_no_multiplier)
         edge = probability_estimate - no_price
         if edge <= 0:

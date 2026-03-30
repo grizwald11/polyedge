@@ -39,8 +39,9 @@ DIFF_SERIES = {"PAYEMS"}  # Show month-over-month change in thousands
 class FREDClient:
     """Fetches latest economic data from the FRED API."""
 
-    def __init__(self, api_key: Optional[str] = None, ttl_seconds: int = 3600):
+    def __init__(self, api_key: Optional[str] = None, ttl_seconds: int = 3600, base_url: Optional[str] = None):
         self.api_key = api_key
+        self._base_url = base_url or FRED_BASE_URL
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
 
     async def get_series_latest(self, series_id: str) -> Optional[dict]:
@@ -59,7 +60,7 @@ class FREDClient:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
-                    FRED_BASE_URL,
+                    self._base_url,
                     params={
                         "series_id": series_id,
                         "api_key": self.api_key,

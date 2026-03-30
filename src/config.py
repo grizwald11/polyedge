@@ -53,7 +53,14 @@ class TradingConfig(BaseModel):
     prefer_maker: bool = True
     daily_loss_limit_pct: float = 0.10
     max_obvious_no_pct: float = 0.10
+    obvious_no_probability_multiplier: float = 0.3  # Conservative P(YES) scaling for obvious-NO markets.
+    # The multiplier scales the market's YES price when estimating true P(YES):
+    #   P(NO) = 1 - yes_price * multiplier
+    # At 0.3: YES=$0.03 → P(NO)=0.991. Accounts for illiquidity inflating YES prices.
+    # Calibrate against historical obvious-NO resolutions. Range: 0.1 (very conservative) to 0.5.
     max_trades_per_cycle: int = 5  # Max trades per scan cycle to prevent overtrading
+    allow_position_additions: bool = True  # If False, block all trades on markets where a position already exists
+    min_confidence: float = 0.55  # Minimum signal confidence required to trade
 
     @field_validator("mode")
     @classmethod
@@ -67,6 +74,16 @@ class TradingConfig(BaseModel):
     def min_edge_non_negative(cls, v: float) -> float:
         if v < 0:
             raise ValueError(f"min_edge must be >= 0, got {v}")
+        return v
+
+    @field_validator("obvious_no_probability_multiplier")
+    @classmethod
+    def obvious_no_multiplier_valid(cls, v: float) -> float:
+        if v <= 0 or v > 1:
+            raise ValueError(
+                f"obvious_no_probability_multiplier must be in (0, 1], got {v}. "
+                f"Typical range is 0.1 (very conservative) to 0.5."
+            )
         return v
 
     @field_validator("bankroll")

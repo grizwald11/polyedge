@@ -111,12 +111,23 @@ class WhaleTrackerStrategy:
             # We can't buy cheaper than the whales — no edge
             return None
 
-        # Apply freshness decay: whale positions lose confidence over time
+        # Apply freshness decay: whale positions lose confidence over time.
+        # Entries <12h old retain ≥95% of their freshness to avoid penalising
+        # recent signals. After 12h, decay gradually to a 25% floor.
+        # Decay schedule:
+        #   0-12h  → 95%-100% (linear: 1.0 at 0h, 0.95 at 12h)
+        #   12-48h → 95%-25% (inverse: 1/(1 + (hours-12)/24))
+        #   48h+   → floor at 25%
         earliest_entry = getattr(consensus, 'earliest_entry', None)
         if earliest_entry is not None:
             hours_old = (datetime.now(timezone.utc) - earliest_entry).total_seconds() / 3600
-            # Decay: 100% confidence at 0h, ~50% at 24h, ~25% at 48h
-            freshness_factor = max(0.25, 1.0 / (1.0 + hours_old / 24.0))
+            if hours_old <= 12:
+                # Very fresh: linear decay from 1.0 at 0h to 0.95 at 12h
+                freshness_factor = 1.0 - (hours_old / 12.0) * 0.05
+            else:
+                # Older than 12h: inverse decay from 0.95, floor at 0.25
+                hours_beyond_12 = hours_old - 12.0
+                freshness_factor = max(0.25, 0.95 / (1.0 + hours_beyond_12 / 24.0))
         else:
             freshness_factor = 0.5  # Unknown age = conservative
 

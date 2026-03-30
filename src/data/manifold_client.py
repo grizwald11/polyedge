@@ -28,8 +28,9 @@ MIN_BETTORS = 5  # Minimum unique bettors for a credible signal
 class ManifoldClient:
     """Fetches community forecasts from the Manifold Markets API."""
 
-    def __init__(self, ttl_seconds: int = 1800):
+    def __init__(self, ttl_seconds: int = 1800, base_url: str | None = None):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
+        self._base_url = base_url or MANIFOLD_SEARCH_URL
 
     async def search_markets(self, query: str) -> list[dict]:
         """Search Manifold for binary markets matching a query.
@@ -45,7 +46,7 @@ class ManifoldClient:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
-                    MANIFOLD_SEARCH_URL,
+                    self._base_url,
                     params={
                         "term": query,
                         "limit": 5,

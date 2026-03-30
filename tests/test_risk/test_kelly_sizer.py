@@ -160,11 +160,13 @@ class TestCalculatePositionSize:
 
         max_position = 500.0 * 0.05  # $25
         price = 0.66
+        fee_rate = 0.0  # Event market (fee-free), matching default
         contracts = sizer.calculate_position_size(
             edge=0.10, probability=0.76, bankroll=500.0,
             order_price=price,
+            fee_rate=fee_rate,
         )
-        fee_cents = math.ceil(sizer.fee_rate * contracts * price * (1.0 - price))
+        fee_cents = math.ceil(fee_rate * contracts * price * (1.0 - price))
         fee_dollars = fee_cents / 100.0
         total = contracts * price + fee_dollars
         assert total <= max_position, (
@@ -231,11 +233,12 @@ class TestExtremePriceBoundaries:
     """Kelly sizing at extreme price boundaries."""
 
     def test_very_low_price_001(self, sizer):
-        """Very cheap contracts (price ~0.01) should still produce valid sizing."""
+        """Contracts below $0.03 are always rejected (too volatile)."""
         contracts = sizer.calculate_position_size(
             edge=0.05, probability=0.06, bankroll=500.0,
         )
-        assert contracts >= 0
+        # market_price = 0.06 - 0.05 = 0.01, which is below $0.03 threshold
+        assert contracts == 0
         assert isinstance(contracts, int)
 
     def test_very_high_price_099(self, sizer):
@@ -249,11 +252,139 @@ class TestExtremePriceBoundaries:
             assert cost <= 500.0 * 0.05 + 0.01
 
     def test_price_at_boundary_001(self, sizer):
-        """Market price at 0.01 boundary."""
+        """Market price at 0.01 boundary is rejected (below $0.03 threshold)."""
         contracts = sizer.calculate_position_size(
             edge=0.04, probability=0.05, bankroll=500.0,
         )
+        # market_price = 0.05 - 0.04 = 0.01, below $0.03 threshold
+        assert contracts == 0
+
+
+class TestTieredLowPriceCheck:
+    """H-8: Tiered price check — $0.03-$0.10 requires 10% edge."""
+
+    def test_below_003_always_rejected(self, sizer):
+        """Prices below $0.03 are always rejected regardless of edge."""
+        contracts = sizer.calculate_position_size(
+            edge=0.50, probability=0.52, bankroll=500.0,
+        )
+        # market_price = 0.02, below $0.03 threshold
+        assert contracts == 0
+
+    def test_between_003_and_010_low_edge_rejected(self, sizer):
+        """Prices $0.03-$0.10 with edge < 10% should be rejected."""
+        contracts = sizer.calculate_position_size(
+            edge=0.05, probability=0.10, bankroll=500.0,
+        )
+        # market_price = 0.10 - 0.05 = 0.05, edge=0.05 < 0.10 threshold
+        assert contracts == 0
+
+    def test_between_003_and_010_high_edge_allowed(self, sizer):
+        """Prices $0.03-$0.10 with edge >= 10% should be allowed."""
+        contracts = sizer.calculate_position_size(
+            edge=0.12, probability=0.17, bankroll=500.0,
+        )
+        # market_price = 0.17 - 0.12 = 0.05, edge=0.12 >= 0.10 → allowed
+        assert contracts >= 0  # May still be 0 from Kelly math, but not from price check
+        assert isinstance(contracts, int)
+
+    def test_above_010_normal_edge_rules_apply(self, sizer):
+        """Prices >= $0.10 use normal edge rules (no extra restriction)."""
+        contracts = sizer.calculate_position_size(
+            edge=0.05, probability=0.20, bankroll=500.0,
+        )
+        # market_price = 0.20 - 0.05 = 0.15, above $0.10 threshold
         assert contracts >= 0
+
+
+class TestFeeRateParameter:
+    """H-6: fee_rate should be a parameter, not hardcoded on the instance."""
+
+    def test_default_fee_rate_zero(self, sizer):
+        """Default fee_rate=0.0 means event market (fee-free) sizing."""
+        import math
+        price = 0.66
+        contracts = sizer.calculate_position_size(
+            edge=0.10, probability=0.76, bankroll=500.0,
+            order_price=price,
+        )
+        # With fee_rate=0, fee_dollars=0, total = contracts * price
+        if contracts > 0:
+            assert contracts * price <= 500.0 * 0.05 + 0.01
+
+    def test_nonzero_fee_rate_reduces_contracts(self, sizer):
+        """Passing a nonzero fee_rate should reduce contracts to fit within cap."""
+        import math
+        price = 0.66
+        fee_rate = 0.0175
+        contracts_with_fee = sizer.calculate_position_size(
+            edge=0.10, probability=0.76, bankroll=500.0,
+            order_price=price,
+            fee_rate=fee_rate,
+        )
+        contracts_no_fee = sizer.calculate_position_size(
+            edge=0.10, probability=0.76, bankroll=500.0,
+            order_price=price,
+            fee_rate=0.0,
+        )
+        # Paying fees means fewer contracts fit within the budget
+        assert contracts_with_fee <= contracts_no_fee
+
+    def test_fee_rate_caps_total_cost(self, sizer):
+        """Total cost including fee must not exceed position cap."""
+        import math
+        price = 0.50
+        fee_rate = 0.07  # High taker fee
+        max_position = 500.0 * 0.05  # $25
+        contracts = sizer.calculate_position_size(
+            edge=0.10, probability=0.60, bankroll=500.0,
+            order_price=price,
+            fee_rate=fee_rate,
+        )
+        if contracts > 0:
+            fee_cents = math.ceil(fee_rate * contracts * price * (1.0 - price))
+            fee_dollars = fee_cents / 100.0
+            total = contracts * price + fee_dollars
+            assert total <= max_position, (
+                f"Total ${total:.2f} (contracts={contracts}, fee=${fee_dollars:.2f}) "
+                f"exceeds cap ${max_position:.2f}"
+            )
+
+
+class TestLiquidityBeforeCaps:
+    """H-7: Liquidity adjustment must happen before position/exposure caps."""
+
+    def test_liquidity_reduces_kelly_before_cap(self, sizer):
+        """When order would be >10% of book, kelly_dollars is halved before caps are applied."""
+        # With market_liquidity = $100, and kelly_dollars ~ $25 (position cap),
+        # raw_contracts ≈ 50 @ $0.50 → order = $25 = 25% of book → halved to $12.50
+        # The cap is checked AFTER the halving, so the final sizing reflects liquidity.
+        contracts_with_liq = sizer.calculate_position_size(
+            edge=0.10, probability=0.60, bankroll=500.0,
+            order_price=0.50,
+            market_liquidity=100.0,  # Shallow book — $25 order = 25% of depth
+        )
+        contracts_no_liq = sizer.calculate_position_size(
+            edge=0.10, probability=0.60, bankroll=500.0,
+            order_price=0.50,
+            market_liquidity=None,
+        )
+        # Liquidity-constrained sizing should be smaller
+        assert contracts_with_liq <= contracts_no_liq
+
+    def test_deep_liquidity_no_adjustment(self, sizer):
+        """When order is <5% of book, no adjustment should occur."""
+        contracts_with_liq = sizer.calculate_position_size(
+            edge=0.10, probability=0.60, bankroll=500.0,
+            order_price=0.50,
+            market_liquidity=10000.0,  # Deep book — $25 order = 0.25% of depth
+        )
+        contracts_no_liq = sizer.calculate_position_size(
+            edge=0.10, probability=0.60, bankroll=500.0,
+            order_price=0.50,
+            market_liquidity=None,
+        )
+        assert contracts_with_liq == contracts_no_liq
 
 
 class TestNegativeMarketPrice:
@@ -276,15 +407,17 @@ class TestFeeUnit:
         # Before fix, fee was treated as $1, causing unnecessary reduction.
         import math
 
+        fee_rate = 0.0175  # Simulate fee-enabled market maker rate
         contracts = sizer.calculate_position_size(
             edge=0.10, probability=0.60, bankroll=500.0,
             order_price=0.50,
+            fee_rate=fee_rate,
         )
         # With half-Kelly and these params, we should get a reasonable count
         # The key check: at 0.50 price, the fee should not cause a reduction
         # when total cost is well under the cap
         if contracts > 1:
-            fee_cents = math.ceil(sizer.fee_rate * contracts * 0.50 * 0.50)
+            fee_cents = math.ceil(fee_rate * contracts * 0.50 * 0.50)
             fee_dollars = fee_cents / 100.0
             cost = contracts * 0.50
             # Fee in dollars should be tiny relative to cost

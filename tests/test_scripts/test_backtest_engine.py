@@ -132,31 +132,40 @@ class TestBacktestPortfolio:
         assert p.bankroll == 500.0
         assert p.get_exposure() == 0.0
         assert p.total_pnl == 0.0
+        assert p.total_fees == 0.0
 
     def test_open_and_close_winning_buy_yes(self):
         p = BacktestPortfolio(500.0)
         p.open_position("M1", Direction.BUY_YES, 10, 0.40, "test")
-        assert p.bankroll == pytest.approx(496.0)
+        # C-3: entry taker fee = ceil(0.07 * 10 * 0.40 * 0.60) = 1 cent = $0.01
+        assert p.bankroll == pytest.approx(495.99)
         assert p.get_exposure() == pytest.approx(4.0)
         assert p.has_position("M1")
 
         pnl = p.close_position("M1", 0.60)
-        assert pnl == pytest.approx(2.0)  # (0.60 - 0.40) * 10
-        assert p.total_pnl == pytest.approx(2.0)
+        # C-3: exit maker fee = ceil(0.0175 * 10 * 0.60 * 0.40) = 1 cent = $0.01
+        # gross_pnl = (0.60 - 0.40) * 10 = 2.0; net_pnl = 2.0 - 0.01 = 1.99
+        assert pnl == pytest.approx(1.99)
+        assert p.total_pnl == pytest.approx(1.99)
+        assert p.total_fees == pytest.approx(0.02)  # entry + exit
         assert not p.has_position("M1")
 
     def test_open_and_close_losing_buy_yes(self):
         p = BacktestPortfolio(500.0)
         p.open_position("M1", Direction.BUY_YES, 10, 0.50, "test")
         pnl = p.close_position("M1", 0.30)
-        assert pnl == pytest.approx(-2.0)
+        # C-3: exit maker fee = ceil(0.0175 * 10 * 0.30 * 0.70) = 1 cent = $0.01
+        # gross_pnl = (0.30 - 0.50) * 10 = -2.0; net_pnl = -2.0 - 0.01 = -2.01
+        assert pnl == pytest.approx(-2.01)
 
     def test_buy_no_pnl(self):
         p = BacktestPortfolio(500.0)
         p.open_position("M1", Direction.BUY_NO, 10, 0.60, "test")
         pnl = p.close_position("M1", 0.40)
         # BUY_NO at 0.60, exit at 0.40: loss of 0.20 per contract
-        assert pnl == pytest.approx(-2.0)
+        # C-3: exit maker fee = ceil(0.0175 * 10 * 0.40 * 0.60) = 1 cent = $0.01
+        # gross_pnl = (0.40 - 0.60) * 10 = -2.0; net_pnl = -2.0 - 0.01 = -2.01
+        assert pnl == pytest.approx(-2.01)
 
     def test_close_nonexistent_returns_zero(self):
         p = BacktestPortfolio(500.0)
@@ -166,13 +175,17 @@ class TestBacktestPortfolio:
         p = BacktestPortfolio(500.0)
         p.open_position("M1", Direction.BUY_YES, 10, 0.30, "test")
         pnl = p.resolve_position("M1", outcome=True)
-        assert pnl == pytest.approx(7.0)  # (1.0 - 0.30) * 10
+        # C-3: exit maker fee at price=1.0 = ceil(0.0175 * 10 * 1.0 * 0.0) = 0
+        # gross_pnl = (1.0 - 0.30) * 10 = 7.0; net_pnl = 7.0 - 0.0 = 7.0
+        assert pnl == pytest.approx(7.0)  # (1.0 - 0.30) * 10, no exit fee at boundary
 
     def test_resolve_no_outcome_buy_yes_loses(self):
         p = BacktestPortfolio(500.0)
         p.open_position("M1", Direction.BUY_YES, 10, 0.40, "test")
         pnl = p.resolve_position("M1", outcome=False)
-        assert pnl == pytest.approx(-4.0)  # (0.0 - 0.40) * 10
+        # C-3: exit maker fee at price=0.0 = ceil(0.0175 * 10 * 0.0 * 1.0) = 0
+        # gross_pnl = (0.0 - 0.40) * 10 = -4.0; net_pnl = -4.0 - 0.0 = -4.0
+        assert pnl == pytest.approx(-4.0)  # (0.0 - 0.40) * 10, no exit fee at boundary
 
     def test_resolve_buy_no_yes_outcome_loses(self):
         """BUY_NO when YES wins: NO contracts settle at $0, full loss."""
@@ -180,8 +193,11 @@ class TestBacktestPortfolio:
         p.open_position("M1", Direction.BUY_NO, 10, 0.60, "test")
         pnl = p.resolve_position("M1", outcome=True)
         # Bought NO at 0.60, NO settles at 0.0 → loss of 0.60 per contract
+        # C-3: entry fee = ceil(0.07 * 10 * 0.60 * 0.40) = 1 cent; exit fee at 0.0 = 0
+        # net_pnl = -6.0 - 0.0 = -6.0
         assert pnl == pytest.approx(-6.0)
-        assert p.bankroll == pytest.approx(494.0)  # 500 - 6 cost + 0 proceeds
+        # bankroll: 500 - 6 cost - 0.01 entry_fee + 0 proceeds - 0 exit_fee = 493.99
+        assert p.bankroll == pytest.approx(493.99)
 
     def test_resolve_buy_no_no_outcome_wins(self):
         """BUY_NO when NO wins: NO contracts settle at $1, profit."""
@@ -189,8 +205,11 @@ class TestBacktestPortfolio:
         p.open_position("M1", Direction.BUY_NO, 10, 0.60, "test")
         pnl = p.resolve_position("M1", outcome=False)
         # Bought NO at 0.60, NO settles at 1.0 → gain of 0.40 per contract
+        # C-3: entry fee = ceil(0.07 * 10 * 0.60 * 0.40) = 1 cent; exit fee at 1.0 = 0
+        # net_pnl = 4.0 - 0.0 = 4.0
         assert pnl == pytest.approx(4.0)
-        assert p.bankroll == pytest.approx(504.0)  # 500 - 6 cost + 10 proceeds
+        # bankroll: 500 - 6 cost - 0.01 entry_fee + 10 proceeds - 0 exit_fee = 503.99
+        assert p.bankroll == pytest.approx(503.99)
 
     def test_resolve_nonexistent_returns_zero(self):
         p = BacktestPortfolio(500.0)
@@ -411,6 +430,137 @@ class TestComputeResult:
         assert result.win_rate == 0.0
         assert result.total_pnl == 0.0
         assert result.brier_score is None
+
+    def test_new_fields_default_values(self):
+        """C-1/C-2/C-3: New BacktestResult fields have correct defaults."""
+        result = BacktestResult(strategy="test")
+        assert result.uses_lookahead is False
+        assert result.unresolved_positions == 0
+        assert result.total_fees == 0.0
+
+
+# ──────────────────────────────────────────────
+# BacktestResult new fields (C-1, C-2, C-3)
+# ──────────────────────────────────────────────
+
+class TestBacktestResultNewFields:
+    """Tests for uses_lookahead (C-1), unresolved_positions (C-2), total_fees (C-3)."""
+
+    def test_uses_lookahead_default_false(self):
+        """C-1: BacktestResult.uses_lookahead defaults to False."""
+        result = BacktestResult(strategy="ai_probability")
+        assert result.uses_lookahead is False
+
+    def test_uses_lookahead_can_be_set(self):
+        """C-1: BacktestResult.uses_lookahead can be set to True."""
+        result = BacktestResult(strategy="ai_probability", uses_lookahead=True)
+        assert result.uses_lookahead is True
+
+    def test_unresolved_positions_default_zero(self):
+        """C-2: unresolved_positions defaults to 0."""
+        result = BacktestResult(strategy="ai_probability")
+        assert result.unresolved_positions == 0
+
+    def test_unresolved_positions_can_be_set(self):
+        """C-2: unresolved_positions tracks mark-to-market count."""
+        result = BacktestResult(strategy="ai_probability", unresolved_positions=3)
+        assert result.unresolved_positions == 3
+
+    def test_total_fees_default_zero(self):
+        """C-3: total_fees defaults to 0.0."""
+        result = BacktestResult(strategy="ai_probability")
+        assert result.total_fees == 0.0
+
+    def test_total_fees_can_be_set(self):
+        """C-3: total_fees stores cumulative fee amount."""
+        result = BacktestResult(strategy="ai_probability", total_fees=1.23)
+        assert result.total_fees == pytest.approx(1.23)
+
+    def test_portfolio_total_fees_accumulate(self):
+        """C-3: BacktestPortfolio.total_fees accumulates across trades."""
+        p = BacktestPortfolio(1000.0)
+        p.open_position("M1", Direction.BUY_YES, 10, 0.40, "test")
+        p.open_position("M2", Direction.BUY_YES, 10, 0.50, "test")
+        # Each open deducts a taker fee
+        assert p.total_fees > 0.0
+        fees_before_close = p.total_fees
+        p.close_position("M1", 0.60)
+        # Close deducts maker fee too
+        assert p.total_fees > fees_before_close
+
+    def test_mock_forecaster_used_lookahead_tracks_synthetic(self, backtest_db):
+        """C-1: MockForecaster.used_lookahead is True when outcome-derived forecasts are made."""
+        from src.storage.database import Database
+        conn = backtest_db._get_conn()
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        # Insert a market with an outcome but NO calibration record → forces synthetic mode
+        try:
+            conn.execute("ALTER TABLE markets ADD COLUMN result TEXT DEFAULT ''")
+        except Exception:
+            pass
+        conn.commit()
+        # MockForecaster loads outcomes from calibration_records + markets table
+        # backtest_db already has MKT-A with result='yes' — MockForecaster should pick it up
+        forecaster = MockForecaster(backtest_db, noise=0.0)
+        # Call get_forecast on a market from self._outcomes (loaded from markets table)
+        result = forecaster.get_forecast("MKT-A", 0.50)
+        if result is not None and result.model_used == "backtest_synthetic":
+            assert forecaster.used_lookahead is True
+        # If it falls back to cache mode, used_lookahead stays False — still valid
+
+    def test_mock_forecaster_used_lookahead_false_when_cached(self, backtest_db_with_calibration):
+        """C-1: MockForecaster.used_lookahead stays False when only cache is used."""
+        forecaster = MockForecaster(backtest_db_with_calibration, noise=0.1)
+        # MKT-A, MKT-B, MKT-C have cached predictions — no synthetic mode needed
+        forecaster.get_forecast("MKT-A", 0.40)
+        forecaster.get_forecast("MKT-B", 0.70)
+        assert forecaster.used_lookahead is False
+
+    def test_engine_propagates_uses_lookahead(self, backtest_db, settings):
+        """C-1: BacktestEngine propagates forecaster.used_lookahead to BacktestResult."""
+        forecaster = MockForecaster(backtest_db, noise=0.1)
+        engine = BacktestEngine(backtest_db, settings, forecaster=forecaster)
+        results = engine.run(bankroll=500.0)
+        if results:
+            # uses_lookahead should match what the forecaster did
+            assert results[0].uses_lookahead == forecaster.used_lookahead
+
+    def test_engine_propagates_total_fees(self, backtest_db_with_calibration, settings):
+        """C-3: BacktestEngine propagates total_fees from portfolio to BacktestResult."""
+        engine = BacktestEngine(backtest_db_with_calibration, settings)
+        results = engine.run(bankroll=500.0)
+        if results and results[0].total_trades > 0:
+            # If trades happened, fees should be >= 0
+            assert results[0].total_fees >= 0.0
+
+    def test_format_result_includes_fees_and_unresolved(self):
+        """C-2/C-3: format_result output includes total_fees and unresolved_positions."""
+        from scripts.backtest_engine import format_result
+        result = BacktestResult(
+            strategy="ai_probability",
+            total_trades=5,
+            total_fees=0.15,
+            unresolved_positions=2,
+        )
+        text = format_result(result)
+        assert "Total Fees" in text
+        assert "Unresolved" in text
+        assert "0.1500" in text
+        assert "2" in text
+
+    def test_format_result_lookahead_warning_shown(self):
+        """C-1: format_result shows oracle_upper_bound warning when uses_lookahead=True."""
+        from scripts.backtest_engine import format_result
+        result = BacktestResult(strategy="test", uses_lookahead=True)
+        text = format_result(result)
+        assert "oracle_upper_bound" in text
+
+    def test_format_result_no_lookahead_note_shown(self):
+        """C-1: format_result shows cached-mode note when uses_lookahead=False."""
+        from scripts.backtest_engine import format_result
+        result = BacktestResult(strategy="test", uses_lookahead=False)
+        text = format_result(result)
+        assert "cached-prediction mode" in text
 
 
 # ──────────────────────────────────────────────

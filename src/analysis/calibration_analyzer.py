@@ -114,7 +114,7 @@ class CalibrationAnalyzer:
 
         adjustments = {}
         for cat, records in by_category.items():
-            if len(records) < 5:  # Need minimum sample size
+            if len(records) < 15:  # Need minimum sample size
                 continue
 
             # Bias = avg(actual) - avg(predicted)
@@ -152,10 +152,9 @@ class CalibrationAnalyzer:
 
         base_rates = {}
         for cat, records in by_category.items():
-            # Require a minimum of 4 resolved markets per category before
-            # reporting base rates. Lower threshold (was 8) ensures rare
-            # categories get anchoring sooner, at the cost of noisier rates.
-            if len(records) < 4:
+            # Require minimum 15 resolved markets for statistical significance
+            # (95% CI width ~±25% vs ±45% at n=4).
+            if len(records) < 15:
                 continue
             yes_count = sum(1 for r in records if bool(r["actual_outcome"]))
             base_rates[cat] = {
@@ -188,12 +187,18 @@ class CalibrationAnalyzer:
     def _compute_win_rate(self, records: list[dict]) -> float:
         """Compute overall win rate."""
         wins = 0
+        total = 0
         for r in records:
             predicted = r["predicted_probability"]
             actual = bool(r["actual_outcome"])
-            if (predicted > 0.5 and actual) or (predicted < 0.5 and not actual):
+            # Use market price as threshold when available — this measures
+            # whether we added value beyond what the market already knew.
+            market_price = r.get("market_price_at_prediction")
+            threshold = float(market_price) if market_price is not None else 0.5
+            total += 1
+            if (predicted > threshold and actual) or (predicted < threshold and not actual):
                 wins += 1
-        return wins / len(records)
+        return wins / total if total > 0 else 0.0
 
     def _compute_calibration_curve(
         self, records: list[dict], n_bins: int = 10

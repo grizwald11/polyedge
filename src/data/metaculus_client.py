@@ -30,9 +30,10 @@ MIN_SIMILARITY_THRESHOLD = 0.4
 class MetaculusClient:
     """Fetches community forecasts from the Metaculus API."""
 
-    def __init__(self, ttl_seconds: int = 1800, api_token: str | None = None):
+    def __init__(self, ttl_seconds: int = 1800, api_token: str | None = None, base_url: str | None = None):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
         self._api_token = api_token
+        self._base_url = base_url or METACULUS_API_URL
         self._disabled = False
         self._probe_done = False  # Have we checked if API returns predictions?
 
@@ -53,7 +54,7 @@ class MetaculusClient:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
-                    METACULUS_API_URL,
+                    self._base_url,
                     params={
                         "search": "president election",
                         "status": "open",
@@ -134,7 +135,7 @@ class MetaculusClient:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
-                    METACULUS_API_URL,
+                    self._base_url,
                     params={
                         "search": query,
                         "status": "open",

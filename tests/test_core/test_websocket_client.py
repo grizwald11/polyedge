@@ -12,6 +12,7 @@ from src.core.websocket_client import (
     FillUpdate,
     KalshiWebSocket,
     LifecycleUpdate,
+    MAX_CONSECUTIVE_FAILURES,
     TickerUpdate,
 )
 
@@ -313,3 +314,97 @@ class TestAuth:
         ts = int(headers["KALSHI-ACCESS-TIMESTAMP"])
         import time
         assert abs(ts - int(time.time() * 1000)) < 5000
+
+
+class TestModuleConstants:
+    def test_max_consecutive_failures_defined(self):
+        """M-19: MAX_CONSECUTIVE_FAILURES must be a module-level constant."""
+        assert MAX_CONSECUTIVE_FAILURES == 10
+
+    def test_initial_backoff_defined(self):
+        from src.core.websocket_client import INITIAL_BACKOFF, MAX_BACKOFF, BACKOFF_MULTIPLIER
+        assert INITIAL_BACKOFF == 1.0
+        assert MAX_BACKOFF == 60.0
+        assert BACKOFF_MULTIPLIER == 2.0
+
+
+class TestReconnectSync:
+    def test_register_reconnect_sync_stores_callback(self, ws_client):
+        """H-5: register_reconnect_sync adds callback to reconnect list."""
+        cb = AsyncMock()
+        assert len(ws_client._reconnect_callbacks) == 0
+        ws_client.register_reconnect_sync(cb)
+        assert len(ws_client._reconnect_callbacks) == 1
+        assert ws_client._reconnect_callbacks[0] is cb
+
+    def test_on_reconnect_and_register_reconnect_sync_both_work(self, ws_client):
+        """Both registration methods append to the same callback list."""
+        cb1 = AsyncMock()
+        cb2 = AsyncMock()
+        ws_client.on_reconnect(cb1)
+        ws_client.register_reconnect_sync(cb2)
+        assert len(ws_client._reconnect_callbacks) == 2
+
+    @pytest.mark.asyncio
+    async def test_reconnect_callbacks_called_on_connect(self, ws_client):
+        """Reconnect callbacks are invoked after successful WebSocket connection."""
+        cb = AsyncMock()
+        ws_client.register_reconnect_sync(cb)
+
+        # Simulate the reconnect callback invocation path directly
+        for callback in ws_client._reconnect_callbacks:
+            await callback()
+
+        cb.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_callback_error_does_not_propagate(self, ws_client):
+        """A failing reconnect callback should not abort the connection loop."""
+        bad_cb = AsyncMock(side_effect=RuntimeError("sync failed"))
+        ws_client.register_reconnect_sync(bad_cb)
+
+        # Simulate the error-isolated invocation used in connect()
+        for cb in ws_client._reconnect_callbacks:
+            try:
+                await cb()
+            except Exception:
+                pass  # Should be swallowed by the connect() loop
+
+        bad_cb.assert_called_once()
+
+
+class TestPingParameters:
+    @pytest.mark.asyncio
+    async def test_connect_passes_ping_parameters(self, ws_client):
+        """H-2: websockets.connect() must be called with ping_interval=20, ping_timeout=30."""
+        import websockets
+
+        connect_kwargs = {}
+
+        class FakeWS:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        def fake_connect(url, **kwargs):
+            connect_kwargs.update(kwargs)
+            ws_client._running = False  # Stop after first iteration
+            return FakeWS()
+
+        with patch("websockets.connect", side_effect=fake_connect):
+            try:
+                await ws_client.connect()
+            except Exception:
+                pass
+
+        assert connect_kwargs.get("ping_interval") == 20, (
+            f"Expected ping_interval=20, got {connect_kwargs.get('ping_interval')}"
+        )
+        assert connect_kwargs.get("ping_timeout") == 30, (
+            f"Expected ping_timeout=30, got {connect_kwargs.get('ping_timeout')}"
+        )

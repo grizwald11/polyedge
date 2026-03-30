@@ -30,6 +30,9 @@ INITIAL_BACKOFF = 1.0
 MAX_BACKOFF = 60.0
 BACKOFF_MULTIPLIER = 2.0
 
+# Stop reconnecting after this many consecutive failures (likely permanent auth/config issue)
+MAX_CONSECUTIVE_FAILURES = 10
+
 
 @dataclass
 class TickerUpdate:
@@ -159,6 +162,15 @@ class KalshiWebSocket:
         """
         self._reconnect_callbacks.append(callback)
 
+    def register_reconnect_sync(self, callback: Callable[[], Coroutine[Any, Any, None]]):
+        """Register a callback to sync market state after reconnection.
+
+        Alias for on_reconnect(). Called after every successful reconnect so
+        callers can re-query tracked markets' REST status to catch any
+        lifecycle changes (close, settlement) that occurred while disconnected.
+        """
+        self._reconnect_callbacks.append(callback)
+
     def remove_callback(self, cb_id: int) -> bool:
         """Remove a previously registered callback by its id.
 
@@ -186,7 +198,6 @@ class KalshiWebSocket:
         self._running = True
         backoff = INITIAL_BACKOFF
         consecutive_failures = 0
-        MAX_CONSECUTIVE_FAILURES = 10  # Stop after 10 consecutive failures (likely permanent)
 
         while self._running:
             try:
@@ -197,7 +208,8 @@ class KalshiWebSocket:
                 async with websockets.connect(
                     self.host,
                     additional_headers=headers,
-                    ping_interval=None,  # Kalshi sends its own pings
+                    ping_interval=20,   # Send keep-alive pings every 20s
+                    ping_timeout=30,    # Detect dead connections within 30s
                     ssl=ssl_ctx,
                 ) as ws:
                     self._ws = ws
@@ -328,6 +340,11 @@ class KalshiWebSocket:
         elif msg_type == "market_lifecycle_v2":
             update = self._parse_lifecycle(msg)
             if update:
+                if update.status == "closed":
+                    logger.warning(
+                        f"Market {update.market_ticker} status changed to closed "
+                        f"— caller should cancel resting orders"
+                    )
                 await self._run_callbacks(self._lifecycle_callbacks, update, "Lifecycle")
 
         elif msg_type in ("subscribed", "unsubscribed", "error"):

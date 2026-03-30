@@ -147,7 +147,7 @@ class ResolutionTracker:
 
             return None
         except Exception as e:
-            logger.debug(f"Polymarket resolution check failed for {condition_id}: {e}")
+            logger.debug(f"Polymarket resolution check failed for {condition_id}: {e}", exc_info=True)
             return None
 
     def _resolve_predictions(self, market_id: str, platform: str, actual_outcome: bool) -> int:
@@ -172,8 +172,12 @@ class ResolutionTracker:
                    WHERE market_id = ? AND platform = ? AND actual_outcome IS NULL""",
                 (market_id, platform),
             ).fetchall()
-        except Exception:
+        except Exception as db_err:
             # Fallback for legacy records without platform column
+            logger.debug(
+                f"Platform-filtered query failed for {market_id} (legacy schema?): {db_err}",
+                exc_info=True,
+            )
             rows = conn.execute(
                 """SELECT id, predicted_probability, market_price_at_prediction
                    FROM calibration_records

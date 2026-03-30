@@ -210,11 +210,15 @@ class AIProbabilityStrategy:
                     age = datetime.now(timezone.utc) - predicted_at
                     price_move = abs(market.yes_price - latest["market_price_at_prediction"])
                     staleness_hours = getattr(self.settings.claude, 'reassessment_interval_hours', 24)
-                    staleness_price_move = getattr(self.settings.claude, 'reassessment_price_move', 0.05)
-                    if age < timedelta(hours=staleness_hours) and price_move < staleness_price_move:
+                    staleness_price_move = getattr(self.settings.claude, 'reassessment_price_move', 0.10)
+                    # Use relative price move to be context-sensitive across all price ranges
+                    cached_price = latest["market_price_at_prediction"]
+                    relative_move = price_move / max(cached_price, 0.01) if cached_price > 0 else price_move
+                    if age < timedelta(hours=staleness_hours) and relative_move < staleness_price_move:
                         logger.debug(
                             f"Skipping {market.ticker}: recent prediction "
-                            f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f})"
+                            f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f} "
+                            f"({relative_move:.0%} relative))"
                         )
                         return None
             except Exception as e:
@@ -312,32 +316,6 @@ class AIProbabilityStrategy:
             )
             return None
 
-        # Apply calibration adjustment before ensemble
-        adjustment = self._category_adjustments.get(category.value, 0.0)
-        if adjustment != 0.0:
-            original = forecast.probability
-            adjusted_prob = max(0.01, min(0.99, forecast.probability + adjustment))
-            # Create a copy with adjusted probability to avoid mutating the original
-            forecast = ForecastResult(
-                probability=adjusted_prob,
-                confidence_low=forecast.confidence_low,
-                confidence_high=forecast.confidence_high,
-                key_factors_for=forecast.key_factors_for,
-                key_factors_against=forecast.key_factors_against,
-                uncertainties=forecast.uncertainties,
-                reasoning=forecast.reasoning,
-                model_used=forecast.model_used,
-                tokens_used=forecast.tokens_used,
-                latency_ms=forecast.latency_ms,
-                raw_response=forecast.raw_response,
-                parse_failed=forecast.parse_failed,
-                high_divergence=forecast.high_divergence,
-            )
-            logger.debug(
-                f"Calibration adjustment for {category.value}: "
-                f"{original:.3f} → {forecast.probability:.3f} (adj={adjustment:+.3f})"
-            )
-
         # Confidence gate: skip if confidence interval is too wide.
         # Category-specific thresholds: data-rich categories (Politics, Fed)
         # should have narrower CIs; inherently uncertain categories allow wider.
@@ -372,6 +350,26 @@ class AIProbabilityStrategy:
                 claude_forecast=forecast,
                 market_price=market.yes_price,
                 claude_weight=self.settings.claude.ensemble_weight,
+            )
+
+        # Apply calibration adjustment to the ensemble final probability so that
+        # it corrects both Claude's forecast and any community forecasts uniformly.
+        adjustment = self._category_adjustments.get(category.value, 0.0)
+        if adjustment != 0.0:
+            original_prob = ensemble.final_probability
+            adjusted_prob = max(0.01, min(0.99, ensemble.final_probability + adjustment))
+            # Recalculate edge after adjustment using the same market price
+            from src.core.models import EnsembleForecast as EnsembleForecastModel
+            ensemble = EnsembleForecastModel(
+                final_probability=adjusted_prob,
+                individual_forecasts=ensemble.individual_forecasts,
+                market_price=ensemble.market_price,
+                edge=adjusted_prob - market.yes_price,
+                confidence=ensemble.confidence,
+            )
+            logger.debug(
+                f"Calibration adjustment for {category.value}: "
+                f"{original_prob:.3f} → {adjusted_prob:.3f} (adj={adjustment:+.3f})"
             )
 
         # Calculate edge

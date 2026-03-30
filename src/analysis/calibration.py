@@ -127,13 +127,12 @@ class CalibrationTracker:
         valid_count = 0
         skipped_null = 0
         skipped_bad = 0
-        skipped_stale = 0
         bucket_scores: dict[str, list[float]] = {}
         for r in records:
             if r["actual_outcome"] is None:
                 skipped_null += 1
                 continue
-            # Compute Brier early so we can bucket it even if stale
+            # Compute Brier early so we can bucket it
             try:
                 outcome = float(r["actual_outcome"])
                 predicted = float(r["predicted_probability"])
@@ -147,8 +146,10 @@ class CalibrationTracker:
                 continue
             brier = (predicted - outcome) ** 2
 
-            # Skip predictions that took >90 days to resolve — they reflect
-            # world changes, not forecasting accuracy.
+            # Track Brier by time bucket for informational purposes.
+            # All resolved predictions — including long-horizon ones — are
+            # included in the main Brier score to avoid systematic exclusion
+            # of multi-month forecasts.
             staleness_days = None
             if r.get("predicted_at") and r.get("resolved_at"):
                 try:
@@ -158,7 +159,6 @@ class CalibrationTracker:
                 except (ValueError, TypeError):
                     pass  # Proceed with the record if dates are unparseable
 
-            # Track Brier by time bucket for long-horizon analysis
             if staleness_days is not None:
                 if staleness_days <= 30:
                     time_bucket = "0-30d"
@@ -166,30 +166,18 @@ class CalibrationTracker:
                     time_bucket = "30-90d"
                 else:
                     time_bucket = "90d+"
-                    # Still include in bucket-specific tracking even though
-                    # excluded from the main Brier score
-                    skipped_stale += 1
-                    if time_bucket not in bucket_scores:
-                        bucket_scores[time_bucket] = []
-                    bucket_scores[time_bucket].append(brier)
-                    continue
-
                 if time_bucket not in bucket_scores:
                     bucket_scores[time_bucket] = []
                 bucket_scores[time_bucket].append(brier)
-            elif staleness_days is None and r.get("predicted_at") and r.get("resolved_at"):
-                # Dates were unparseable — already handled above
-                pass
 
             total += brier
             valid_count += 1
 
-        if skipped_null or skipped_bad or skipped_stale:
+        if skipped_null or skipped_bad:
             logger.info(
                 f"Brier score: {valid_count} valid records, "
                 f"{skipped_null} skipped (cancelled/NULL outcome), "
-                f"{skipped_bad} skipped (bad data), "
-                f"{skipped_stale} skipped (stale >90d)"
+                f"{skipped_bad} skipped (bad data)"
             )
 
         if bucket_scores:

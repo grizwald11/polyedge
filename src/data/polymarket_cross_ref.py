@@ -26,8 +26,9 @@ MIN_SIMILARITY_THRESHOLD = 0.5
 class PolymarketCrossRef:
     """Cross-references market prices with Polymarket."""
 
-    def __init__(self, ttl_seconds: int = 600):
+    def __init__(self, ttl_seconds: int = 600, base_url: str | None = None):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
+        self._base_url = base_url or GAMMA_API_URL
 
     async def search_markets(self, query: str) -> list[dict]:
         """Search Polymarket for open markets matching a query.
@@ -45,7 +46,7 @@ class PolymarketCrossRef:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
-                    GAMMA_API_URL,
+                    self._base_url,
                     params={
                         "closed": "false",
                         "limit": 5,

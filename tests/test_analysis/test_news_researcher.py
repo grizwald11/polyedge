@@ -376,3 +376,86 @@ class TestExtractSource:
 
     def test_empty_url(self):
         assert _extract_source("") == ""
+
+
+class TestFetchArticleText:
+    """Tests for _fetch_article_text article extraction behavior."""
+
+    def _make_html_response(self, html_content: str) -> MagicMock:
+        """Build a mock httpx response with text/html content-type."""
+        mock_response = MagicMock()
+        mock_response.text = html_content
+        mock_response.raise_for_status = MagicMock()
+        # headers.get() must return a real string so the content-type check works
+        mock_response.headers = {"content-type": "text/html; charset=utf-8"}
+        return mock_response
+
+    @pytest.mark.asyncio
+    async def test_includes_lede_sentences(self):
+        """Extracted text should include the first 2 sentences (lede), not skip them."""
+        from src.analysis.news_researcher import MAX_ARTICLE_CHARS
+        researcher = NewsResearcher()
+
+        # Craft HTML with clearly identifiable first and later sentences
+        html_content = (
+            "<html><body>"
+            "<p>First sentence of the article, this is the important lede. "
+            "Second sentence provides more context about the event happening now. "
+            "Third sentence with extra details about the background. "
+            "Fourth sentence discusses further implications. "
+            "Fifth sentence wraps up the introduction.</p>"
+            "</body></html>"
+        )
+        mock_response = self._make_html_response(html_content)
+
+        with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await researcher._fetch_article_text("https://example.com/article")
+
+        # The lede ("First sentence") must appear in the extracted text
+        assert "First sentence" in result
+
+    @pytest.mark.asyncio
+    async def test_respects_max_article_chars(self):
+        """Extracted text must not exceed MAX_ARTICLE_CHARS (3000)."""
+        from src.analysis.news_researcher import MAX_ARTICLE_CHARS
+        researcher = NewsResearcher()
+
+        # Generate a very long article
+        long_sentence = "This is a very long sentence that contains lots of words and keeps going. "
+        sentences_text = (long_sentence * 100)
+        html_content = "<html><body><p>" + sentences_text + "</p></body></html>"
+        mock_response = self._make_html_response(html_content)
+
+        with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await researcher._fetch_article_text("https://example.com/article")
+
+        assert len(result) <= MAX_ARTICLE_CHARS
+        assert MAX_ARTICLE_CHARS == 3000
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_fetch_error(self):
+        """Should return empty string when fetch fails."""
+        researcher = NewsResearcher()
+
+        with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=httpx.HTTPError("timeout"))
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await researcher._fetch_article_text("https://example.com/article")
+
+        assert result == ""

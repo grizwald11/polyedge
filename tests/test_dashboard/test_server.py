@@ -272,3 +272,66 @@ class TestCreateApp:
         with patch("src.dashboard.server.FASTAPI_AVAILABLE", False):
             app = create_app(mock_db)
             assert app is None
+
+
+class TestAuthMiddleware:
+    """Tests for dashboard API key authentication middleware (H-17)."""
+
+    def test_no_key_env_allows_unauthenticated(self, mock_db):
+        """When POLYEDGE_DASHBOARD_KEY is not set, all requests are allowed."""
+        import os
+        env = {k: v for k, v in os.environ.items() if k != "POLYEDGE_DASHBOARD_KEY"}
+        with patch.dict(os.environ, env, clear=True):
+            app = create_app(mock_db)
+            client = TestClient(app)
+            resp = client.get("/api/stats")
+            assert resp.status_code == 200
+
+    def test_valid_key_as_query_param_allowed(self, mock_db):
+        """Requests with correct key as ?key= query param are allowed."""
+        import os
+        with patch.dict(os.environ, {"POLYEDGE_DASHBOARD_KEY": "secret-key-123"}):
+            app = create_app(mock_db)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/stats?key=secret-key-123")
+            assert resp.status_code == 200
+
+    def test_valid_key_as_bearer_header_allowed(self, mock_db):
+        """Requests with correct key as Authorization: Bearer header are allowed."""
+        import os
+        with patch.dict(os.environ, {"POLYEDGE_DASHBOARD_KEY": "secret-key-123"}):
+            app = create_app(mock_db)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get(
+                "/api/stats",
+                headers={"Authorization": "Bearer secret-key-123"},
+            )
+            assert resp.status_code == 200
+
+    def test_missing_key_returns_401(self, mock_db):
+        """Requests without any key are rejected with 401 when key is configured."""
+        import os
+        with patch.dict(os.environ, {"POLYEDGE_DASHBOARD_KEY": "secret-key-123"}):
+            app = create_app(mock_db)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/stats")
+            assert resp.status_code == 401
+
+    def test_wrong_key_returns_401(self, mock_db):
+        """Requests with an incorrect key are rejected with 401."""
+        import os
+        with patch.dict(os.environ, {"POLYEDGE_DASHBOARD_KEY": "secret-key-123"}):
+            app = create_app(mock_db)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/stats?key=wrong-key")
+            assert resp.status_code == 401
+
+    def test_static_assets_bypass_auth(self, mock_db):
+        """Static asset paths (/static/) bypass auth even when key is configured."""
+        import os
+        with patch.dict(os.environ, {"POLYEDGE_DASHBOARD_KEY": "secret-key-123"}):
+            app = create_app(mock_db)
+            client = TestClient(app, raise_server_exceptions=False)
+            # /static/ path — should not return 401 (may 404 if no file, but not 401)
+            resp = client.get("/static/style.css")
+            assert resp.status_code != 401

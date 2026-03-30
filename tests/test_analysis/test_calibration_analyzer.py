@@ -61,6 +61,11 @@ class TestGenerateReport:
         assert report.total_resolved == 0
 
     def test_basic_report(self, analyzer, tmp_db):
+        # market_price_at_prediction = pred_prob - 0.05 (set by _seed_resolved)
+        # MKT-1: pred=0.70, threshold=0.65, actual=YES → WIN
+        # MKT-2: pred=0.30, threshold=0.25, actual=NO  → 0.30>0.25 so NOT a NO signal → NO WIN
+        # MKT-3: pred=0.80, threshold=0.75, actual=YES → WIN
+        # win_rate = 2/3
         _seed_resolved(tmp_db, [
             ("MKT-1", "Politics", 0.70, 1),  # Brier = 0.09
             ("MKT-2", "Politics", 0.30, 0),  # Brier = 0.09
@@ -71,7 +76,7 @@ class TestGenerateReport:
         assert report.total_resolved == 3
         assert report.overall_brier is not None
         assert report.overall_brier == pytest.approx((0.09 + 0.09 + 0.04) / 3, abs=0.01)
-        assert report.overall_win_rate == pytest.approx(1.0)
+        assert report.overall_win_rate == pytest.approx(2 / 3, abs=0.01)
 
     def test_report_with_unresolved(self, analyzer, tmp_db):
         _seed_resolved(tmp_db, [("MKT-1", "Politics", 0.70, 1)])
@@ -144,49 +149,51 @@ class TestCategoryAdjustments:
 
     def test_detects_overestimate(self, analyzer, tmp_db):
         """Claude predicts high, actuals are low → overestimate → negative adjustment."""
+        # Use 15+ records to meet the new minimum sample size threshold
         _seed_resolved(tmp_db, [
-            (f"MKT-{i}", "Politics", 0.75, 0) for i in range(1, 9)
+            (f"MKT-{i}", "Politics", 0.75, 0) for i in range(1, 14)
         ] + [
-            ("MKT-9", "Politics", 0.75, 1),
-            ("MKT-10", "Politics", 0.80, 1),
+            ("MKT-14", "Politics", 0.75, 1),
+            ("MKT-15", "Politics", 0.80, 1),
         ])
 
         adjustments = analyzer.get_category_adjustments()
-        # avg_predicted ≈ 0.76, avg_actual = 0.20 → bias ≈ -0.56
+        # avg_predicted ≈ 0.76, avg_actual ≈ 0.13 → large negative bias
         assert "Politics" in adjustments
         assert adjustments["Politics"] < 0  # Overestimates
 
     def test_detects_underestimate(self, analyzer, tmp_db):
         """Claude predicts low, actuals are high → underestimate → positive adjustment."""
+        # Use 15+ records to meet the new minimum sample size threshold
         _seed_resolved(tmp_db, [
-            (f"MKT-{i}", "Economics", 0.30, 1) for i in range(1, 9)
+            (f"MKT-{i}", "Economics", 0.30, 1) for i in range(1, 14)
         ] + [
-            ("MKT-9", "Economics", 0.25, 0),
-            ("MKT-10", "Economics", 0.35, 0),
+            ("MKT-14", "Economics", 0.25, 0),
+            ("MKT-15", "Economics", 0.35, 0),
         ])
 
         adjustments = analyzer.get_category_adjustments()
-        # avg_predicted ≈ 0.30, avg_actual = 0.80 → bias ≈ +0.50
+        # avg_predicted ≈ 0.30, avg_actual ≈ 0.87 → large positive bias
         assert "Economics" in adjustments
         assert adjustments["Economics"] > 0  # Underestimates
 
     def test_small_bias_ignored(self, analyzer, tmp_db):
         """Biases under 3% should not produce adjustments."""
-        # 5 YES, 5 NO with predictions near 0.50 → minimal bias
+        # 8 YES, 7 NO with predictions near 0.50 → minimal bias (15 total)
         _seed_resolved(tmp_db, [
-            (f"MKT-{i}", "Other", 0.50, 1) for i in range(1, 6)
+            (f"MKT-{i}", "Other", 0.50, 1) for i in range(1, 9)
         ] + [
-            (f"MKT-{i}", "Other", 0.50, 0) for i in range(6, 11)
+            (f"MKT-{i}", "Other", 0.50, 0) for i in range(9, 16)
         ])
 
         adjustments = analyzer.get_category_adjustments()
-        # avg_predicted = 0.50, avg_actual = 0.50 → bias = 0.0
+        # avg_predicted = 0.50, avg_actual ≈ 0.53 → tiny bias, below threshold
         assert "Other" not in adjustments
 
     def test_minimum_sample_size(self, analyzer, tmp_db):
-        """Categories with fewer than 5 predictions should be excluded."""
+        """Categories with fewer than 15 predictions should be excluded."""
         _seed_resolved(tmp_db, [
-            (f"MKT-{i}", "Rare", 0.90, 0) for i in range(1, 5)
+            (f"MKT-{i}", "Rare", 0.90, 0) for i in range(1, 15)  # 14 records — just below threshold
         ])
 
         adjustments = analyzer.get_category_adjustments()

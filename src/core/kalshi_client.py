@@ -66,18 +66,54 @@ class KalshiClient:
             key_stat = os.stat(self.private_key_path)
             mode = key_stat.st_mode & 0o777
             if mode & (stat.S_IRWXG | stat.S_IRWXO):
-                logger.warning(
-                    f"Private key file {self.private_key_path} has permissive mode "
-                    f"{oct(mode)} — should be 0o600. Fixing permissions."
+                logger.error(
+                    f"Private key has permissive mode {oct(mode)} — auto-fixed to 0o600. "
+                    f"Review file security."
                 )
                 os.chmod(self.private_key_path, 0o600)
             with open(self.private_key_path, "rb") as f:
                 self._private_key = load_pem_private_key(f.read(), password=None)
+            # Record the mtime at load time for freshness checking (M-6)
+            self._key_load_mtime: float = os.stat(self.private_key_path).st_mtime
             logger.info("Loaded RSA private key for Kalshi auth")
             return self._private_key
         except Exception as e:
             logger.error(f"Failed to load private key: {e}", exc_info=True)
             return None
+
+    def check_key_freshness(self) -> bool:
+        """Check if the private key file has been modified since it was loaded.
+
+        Compares the file's current mtime against the mtime recorded at load time.
+        If the file has changed (e.g., cert rotation), clears the cached key so
+        the next signing operation will reload it automatically.
+
+        Call this periodically (e.g., every hour) to support key rotation without
+        requiring a restart. The main scan loop or a scheduled task should invoke
+        this method to ensure the bot picks up rotated credentials promptly.
+
+        Returns:
+            True if the key is still fresh (unchanged), False if it was stale and
+            has been cleared for reload.
+        """
+        if not self.private_key_path or not self._private_key:
+            return True  # No key loaded — nothing to check
+        import os
+        try:
+            current_mtime = os.stat(self.private_key_path).st_mtime
+            load_mtime = getattr(self, '_key_load_mtime', 0.0)
+            if current_mtime != load_mtime:
+                logger.info(
+                    f"Private key file changed (mtime {load_mtime} → {current_mtime}) "
+                    f"— clearing cached key for reload on next request"
+                )
+                self._private_key = None
+                self._key_load_attempted = False
+                return False
+            return True
+        except OSError as e:
+            logger.warning(f"Could not check key freshness for {self.private_key_path}: {e}")
+            return True
 
     def _full_path(self, path: str) -> str:
         """Get the full URL path for signing (e.g. /trade-api/v2/portfolio/balance).
@@ -171,8 +207,24 @@ class KalshiClient:
 
                     if resp.status_code == 429:
                         if attempt < max_retries - 1:
-                            wait = min(10, 2 ** (attempt + 1)) + random.uniform(0, 2 ** attempt)
-                            logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
+                            retry_after = resp.headers.get("Retry-After")
+                            if retry_after:
+                                try:
+                                    wait = float(retry_after)
+                                    logger.warning(
+                                        f"Rate limited on {path}, using Retry-After={wait:.1f}s "
+                                        f"(attempt {attempt + 1}/{max_retries})"
+                                    )
+                                except ValueError:
+                                    wait = min(10, 2 ** (attempt + 1) + random.uniform(0, 1))
+                                    logger.warning(
+                                        f"Rate limited on {path}, invalid Retry-After header "
+                                        f"'{retry_after}', using backoff {wait:.1f}s "
+                                        f"(attempt {attempt + 1}/{max_retries})"
+                                    )
+                            else:
+                                wait = min(10, 2 ** (attempt + 1) + random.uniform(0, 1))
+                                logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
                             await asyncio.sleep(wait)
                             continue
                         logger.error(f"Rate limited on {path} after {max_retries} attempts")
@@ -252,9 +304,20 @@ class KalshiClient:
         """Fetch a single market by ticker."""
         try:
             data = await self._request("GET", f"/markets/{ticker}")
+            market_data: Optional[dict] = None
             if data and "market" in data:
-                return data["market"]
-            return data
+                market_data = data["market"]
+            else:
+                market_data = data
+            # Validate that essential fields are present in the response
+            if market_data:
+                missing = [f for f in ("ticker", "status") if f not in market_data]
+                if missing:
+                    logger.warning(
+                        f"get_market({ticker}): response missing expected fields {missing} "
+                        f"— API schema may have changed"
+                    )
+            return market_data
         except Exception as e:
             logger.error(f"Failed to get market {ticker}: {e}", exc_info=True)
             return None

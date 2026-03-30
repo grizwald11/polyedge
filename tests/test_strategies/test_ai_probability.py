@@ -323,22 +323,42 @@ class TestStalenessDetection:
 
     @pytest.mark.asyncio
     async def test_reassesses_after_large_price_move(self, strategy, sample_market, tmp_db):
-        """Should re-assess when market price has moved >10% since last prediction."""
+        """Should re-assess when market price has moved >10% relative since last prediction."""
         strategy.db = tmp_db
         strategy.forecaster.assess_market = AsyncMock(
             return_value=_make_forecast(0.55)
         )
         # Store prediction at a very different price
+        # Relative move: |0.34 - 0.20| / 0.20 = 70% — well above 10% threshold
         tmp_db.store_prediction(
             market_ticker=sample_market.ticker,
             predicted_probability=0.40,
             predicted_side="BUY_YES",
-            market_price=0.20,  # 14% away from current 0.34
+            market_price=0.20,  # 70% relative move from current 0.34
         )
 
         signals = await strategy.scan_for_opportunities([sample_market])
 
-        assert len(signals) == 1  # Re-assessed due to price move
+        assert len(signals) == 1  # Re-assessed due to large relative price move
+
+    @pytest.mark.asyncio
+    async def test_skips_small_relative_price_move(self, strategy, sample_market, tmp_db):
+        """Should skip re-assessment when relative price move is small (<10%)."""
+        strategy.db = tmp_db
+        strategy.forecaster.assess_market = AsyncMock(
+            return_value=_make_forecast(0.55)
+        )
+        # Relative move: |0.34 - 0.33| / 0.33 = ~3% — below 10% threshold
+        tmp_db.store_prediction(
+            market_ticker=sample_market.ticker,
+            predicted_probability=0.40,
+            predicted_side="BUY_YES",
+            market_price=0.33,  # ~3% relative move from current 0.34
+        )
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        assert len(signals) == 0  # Skipped: relative move too small
 
     @pytest.mark.asyncio
     async def test_reassesses_without_db(self, strategy, sample_market):

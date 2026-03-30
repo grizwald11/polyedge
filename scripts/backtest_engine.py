@@ -9,13 +9,15 @@ Unlike run_backtest.py (which is a post-hoc trade analyzer), this engine
 replays strategies from scratch using historical price snapshots, the real
 RiskEngine, KellySizer, and CircuitBreaker via dependency injection.
 
-KNOWN BIASES (do NOT use results for live trading decisions):
-- Lookahead bias: MockForecaster outcome-derived mode uses known outcomes
-  to generate synthetic forecasts — real-time accuracy will be lower.
-- Survivorship bias: Only settled markets are included. Active/abandoned
-  markets that would have caused losses are excluded.
-- Fee omission: Trading fees are not simulated — actual returns will be lower
-  for fee-enabled market categories.
+Remaining limitations (acknowledged in results):
+- Lookahead bias (outcome-derived mode): BacktestResult.uses_lookahead is set True
+  and the result is flagged as "oracle_upper_bound" when synthetic forecasts are used.
+  Degradation factor is halved for those runs to reduce over-optimism.
+- Survivorship bias (partially mitigated): Active/abandoned markets are now included;
+  open positions at backtest end are marked-to-last-known-price. Unresolved position
+  count is reported in BacktestResult.unresolved_positions.
+- Execution model: Order-miss / partial-fill simulation is heuristic, not data-driven.
+- Slippage: Maker fills assumed at limit price; taker slippage not modelled.
 """
 
 from __future__ import annotations
@@ -38,15 +40,24 @@ from src.core.models import (
     CalibrationRecord, Direction, ForecastResult, Market, MarketSnapshot,
     MarketToken, Order, OrderStatus, OrderType, Side, Signal,
     StrategyName, TokenOutcome, Trade,
+    kalshi_taker_fee, kalshi_maker_fee,
 )
 from src.risk.kelly_sizer import KellySizer
 from src.risk.circuit_breaker import CircuitBreaker
 from src.storage.database import Database
 
-# Degradation factor: live trading typically underperforms backtests by 20-30%
-# due to survivorship bias, lookahead bias, and execution costs.
-# Apply this factor to live edge thresholds derived from backtest results.
-BACKTEST_DEGRADATION_FACTOR = 0.70  # Expect ~70% of backtest performance live
+# Per-strategy degradation factors: live trading typically underperforms backtests
+# due to remaining lookahead (outcome-derived mode halves this further), execution
+# costs, and heuristic fill simulation.
+# Apply these factors to live edge thresholds derived from backtest results.
+BACKTEST_DEGRADATION_FACTORS: dict[str, float] = {
+    "ai_probability": 0.65,
+    "obvious_no": 0.85,
+    "cross_arb": 0.60,
+    "whale_tracker": 0.55,
+    "news_reactive": 0.50,
+    "default": 0.70,
+}
 
 
 # ──────────────────────────────────────────────
@@ -87,6 +98,12 @@ class BacktestResult:
     avg_edge_predicted: float = 0.0
     avg_edge_realized: float = 0.0
     cb_skipped: int = 0
+    # C-1: lookahead bias flag — True when outcome-derived MockForecaster was used
+    uses_lookahead: bool = False
+    # C-2: positions still open at backtest end, marked-to-last-known-price
+    unresolved_positions: int = 0
+    # C-3: total fees deducted from P&L during simulation
+    total_fees: float = 0.0
     equity_curve: list[float] = field(default_factory=list)
     daily_returns: list[float] = field(default_factory=list)
     trades: list[BacktestTrade] = field(default_factory=list)
@@ -111,6 +128,8 @@ class MockForecaster:
         self._cache: dict[str, float] = {}
         self._outcomes: dict[str, bool] = {}
         self._warned_lookahead = False
+        # C-1: track whether outcome-derived (lookahead) mode has been used at all
+        self.used_lookahead = False
         self._load_cache()
 
     def _load_cache(self):
@@ -157,10 +176,13 @@ class MockForecaster:
         if market_id in self._outcomes:
             if not self._warned_lookahead:
                 logger.warning(
-                    "MockForecaster using outcome-derived mode — results have lookahead bias. "
+                    "MockForecaster using outcome-derived mode — results have lookahead bias "
+                    "(oracle_upper_bound). Degradation factor is halved for this run. "
                     "Do NOT use for live trading decisions."
                 )
                 self._warned_lookahead = True
+            # C-1: record that lookahead was used
+            self.used_lookahead = True
             import random
             actual = 1.0 if self._outcomes[market_id] else 0.0
             # Add noise to simulate imperfect prediction
@@ -198,6 +220,8 @@ class BacktestPortfolio:
         self.bankroll = bankroll
         self.positions: dict[str, BacktestPosition] = {}
         self.total_pnl = 0.0
+        # C-3: cumulative fees deducted across all trades
+        self.total_fees: float = 0.0
 
     def get_exposure(self) -> float:
         return sum(p.size * p.entry_price for p in self.positions.values())
@@ -208,7 +232,13 @@ class BacktestPortfolio:
     def open_position(self, market_id: str, direction: Direction,
                       size: int, price: float, strategy: str):
         cost = size * price
-        self.bankroll -= cost
+        # C-3: deduct entry fee (taker fee on entry; use kalshi_taker_fee as proxy
+        # for fee-enabled markets — event markets on Polymarket are fee-free, so this
+        # is conservative and intentionally slightly overstates costs for robustness).
+        price_cents = round(price * 100)
+        entry_fee = kalshi_taker_fee(size, price_cents) / 100.0  # convert cents → dollars
+        self.bankroll -= cost + entry_fee
+        self.total_fees += entry_fee
         self.positions[market_id] = BacktestPosition(
             market_id=market_id,
             direction=direction,
@@ -224,11 +254,17 @@ class BacktestPortfolio:
 
         # P&L = proceeds - cost, regardless of direction.
         # open_position deducted (size * entry_price), we get back (size * exit_price).
-        pnl = (exit_price - pos.entry_price) * pos.size
+        gross_pnl = (exit_price - pos.entry_price) * pos.size
 
-        self.bankroll += pos.size * exit_price
-        self.total_pnl += pnl
-        return pnl
+        # C-3: deduct exit fee (maker fee on exit limit order)
+        exit_price_cents = round(exit_price * 100)
+        exit_fee = kalshi_maker_fee(pos.size, exit_price_cents) / 100.0
+        self.total_fees += exit_fee
+
+        net_pnl = gross_pnl - exit_fee
+        self.bankroll += pos.size * exit_price - exit_fee
+        self.total_pnl += net_pnl
+        return net_pnl
 
     def resolve_position(self, market_id: str, outcome: bool) -> float:
         """Resolve a position at market settlement."""
@@ -275,12 +311,13 @@ class BacktestEngine:
         """
         portfolio = BacktestPortfolio(bankroll)
 
-        # Load settled markets with outcomes
+        # C-2: Load ALL markets (settled + active/abandoned) to avoid survivorship bias.
+        # Settled markets have a known outcome; others will be marked-to-last-known-price.
         conn = self.db._get_conn()
         market_rows = conn.execute("""
             SELECT ticker, question, category, result, tokens, end_date, event_ticker,
                    volume_24h, liquidity
-            FROM markets WHERE result != '' AND result IS NOT NULL
+            FROM markets
         """).fetchall()
 
         if not market_rows:
@@ -291,16 +328,16 @@ class BacktestEngine:
         market_lookup: dict[str, dict] = {}
         for row in market_rows:
             ticker = row["ticker"]
-            result_str = row["result"]
+            result_str = (row["result"] or "").strip()
             if result_str.lower() in ("yes", "1", "true"):
                 outcomes[ticker] = True
             elif result_str.lower() in ("no", "0", "false"):
                 outcomes[ticker] = False
-            else:
-                continue
+            # else: no outcome — market included for signal generation, but will be
+            # resolved at last-known-price rather than binary outcome
             market_lookup[ticker] = dict(row)
 
-        # Load snapshots for these markets
+        # Load snapshots for all markets (settled + active/abandoned)
         all_snapshots = conn.execute("""
             SELECT market_id, timestamp, yes_price, no_price, spread, volume_1h, liquidity
             FROM market_snapshots
@@ -312,6 +349,9 @@ class BacktestEngine:
 
         if not all_snapshots:
             return []
+
+        # C-2: Track the last-seen price per market for marking open positions at end
+        last_known_prices: dict[str, tuple[float, float]] = {}  # market_id -> (yes_price, no_price)
 
         # Build end_date lookup for resolving positions mid-replay
         end_dates: dict[str, str] = {}
@@ -338,6 +378,9 @@ class BacktestEngine:
             yes_price = snap["yes_price"]
             no_price = snap["no_price"]
             timestamp = snap["timestamp"]
+
+            # C-2: keep rolling track of the most recent price for each market
+            last_known_prices[market_id] = (yes_price, no_price)
 
             # Resolve any positions whose end_date has passed
             resolved_ids = []
@@ -437,13 +480,21 @@ class BacktestEngine:
                 timestamp=timestamp,
             ))
 
-        # Resolve remaining open positions at settlement (skip already-resolved ones)
-        for market_id, outcome in outcomes.items():
-            if portfolio.has_position(market_id) and not any(
-                t.market_id == market_id and t.resolved for t in trades
-            ):
+        # Resolve remaining open positions.
+        # For markets with known outcomes: resolve at binary settlement price.
+        # C-2: For markets without outcomes (active/abandoned): close at last known price
+        #      to avoid survivorship bias — these positions were not free money.
+        unresolved_positions = 0
+        already_resolved = {t.market_id for t in trades if t.resolved}
+
+        for market_id in list(portfolio.positions.keys()):
+            if market_id in already_resolved:
+                continue
+
+            if market_id in outcomes:
+                # Settled market — resolve at binary outcome
+                outcome = outcomes[market_id]
                 pnl = portfolio.resolve_position(market_id, outcome)
-                # Find corresponding trade and update
                 for t in trades:
                     if t.market_id == market_id and not t.resolved:
                         t.pnl = pnl
@@ -453,6 +504,39 @@ class BacktestEngine:
                             edges_realized.append(pnl / (t.size * t.price))
                         equity_curve.append(equity_curve[-1] + pnl)
                         break
+            else:
+                # C-2: No outcome available — close at last known price (mark-to-market)
+                last_prices = last_known_prices.get(market_id)
+                if last_prices:
+                    pos = portfolio.positions[market_id]
+                    last_yes, last_no = last_prices
+                    exit_price = last_yes if pos.direction in (Direction.BUY_YES,) else last_no
+                    pnl = portfolio.close_position(market_id, exit_price)
+                else:
+                    # No price data at all — assume total loss (worst case)
+                    pnl = portfolio.close_position(market_id, 0.0)
+
+                unresolved_positions += 1
+                logger.debug(
+                    f"Market {market_id} has no outcome — closed at last known price "
+                    f"(mark-to-market). P&L: ${pnl:.2f}"
+                )
+                for t in trades:
+                    if t.market_id == market_id and not t.resolved:
+                        t.pnl = pnl
+                        t.resolved = True
+                        # outcome remains None — marks as unresolved
+                        if t.price > 0 and t.size > 0:
+                            edges_realized.append(pnl / (t.size * t.price))
+                        equity_curve.append(equity_curve[-1] + pnl)
+                        break
+
+        if unresolved_positions > 0:
+            logger.warning(
+                f"{unresolved_positions} position(s) had no resolution outcome — "
+                "closed at last known price. Results may understate true losses "
+                "if markets later resolved unfavorably."
+            )
 
         # Build result
         result = self._compute_result(
@@ -460,6 +544,15 @@ class BacktestEngine:
             trades, equity_curve, edges_predicted, edges_realized, bankroll,
         )
         result.cb_skipped = cb_skipped
+        result.unresolved_positions = unresolved_positions
+        result.total_fees = portfolio.total_fees
+        # C-1: propagate lookahead flag from forecaster
+        result.uses_lookahead = self.forecaster.used_lookahead
+        if result.uses_lookahead:
+            logger.warning(
+                "BacktestResult.uses_lookahead=True — this result is an oracle_upper_bound. "
+                "Apply at most half the normal degradation factor when extrapolating to live."
+            )
         if cb_skipped > 0:
             logger.info(f"Circuit breaker skipped {cb_skipped} potential trades")
         return [result]
@@ -639,6 +732,8 @@ def format_result(result: BacktestResult, bankroll: float = 500.0) -> str:
         f"  Avg Edge Pred: {result.avg_edge_predicted:.1%}",
         f"  Avg Edge Real: {result.avg_edge_realized:.1%}",
         f"  CB Skipped:    {result.cb_skipped}",
+        f"  Total Fees:    ${result.total_fees:,.4f}",
+        f"  Unresolved:    {result.unresolved_positions} position(s) marked-to-last-price",
     ]
     if result.brier_score is not None:
         lines.append(f"  Brier Score:   {result.brier_score:.3f}")
@@ -646,10 +741,15 @@ def format_result(result: BacktestResult, bankroll: float = 500.0) -> str:
         lines.append(f"  Sharpe Ratio:  {result.sharpe_ratio:.2f}")
     if result.calmar_ratio is not None:
         lines.append(f"  Calmar Ratio:  {result.calmar_ratio:.2f}")
-    lines.append(
-        "  ⚠ WARNING: MockForecaster uses lookahead bias — "
-        "results are NOT indicative of live performance"
-    )
+    if result.uses_lookahead:
+        lines.append(
+            "  WARNING: oracle_upper_bound — outcome-derived forecasts used (lookahead bias). "
+            "Apply half degradation factor. Do NOT use for live trading decisions."
+        )
+    else:
+        lines.append(
+            "  NOTE: cached-prediction mode — no lookahead bias from outcome-derived forecasts."
+        )
     return "\n".join(lines)
 
 

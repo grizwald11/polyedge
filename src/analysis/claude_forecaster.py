@@ -42,7 +42,8 @@ class ClaudeForecaster:
         self._total_cost_today: float = 0.0  # Estimated USD cost
         self._today_date: str = ""
         # Per-million-token pricing (input/output) by model family.
-        # These are defaults; update when Anthropic changes pricing.
+        # Defaults as of March 2026 — verify at https://www.anthropic.com/pricing
+        # and override via settings.claude.model_pricing if prices change.
         self._cost_per_million: dict[str, tuple[float, float]] = {
             "claude-sonnet-4-6": (3.0, 15.0),
             "claude-opus-4-6": (15.0, 60.0),
@@ -53,6 +54,9 @@ class ClaudeForecaster:
         # Forecast cache: avoids duplicate Claude calls for same market in a cycle
         from src.data.cache import TTLCache
         self._forecast_cache = TTLCache(ttl_seconds=self._CACHE_TTL_SECONDS)
+        # Circuit breaker: disable API calls after repeated consecutive failures
+        self._consecutive_failures: int = 0
+        self._circuit_open_until: float = 0.0  # monotonic time; 0 = circuit closed
 
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
@@ -84,9 +88,11 @@ class ClaudeForecaster:
 
     def _select_temperature(self, category: MarketCategory) -> float:
         """Select temperature based on market category, falling back to default."""
-        return self.settings.claude.category_temperatures.get(
-            category.value, self.settings.claude.temperature
-        )
+        temp = self.settings.claude.category_temperatures.get(category.value)
+        if temp is None:
+            logger.debug(f"Using default temperature for unmapped category {category.value}")
+            return self.settings.claude.temperature
+        return temp
 
     def _estimate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
         """Estimate USD cost for a Claude API call."""
@@ -131,6 +137,22 @@ class ClaudeForecaster:
             return True
         return False
 
+    def _record_api_failure(self):
+        """Track consecutive API failures for the circuit breaker.
+
+        After 3 consecutive failures, opens the circuit for 5 minutes to prevent
+        hammering a failing API and burning budget on retry storms.
+        """
+        import time as _time
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= 3:
+            open_duration = 300.0  # 5 minutes
+            self._circuit_open_until = _time.monotonic() + open_duration
+            logger.error(
+                f"Claude API circuit breaker OPENED after {self._consecutive_failures} "
+                f"consecutive failures — disabling calls for {open_duration:.0f}s"
+            )
+
     @staticmethod
     def _extract_text(response) -> str | None:
         """Safely extract text from Claude API response. Returns None if empty."""
@@ -170,7 +192,43 @@ class ClaudeForecaster:
         Returns:
             ForecastResult with probability estimate and reasoning
         """
-        # Hard budget check — refuse API calls if daily hard limit exceeded
+        # Circuit breaker check — disable calls after 3 consecutive failures
+        import time as _time
+        now_mono = _time.monotonic()
+        if self._circuit_open_until > now_mono:
+            remaining = self._circuit_open_until - now_mono
+            logger.warning(
+                f"Claude API circuit breaker open — skipping call for "
+                f"'{market.question[:50]}...' ({remaining:.0f}s remaining)"
+            )
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0.0, market.yes_price - 0.20),
+                confidence_high=min(1.0, market.yes_price + 0.20),
+                reasoning="Circuit breaker open — too many consecutive API failures",
+                model_used="none (circuit open)",
+                parse_failed=True,
+            )
+
+        # Hard budget check — refuse API calls if daily hard limit exceeded.
+        # Pre-call estimation: a typical assess_market call uses ~1500-3000 tokens.
+        # If adding the estimated usage would exceed the hard limit, skip the call.
+        ESTIMATED_CALL_TOKENS = 3000
+        hard_limit = self.settings.claude.daily_token_budget * 2
+        if self._total_tokens_today + ESTIMATED_CALL_TOKENS > hard_limit:
+            logger.critical(
+                f"Claude API pre-call budget check: would exceed hard limit "
+                f"({self._total_tokens_today:,} + {ESTIMATED_CALL_TOKENS:,} > {hard_limit:,}) "
+                f"— refusing API call"
+            )
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0.0, market.yes_price - 0.20),
+                confidence_high=min(1.0, market.yes_price + 0.20),
+                reasoning="Budget exceeded — returning market price as estimate",
+                model_used="none (budget exceeded)",
+                parse_failed=True,
+            )
         if self.is_budget_exceeded():
             return ForecastResult(
                 probability=market.yes_price,
@@ -289,11 +347,14 @@ class ClaudeForecaster:
             if not forecast.parse_failed:
                 forecast._cached_market_price = market.yes_price  # type: ignore[attr-defined]
                 self._forecast_cache.set(cache_key, forecast)
+            # Successful call — reset circuit breaker failure counter
+            self._consecutive_failures = 0
             return forecast
 
         except asyncio.TimeoutError:
             timeout = self.settings.claude.api_timeout_seconds
             logger.warning(f"Claude API call timed out after {timeout}s")
+            self._record_api_failure()
             return ForecastResult(
                 probability=market.yes_price,
                 confidence_low=max(0, market.yes_price - 0.25),
@@ -356,6 +417,8 @@ class ClaudeForecaster:
                     break
 
             logger.warning("Claude API rate limit retries exhausted, returning market price as fallback")
+            # Rate limit exhausted counts as a failure for circuit breaker purposes
+            self._record_api_failure()
             return ForecastResult(
                 probability=market.yes_price,
                 confidence_low=max(0, market.yes_price - 0.25),
@@ -367,6 +430,7 @@ class ClaudeForecaster:
             )
         except Exception as e:
             logger.exception(f"Claude assessment failed: {e}")
+            self._record_api_failure()
             return ForecastResult(
                 probability=market.yes_price,
                 confidence_low=max(0, market.yes_price - 0.25),
@@ -456,6 +520,17 @@ class ClaudeForecaster:
         if self.is_budget_exceeded():
             return None
 
+        # Circuit breaker check for cross_check_assess
+        import time as _time
+        now_mono = _time.monotonic()
+        if self._circuit_open_until > now_mono:
+            remaining = self._circuit_open_until - now_mono
+            logger.warning(
+                f"Claude API circuit breaker open — skipping cross-check for "
+                f"'{market.question[:50]}...' ({remaining:.0f}s remaining)"
+            )
+            return None
+
         model = self._select_model(position_value)
         category = classify_market(market)
         temp_low = self.settings.claude.cross_check_temp_low
@@ -542,6 +617,15 @@ class ClaudeForecaster:
             # Widen CI proportional to disagreement
             ci_low = max(0.01, avg_prob - disagreement)
             ci_high = min(0.99, avg_prob + disagreement)
+            # Validate CI bounds after widening
+            if ci_low >= ci_high:
+                # Fall back to a reasonable interval centered on avg_prob
+                ci_low = max(0.01, avg_prob - 0.10)
+                ci_high = min(0.99, avg_prob + 0.10)
+                logger.warning(
+                    f"CI bounds inverted after widening for {market.ticker} — "
+                    f"falling back to ±10% around {avg_prob:.2f}"
+                )
         else:
             logger.info(
                 f"Cross-check AGREE on '{market.question[:50]}...' "

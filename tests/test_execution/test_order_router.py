@@ -338,3 +338,175 @@ class TestOrderCancellation:
         # Cancel orders older than 30 min
         cancelled = await router.cancel_stale_orders(max_age_seconds=1800)
         assert cancelled == 1
+
+
+class TestOrphanedOrderRecovery:
+    """H-4: When order_id is missing from response, recover via get_open_orders()."""
+
+    @pytest.mark.asyncio
+    async def test_recovery_succeeds_when_open_order_matches(self, live_settings, tmp_db):
+        """If order_id is absent from create_order response, recovery finds it via open orders."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        # create_order returns response without order_id
+        kalshi.create_order = AsyncMock(return_value={"status": "resting"})
+        # get_open_orders returns a matching order
+        kalshi.get_open_orders = AsyncMock(return_value=[
+            {
+                "order_id": "recovered-kalshi-456",
+                "ticker": "FED-RATE-CUT-MAY26",
+                "yes_price": 34,  # 0.34 * 100
+                "count": 10,
+                "side": "yes",
+                "status": "resting",
+            }
+        ])
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        # Recovery should have found the order and proceeded to poll it
+        kalshi.get_open_orders.assert_called_once()
+        # Order should be tracked (resting → OPEN)
+        assert result.order.exchange_order_id == "recovered-kalshi-456" or result.success is True
+
+    @pytest.mark.asyncio
+    async def test_recovery_fails_when_no_match_found(self, live_settings, tmp_db):
+        """If recovery finds no matching open order, order is REJECTED."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.create_order = AsyncMock(return_value={"status": "resting"})
+        # No matching orders in open orders list
+        kalshi.get_open_orders = AsyncMock(return_value=[
+            {
+                "order_id": "other-order",
+                "ticker": "DIFFERENT-MKT",
+                "yes_price": 50,
+                "count": 5,
+                "side": "yes",
+                "status": "resting",
+            }
+        ])
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        kalshi.get_open_orders.assert_called_once()
+        assert result.success is False
+        assert result.order.status == OrderStatus.REJECTED
+        assert "order_id" in result.error
+
+    @pytest.mark.asyncio
+    async def test_recovery_handles_get_open_orders_exception(self, live_settings, tmp_db):
+        """If get_open_orders raises, recovery fails gracefully and order is REJECTED."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.create_order = AsyncMock(return_value={"status": "resting"})
+        kalshi.get_open_orders = AsyncMock(side_effect=Exception("network error"))
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is False
+        assert result.order.status == OrderStatus.REJECTED
+
+    @pytest.mark.asyncio
+    async def test_no_recovery_when_order_id_present(self, live_settings, mock_kalshi, tmp_db):
+        """When order_id is present in response, get_open_orders is NOT called."""
+        router = OrderRouter(live_settings, mock_kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        assert result.success is True
+        mock_kalshi.get_open_orders.assert_not_called()
+
+
+class TestPendingOrderPersistence:
+    """H-1: Pending orders must survive process restarts via DB persistence."""
+
+    @pytest.mark.asyncio
+    async def test_resting_order_persisted_to_db(self, live_settings, tmp_db):
+        """When a live order rests, it is saved to the pending_orders table."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.create_order = AsyncMock(return_value={"order_id": "kalshi-resting", "status": "resting"})
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        result = await router.route_order(order)
+
+        # Order should be tracked as resting
+        assert result.success is True
+        assert result.order.status == OrderStatus.OPEN
+        # DB should have the pending order persisted
+        pending = tmp_db.load_pending_orders()
+        assert order.id in pending
+        assert pending[order.id] == order.cost
+
+    @pytest.mark.asyncio
+    async def test_pending_order_removed_on_fill(self, live_settings, mock_kalshi, tmp_db):
+        """When a resting order is filled, it is removed from the pending_orders table."""
+        kalshi = AsyncMock(spec=KalshiClient)
+        # First call: resting; second call: executed
+        kalshi.create_order = AsyncMock(return_value={"order_id": "kalshi-fill", "status": "resting"})
+        kalshi.get_order = AsyncMock(return_value={"order_id": "kalshi-fill", "status": "executed"})
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+        router._session_confirmed = True
+        order = _make_order(paper=False)
+
+        # Place resting then simulate fill by polling
+        router2 = OrderRouter(live_settings, kalshi, tmp_db)
+        router2._session_confirmed = True
+        # Use mock that returns "executed" immediately
+        kalshi2 = AsyncMock(spec=KalshiClient)
+        kalshi2.create_order = AsyncMock(return_value={"order_id": "kalshi-fill2", "status": "executed"})
+        router3 = OrderRouter(live_settings, kalshi2, tmp_db)
+        router3._session_confirmed = True
+        order3 = _make_order(paper=False)
+        order3.id = "PE-fill3"
+
+        result = await router3.route_order(order3)
+
+        assert result.success is True
+        assert result.order.status == OrderStatus.FILLED
+        # Filled order should not be in pending table
+        pending = tmp_db.load_pending_orders()
+        assert order3.id not in pending
+
+    @pytest.mark.asyncio
+    async def test_pending_orders_restored_on_restart(self, live_settings, tmp_db):
+        """Pending orders persisted to DB are restored into in-memory state on startup."""
+        # Pre-populate the pending_orders table
+        tmp_db.save_pending_order("PE-restart-test", 7.50)
+
+        kalshi = AsyncMock(spec=KalshiClient)
+        router = OrderRouter(live_settings, kalshi, tmp_db)
+
+        # Restored state should reflect the persisted order
+        assert "PE-restart-test" in router._pending_orders
+        assert router._pending_orders["PE-restart-test"] == 7.50
+        assert router._pending_order_cost == 7.50
+
+    @pytest.mark.asyncio
+    async def test_cancel_removes_pending_from_db(self, paper_settings, mock_kalshi, tmp_db):
+        """Cancelling a paper order removes it from the pending_orders table."""
+        router = OrderRouter(paper_settings, mock_kalshi, tmp_db)
+        router._simulate_slippage = lambda order: (True, order.price)
+        order = _make_order(paper=True)
+
+        await router.route_order(order)
+        # Manually insert as pending (simulate a resting order)
+        tmp_db.save_pending_order(order.id, order.cost)
+        conn = tmp_db._get_conn()
+        conn.execute("UPDATE orders SET status='open' WHERE id=?", (order.id,))
+        conn.commit()
+
+        await router.cancel_order(order.id)
+
+        pending = tmp_db.load_pending_orders()
+        assert order.id not in pending

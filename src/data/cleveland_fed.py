@@ -25,8 +25,9 @@ CLEVELAND_FED_URL = "https://www.clevelandfed.org/indicators-and-data/inflation-
 class ClevelandFedNowcast:
     """Fetches inflation nowcast data from the Cleveland Fed."""
 
-    def __init__(self, ttl_seconds: int = 3600):
+    def __init__(self, ttl_seconds: int = 3600, base_url: str | None = None):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
+        self._base_url = base_url or CLEVELAND_FED_URL
 
     async def get_nowcast(self) -> Optional[dict]:
         """Fetch the latest inflation nowcast.
@@ -41,7 +42,7 @@ class ClevelandFedNowcast:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(
-                    CLEVELAND_FED_URL,
+                    self._base_url,
                     headers={
                         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) PolyEdge/1.0"
                     },

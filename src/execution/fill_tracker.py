@@ -85,10 +85,23 @@ class FillTracker:
                 logger.error(f"Fill check failed for {order_id}: {e}", exc_info=True)
                 return (order_id, order, None)
 
-        poll_results = await asyncio.gather(
-            *[_poll_one(oid, o) for oid, o in order_snapshot],
-            return_exceptions=True,
-        )
+        # Wrap all concurrent polls with a cumulative timeout (5 minutes max).
+        # Without this, a hung API connection could block the fill-check loop
+        # indefinitely, causing missed fills for all other tracked orders.
+        try:
+            poll_results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[_poll_one(oid, o) for oid, o in order_snapshot],
+                    return_exceptions=True,
+                ),
+                timeout=300,  # 5-minute cumulative timeout for all polls
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Fill check cumulative timeout (300s) exceeded for "
+                f"{len(order_snapshot)} orders — returning any fills found so far"
+            )
+            return []
 
         fills: list[Trade] = []
         resolved: list[str] = []
@@ -219,6 +232,7 @@ class FillTracker:
             fee=fee_dollars,
             realized_pnl=0.0,
             strategy=order.strategy,
+            signal_id=order.signal_id,  # Propagate signal linkage from order to trade
             paper=False,
             timestamp=now,
         )
@@ -229,6 +243,7 @@ class FillTracker:
         remaining = kalshi_data.get("remaining_count", 0)
         order.status = OrderStatus.PARTIAL if remaining > 0 else OrderStatus.FILLED
 
+        # Atomic ordering: DB write before memory update ensures crash recovery correctness.
         # Write to DB FIRST, then update in-memory tracker. If we crash
         # after DB write but before memory update, restart will re-read
         # from DB via _load_partial_recorded_counts() and be correct.
@@ -294,6 +309,7 @@ class FillTracker:
             fee=fee_dollars,
             realized_pnl=0.0,
             strategy=order.strategy,
+            signal_id=order.signal_id,  # Propagate signal linkage from order to trade
             paper=False,
             timestamp=now,
         )

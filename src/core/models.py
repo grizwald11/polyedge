@@ -338,7 +338,7 @@ class Position(BaseModel):
 
     @property
     def cost_basis(self) -> float:
-        return round(self.size * self.avg_entry_price + self.buy_fees, 4)
+        return round(self.size * self.avg_entry_price + self.total_fees, 4)
 
 
 class Trade(BaseModel):
@@ -354,6 +354,7 @@ class Trade(BaseModel):
     fee: float = 0.0
     realized_pnl: float = 0.0
     strategy: StrategyName = StrategyName.AI_PROBABILITY
+    signal_id: Optional[str] = None  # Links trade back to the originating Signal
     paper: bool = True
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

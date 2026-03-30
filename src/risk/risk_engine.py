@@ -45,8 +45,15 @@ class RiskEngine:
         # Load persisted cooldowns if DB available, otherwise start empty
         if db is not None:
             self._cooldowns: dict[str, datetime] = db.load_cooldowns(self.cooldown_seconds)
+            logger.debug("Loaded %d active cooldowns from DB", len(self._cooldowns))
             if self._cooldowns:
-                logger.info(f"Loaded {len(self._cooldowns)} active cooldowns from DB")
+                logger.info("Loaded %d active cooldowns from DB", len(self._cooldowns))
+            elif self.positions.get_all_positions():
+                logger.warning(
+                    "DB returned 0 cooldowns but %d open positions exist — "
+                    "cooldowns may have been lost (DB reset or first run after migration)",
+                    len(self.positions.get_all_positions()),
+                )
         else:
             self._cooldowns = {}
 
@@ -121,6 +128,14 @@ class RiskEngine:
                 "Correlated exposure check (event-based): %s = $%.2f",
                 signal.market_id, correlated_exposure,
             )
+            # Warn if correlated_exposure == proposed_cost — this means only our own
+            # proposed position was counted, which happens when the market has no
+            # event_ticker and PortfolioRisk fell back to the market's own exposure.
+            # In that case correlated relationships to other markets may be missed.
+            if correlated_exposure == proposed_cost and not self.portfolio_risk._get_event_ticker(signal.market_id):
+                warnings.append(
+                    f"No event_ticker for {signal.market_id} — correlated exposure may be undercounted"
+                )
             if correlated_exposure + proposed_cost > max_correlated:
                 failed.append(
                     f"Correlated exposure exceeded for event group of {signal.market_id}: "
@@ -153,18 +168,27 @@ class RiskEngine:
             warnings.append("Order >5% of book depth — expect slippage")
 
         # 7. Existing position check (including cross-strategy hedge detection)
+        # By default (allow_position_additions=True), same- or opposite-direction
+        # additions are allowed with a warning.  Set allow_position_additions=False
+        # in config to hard-block any addition to an existing position.
         if self.positions.has_position(signal.market_id):
             existing = self.positions.get_position(signal.market_id)
-            if existing and hasattr(existing, 'direction') and existing.direction != signal.direction:
-                warnings.append(
-                    f"Hedge detected: new {signal.direction.value} opposes existing "
-                    f"{existing.direction.value} in {signal.market_id}"
-                )
-            failed.append(f"Already have position in {signal.market_id}")
+            if not self.settings.trading.allow_position_additions:
+                failed.append(f"Already have position in {signal.market_id}")
+            else:
+                if existing and hasattr(existing, 'direction') and existing.direction != signal.direction:
+                    warnings.append(
+                        f"Hedge detected: new {signal.direction.value} opposes existing "
+                        f"{existing.direction.value} in {signal.market_id}"
+                    )
+                else:
+                    warnings.append(
+                        f"Adding to existing {signal.direction.value} position in {signal.market_id}"
+                    )
 
         # 8a. Minimum confidence check — reject signals with very low confidence
         # to prevent trading on noisy or uncertain estimates.
-        min_confidence = 0.40
+        min_confidence = self.settings.trading.min_confidence
         if signal.confidence < min_confidence:
             failed.append(
                 f"Confidence too low: {signal.confidence:.1%} < {min_confidence:.1%} minimum"

@@ -25,8 +25,9 @@ FEDWATCH_URL = "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-too
 class FedWatchClient:
     """Fetches Fed Funds rate probabilities from CME FedWatch."""
 
-    def __init__(self, ttl_seconds: int = 1800):
+    def __init__(self, ttl_seconds: int = 1800, base_url: str | None = None):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
+        self._base_url = base_url or FEDWATCH_URL
 
     async def get_rate_probabilities(self) -> Optional[list[dict]]:
         """Fetch rate probabilities for upcoming FOMC meetings.
@@ -41,7 +42,7 @@ class FedWatchClient:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(
-                    FEDWATCH_URL,
+                    self._base_url,
                     headers={
                         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) PolyEdge/1.0"
                     },
