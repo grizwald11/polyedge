@@ -412,21 +412,30 @@ async def _generate_all_signals(
             logger.error(f"Cross-platform arb strategy failed: {e}", exc_info=True)
             _strategy_failures.append("cross_platform_arb")
 
-    # Alert if ALL strategies raised exceptions (complete system failure)
-    if len(_strategy_failures) >= _strategies_attempted and _strategies_attempted > 0:
-        fail_msg = (
-            f"ALL {_strategies_attempted} strategies failed: {', '.join(_strategy_failures)}. "
-            f"No signals can be generated until at least one strategy recovers."
-        )
-        logger.critical(fail_msg)
-        if metrics is not None:
-            metrics.record_error("all_strategies", fail_msg)
-        try:
-            await alert_manager.send_circuit_breaker_alert(
-                f"ALL STRATEGIES FAILED: {', '.join(_strategy_failures)}"
+    # M-20: Warn if ANY strategies failed (degraded mode), escalate if ALL failed
+    if _strategy_failures and _strategies_attempted > 0:
+        if len(_strategy_failures) >= _strategies_attempted:
+            fail_msg = (
+                f"ALL {_strategies_attempted} strategies failed: {', '.join(_strategy_failures)}. "
+                f"No signals can be generated until at least one strategy recovers."
             )
-        except Exception as e:
-            logger.error(f"Failed to send strategy failure alert: {e}", exc_info=True)
+            logger.critical(fail_msg)
+            if metrics is not None:
+                metrics.record_error("all_strategies", fail_msg)
+            try:
+                await alert_manager.send_circuit_breaker_alert(
+                    f"ALL STRATEGIES FAILED: {', '.join(_strategy_failures)}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send strategy failure alert: {e}", exc_info=True)
+        else:
+            working = _strategies_attempted - len(_strategy_failures)
+            logger.warning(
+                f"DEGRADED MODE: {len(_strategy_failures)}/{_strategies_attempted} strategies "
+                f"failed ({', '.join(_strategy_failures)}). Running with {working} strategy(ies)."
+            )
+            if metrics is not None:
+                metrics.record_error("degraded_strategies", f"Failed: {', '.join(_strategy_failures)}")
 
     return all_signals, ai_signals, no_signals
 
@@ -1050,8 +1059,14 @@ async def main():
             await forecaster.health_check()
             logger.info("Anthropic API: key validated successfully")
         except Exception as e:
-            logger.error(f"Anthropic API key validation failed: {e}", exc_info=True)
-            logger.warning("Claude forecasting may not work — check ANTHROPIC_API_KEY")
+            logger.critical(
+                f"Anthropic API key validation FAILED: {e}. "
+                "WARNING: The bot will have DEGRADED SIGNAL GENERATION. "
+                "AI probability, cross-market arbitrage validation, and news-reactive "
+                "strategies will NOT produce signals until the Anthropic API is reachable. "
+                "Check ANTHROPIC_API_KEY and API status at https://status.anthropic.com",
+                exc_info=True,
+            )
     calibration = CalibrationTracker(db)
     resolution_tracker = ResolutionTracker(kalshi, db)
     calibration_analyzer = CalibrationAnalyzer(db)
@@ -1354,7 +1369,7 @@ async def main():
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                logger.debug(f"WebSocket task cleanup error: {e}")
+                logger.warning(f"WebSocket task cleanup error: {e}")
 
         if dashboard_task is not None:
             dashboard_task.cancel()

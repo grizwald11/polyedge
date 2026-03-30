@@ -19,6 +19,12 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
 
+# Time constants (L-5)
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_DAY = 86400
+
+
 # ──────────────────────────────────────────────
 # Price Conversion Helpers
 # ──────────────────────────────────────────────
@@ -42,15 +48,27 @@ def dollars_to_cents(dollars: float) -> int:
 # ──────────────────────────────────────────────
 
 def kalshi_taker_fee(contracts: int, price_cents: int) -> int:
-    """Calculate Kalshi taker fee in cents. Formula: ceil(0.07 * contracts * price * (1-price))."""
-    p = price_cents / 100.0
-    return math.ceil(0.07 * contracts * p * (1 - p))
+    """Calculate Kalshi taker fee in cents. Formula: ceil(0.07 * contracts * price * (1-price)).
+
+    Uses Decimal arithmetic to avoid floating-point rounding errors on large
+    contract counts (C-1).
+    """
+    from decimal import Decimal, ROUND_CEILING
+    p = Decimal(price_cents) / Decimal(100)
+    fee = (Decimal("0.07") * Decimal(contracts) * p * (1 - p)).to_integral_value(rounding=ROUND_CEILING)
+    return int(fee)
 
 
 def kalshi_maker_fee(contracts: int, price_cents: int) -> int:
-    """Calculate Kalshi maker fee in cents. Formula: ceil(0.0175 * contracts * price * (1-price))."""
-    p = price_cents / 100.0
-    return math.ceil(0.0175 * contracts * p * (1 - p))
+    """Calculate Kalshi maker fee in cents. Formula: ceil(0.0175 * contracts * price * (1-price)).
+
+    Uses Decimal arithmetic to avoid floating-point rounding errors on large
+    contract counts (C-1).
+    """
+    from decimal import Decimal, ROUND_CEILING
+    p = Decimal(price_cents) / Decimal(100)
+    fee = (Decimal("0.0175") * Decimal(contracts) * p * (1 - p)).to_integral_value(rounding=ROUND_CEILING)
+    return int(fee)
 
 
 def polymarket_fee(contracts: int, price: float) -> float:
@@ -125,6 +143,22 @@ class TokenOutcome(str, Enum):
     NO = "No"
 
 
+class MarketStatus(str, Enum):
+    """Canonical market status set (M-3).
+
+    Unifies statuses from REST API ("active", "closed", "settled", "finalized",
+    "determined") and WebSocket lifecycle channel ("open", "closed", "determined").
+    Use this enum as the single source of truth for status comparisons.
+    """
+    OPEN = "open"
+    ACTIVE = "active"
+    CLOSED = "closed"
+    HALTED = "halted"
+    SETTLED = "settled"
+    FINALIZED = "finalized"
+    DETERMINED = "determined"
+
+
 # ──────────────────────────────────────────────
 # Market Models
 # ──────────────────────────────────────────────
@@ -159,6 +193,7 @@ class Market(BaseModel):
     event_ticker: str = ""
     result: str = ""
     status: str = ""
+    price_updated_at: Optional[datetime] = None  # When price data was last fetched
 
     # Convenience properties
     @property

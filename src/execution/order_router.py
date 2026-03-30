@@ -310,6 +310,17 @@ class OrderRouter:
         else:
             yes_price = dollars_to_cents(order.price)
 
+        # C-3: Validate cents are in Kalshi's valid range after conversion.
+        if not (1 <= yes_price <= 99):
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = f"Price converts to {yes_price} cents — outside Kalshi range [1, 99]"
+            self._log_order(order)
+            logger.error(
+                f"Order {order.id} rejected: yes_price={yes_price} cents "
+                f"(from order.price=${order.price:.4f}, side={kalshi_side})"
+            )
+            return OrderResult(success=False, order=order, error=order.rejection_reason)
+
         try:
             # Hard timeout on order creation to prevent hanging indefinitely.
             # If this times out, the order may have been placed on Kalshi —

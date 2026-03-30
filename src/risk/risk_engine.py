@@ -48,6 +48,7 @@ class RiskEngine:
         # Load persisted cooldowns if DB available, otherwise start empty
         if db is not None:
             self._cooldowns: dict[str, datetime] = db.load_cooldowns(self.cooldown_seconds)
+            self._cooldown_durations = db.load_cooldown_durations()
             logger.debug("Loaded %d active cooldowns from DB", len(self._cooldowns))
             if self._cooldowns:
                 logger.info("Loaded %d active cooldowns from DB", len(self._cooldowns))
@@ -232,13 +233,18 @@ class RiskEngine:
         self, market: Market, proposed_cost: float,
         failed: list[str], warnings: list[str],
     ) -> None:
-        """6. Market liquidity check."""
-        if market.liquidity > 0 and proposed_cost > market.liquidity * 0.10:
+        """6. Market liquidity check (H-2: handle zero/unknown liquidity)."""
+        if market.liquidity is None or market.liquidity <= 0:
+            warnings.append(
+                f"Market liquidity unknown or zero (${market.liquidity or 0:.2f}) — "
+                f"cannot validate order size"
+            )
+        elif proposed_cost > market.liquidity * 0.10:
             failed.append(
                 f"Order too large for liquidity: ${proposed_cost:.2f} > "
                 f"10% of ${market.liquidity:.2f} book depth"
             )
-        elif market.liquidity > 0 and proposed_cost > market.liquidity * 0.05:
+        elif proposed_cost > market.liquidity * 0.05:
             warnings.append("Order >5% of book depth — expect slippage")
 
     def _check_existing_position(
@@ -283,9 +289,9 @@ class RiskEngine:
                 f"Invalid or non-positive edge: {signal.edge} — no favorable view"
             )
         elif signal.edge >= signal.probability_estimate:
-            logger.warning(
-                "Impossible edge detected: edge (%.1f%%) >= probability (%.1f%%) "
-                "for %s — possible ensemble bug",
+            logger.critical(
+                "ENSEMBLE BUG: impossible edge (%.1f%%) >= probability (%.1f%%) "
+                "for %s — edge = prob - market_price should never >= prob itself",
                 signal.edge * 100, signal.probability_estimate * 100, signal.market_id,
             )
             failed.append(
@@ -364,16 +370,20 @@ class RiskEngine:
 
         Losses get a longer cooldown (4h) than profits (1h) to
         reduce re-entry into positions that just burned us.
+        Persists duration to DB atomically so it survives crashes (H-15).
         """
         now = datetime.now(timezone.utc)
-        self._cooldowns[market_id] = now
-        # Store the applicable cooldown duration for this specific exit
+        # Determine duration FIRST
         if pnl < 0:
-            self._cooldown_durations[market_id] = self.cooldown_loss_seconds
+            cd_duration = self.cooldown_loss_seconds
         else:
-            self._cooldown_durations[market_id] = self.cooldown_profit_seconds
+            cd_duration = self.cooldown_profit_seconds
+        # Persist to DB before updating in-memory state
         if self.db is not None:
-            self.db.save_cooldown(market_id, now)
+            self.db.save_cooldown(market_id, now, cd_duration)
+        # Then update in-memory
+        self._cooldowns[market_id] = now
+        self._cooldown_durations[market_id] = cd_duration
 
     def _get_min_edge(self, strategy: StrategyName) -> float:
         """Get minimum edge threshold for a strategy."""

@@ -208,11 +208,26 @@ def generate_synthetic_snapshots(db: Database, limit: int = 500) -> int:
     synthetic price paths that move from an initial price toward the outcome.
     This gives the backtest engine price data to replay against.
 
+    WARNING — LOOKAHEAD BIAS: These synthetic price paths interpolate from a
+    random starting price toward the KNOWN outcome. The generated data
+    inherently "knows" where the price will end up, which means any backtest
+    using this data will overstate strategy performance. Results from
+    synthetic snapshots should be treated as an UPPER BOUND only. Do NOT
+    use synthetic-data backtest results to set live trading parameters.
+
     For each settled market, generates 24-72 hourly snapshots showing the price
     drifting from a randomized starting point toward the final outcome.
     """
     import random
     random.seed(42)  # Deterministic backtests for reproducibility
+
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.warning(
+        "LOOKAHEAD BIAS: Generating synthetic snapshots that interpolate toward "
+        "known outcomes. Backtest results using this data are an UPPER BOUND and "
+        "must NOT be used for live trading decisions."
+    )
 
     conn = db._get_conn()
     rows = conn.execute("""

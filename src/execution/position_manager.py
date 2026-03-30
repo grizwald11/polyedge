@@ -288,20 +288,56 @@ class PositionManager:
     def record_settlement(self, market_id: str, settlement_value: float) -> None:
         """Record settlement value for a market (from WebSocket lifecycle).
 
-        Updates the position's current price to the settlement value so that
-        unrealized P&L reflects the final outcome.
+        Creates a synthetic SELL trade at the settlement price to record
+        realized P&L, logs it to the database, and removes the position.
         """
         pos = self._positions.get(market_id)
         if pos is None:
             return
-        pos.current_price = settlement_value
-        pos.unrealized_pnl = round(
-            (settlement_value - pos.avg_entry_price) * pos.size, 4
+
+        # Calculate realized P&L based on settlement value vs avg entry price.
+        # BUY positions: profit = (settlement - entry) * size
+        # SELL positions: profit = (entry - settlement) * size
+        if pos.direction in (Direction.BUY_YES, Direction.BUY_NO):
+            realized_pnl = round(
+                (settlement_value - pos.avg_entry_price) * pos.size
+                - pos.buy_fees, 4
+            )
+        else:
+            realized_pnl = round(
+                (pos.avg_entry_price - settlement_value) * pos.size
+                - pos.buy_fees, 4
+            )
+
+        # Create a synthetic SELL trade to record the settlement in trade history
+        settlement_trade = Trade(
+            order_id=f"settlement-{market_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            market_id=market_id,
+            token_id=pos.token_id,
+            side=Side.SELL,
+            price=settlement_value,
+            size=pos.size,
+            fee=0.0,
+            realized_pnl=realized_pnl,
+            strategy=pos.strategy,
+            paper=pos.paper,
+            timestamp=datetime.now(timezone.utc),
         )
+
+        # Log the synthetic trade to DB
+        try:
+            self.db.log_trade(settlement_trade)
+        except Exception as e:
+            logger.error(f"Failed to log settlement trade for {market_id}: {e}", exc_info=True)
+
         logger.info(
             f"Settlement recorded for {market_id}: value={settlement_value:.2f}, "
-            f"P&L=${pos.unrealized_pnl:.2f}"
+            f"realized P&L=${realized_pnl:+.2f} "
+            f"(entry=${pos.avg_entry_price:.2f}, size={pos.size:.0f})"
         )
+
+        # Remove the position — it's fully settled
+        self._positions.pop(market_id, None)
 
     def mark_pending_exit(self, market_id: str) -> None:
         """Mark a position as having a resting exit order in flight."""
@@ -372,10 +408,11 @@ class PositionManager:
                     return True, f"stop_loss: {loss_pct:.0%} loss exceeds {effective_stop_loss:.0%} threshold (incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
 
         # 2. Trailing stop: if we've had a significant gain and it's pulling back.
-        #    Apply SLIPPAGE_BUFFER: activate slightly later (higher threshold) to
-        #    avoid triggering on momentary price dips that fill above the stop.
+        #    SUBTRACT SLIPPAGE_BUFFER: activate slightly earlier (lower threshold)
+        #    so the exit order is placed before slippage erodes the remaining gain.
+        #    Same logic as stop-loss: trigger before the hard threshold, not after.
         #    Require fresh price data (<2 min) for trailing stop to avoid false exits.
-        effective_trailing_activate = self._trailing_stop_activate + SLIPPAGE_BUFFER
+        effective_trailing_activate = self._trailing_stop_activate - SLIPPAGE_BUFFER
         if position.peak_pnl > 0 and cost_basis > 0:
             peak_gain_pct = position.peak_pnl / cost_basis
             if peak_gain_pct >= effective_trailing_activate:
@@ -573,16 +610,22 @@ class PositionManager:
                 continue
             api_tickers.add(ticker)
 
-            # Kalshi returns market_exposure (dollar value) or position counts
-            api_exposure = api_pos.get("market_exposure", 0)
+            # Prefer contract counts over market_exposure heuristic (M-1).
+            # market_exposure is a dollar value that can be 0 even when
+            # contracts exist (e.g. at-the-money positions).
+            yes_count = api_pos.get("yes_count", 0) or 0
+            no_count = api_pos.get("no_count", 0) or 0
+            has_position = (yes_count > 0 or no_count > 0)
+            # Fallback to market_exposure if contract counts are unavailable
+            if not has_position:
+                has_position = api_pos.get("market_exposure", 0) != 0
             local_pos = self.get_position(ticker)
 
-            if local_pos is None and api_exposure != 0:
+            if local_pos is None and has_position:
                 mismatches += 1
                 if auto_correct:
-                    # Reconstruct a position from API data
-                    yes_count = api_pos.get("yes_count", 0) or 0
-                    no_count = api_pos.get("no_count", 0) or 0
+                    # Reconstruct a position from API data.
+                    # yes_count/no_count already extracted above (M-1).
                     if yes_count > 0:
                         direction = Direction.BUY_YES
                         size = yes_count
@@ -695,7 +738,7 @@ class PositionManager:
                     )
                 elif trade.side == Side.SELL:
                     accumulated = running_buy_totals.get(market_id, 0.0)
-                    if trade.size > accumulated + 1e-9:
+                    if trade.size > accumulated + 1e-6:
                         logger.warning(
                             f"DB consistency: SELL size {trade.size:.0f} exceeds "
                             f"accumulated BUY {accumulated:.0f} for {market_id} "

@@ -190,7 +190,8 @@ CREATE TABLE IF NOT EXISTS circuit_breaker_state (
 -- Cooldown timers for risk engine
 CREATE TABLE IF NOT EXISTS cooldowns (
     market_id TEXT PRIMARY KEY,
-    exit_time TEXT NOT NULL
+    exit_time TEXT NOT NULL,
+    duration_seconds INTEGER
 );
 
 -- Arbitrage relationships (cached Claude validations)
@@ -258,6 +259,17 @@ class Database:
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is not None:
             return self._conn
+        # H-16: Ensure database file has restrictive permissions (owner-only)
+        import os
+        db_file = Path(self.db_path)
+        if db_file.exists():
+            current_mode = db_file.stat().st_mode & 0o777
+            if current_mode != 0o600:
+                try:
+                    db_file.chmod(0o600)
+                    logger.info(f"Fixed DB file permissions: {oct(current_mode)} -> 0o600")
+                except OSError as e:
+                    logger.warning(f"Could not fix DB permissions: {e}")
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         if self.wal_mode:
@@ -360,7 +372,8 @@ class Database:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS cooldowns (
                     market_id TEXT PRIMARY KEY,
-                    exit_time TEXT NOT NULL
+                    exit_time TEXT NOT NULL,
+                    duration_seconds INTEGER
                 )
             """)
             logger.info("Migration: created cooldowns table")
@@ -545,6 +558,14 @@ class Database:
                 )
             """)
             logger.info("Migration v9: created pending_orders table")
+
+        # Migration v10: add duration_seconds to cooldowns (H-15)
+        cooldown_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(cooldowns)").fetchall()
+        }
+        if "duration_seconds" not in cooldown_cols:
+            conn.execute("ALTER TABLE cooldowns ADD COLUMN duration_seconds INTEGER")
+            logger.info("Migration v10: added duration_seconds column to cooldowns")
 
         conn.commit()
 
@@ -1270,26 +1291,30 @@ class Database:
     # Cooldowns
     # ──────────────────────────────────────
 
-    def save_cooldown(self, market_id: str, exit_time: datetime):
-        """Persist a cooldown entry."""
+    def save_cooldown(self, market_id: str, exit_time: datetime, duration_seconds: int | None = None):
+        """Persist a cooldown entry with optional duration (H-15)."""
         conn = self._get_conn()
         conn.execute(
-            "INSERT OR REPLACE INTO cooldowns (market_id, exit_time) VALUES (?, ?)",
-            (market_id, exit_time.isoformat()),
+            "INSERT OR REPLACE INTO cooldowns (market_id, exit_time, duration_seconds) VALUES (?, ?, ?)",
+            (market_id, exit_time.isoformat(), duration_seconds),
         )
         conn.commit()
 
     def load_cooldowns(self, max_age_seconds: int = 3600) -> dict[str, datetime]:
         """Load valid cooldowns, deleting expired ones.
 
+        Also returns durations so RiskEngine can restore loss-specific cooldowns
+        after restart (H-15).
+
         Args:
-            max_age_seconds: Maximum cooldown age in seconds.
+            max_age_seconds: Maximum cooldown age in seconds (used when no
+                per-entry duration is stored).
 
         Returns:
             Dict of market_id -> exit_time for still-active cooldowns.
         """
         conn = self._get_conn()
-        rows = conn.execute("SELECT market_id, exit_time FROM cooldowns").fetchall()
+        rows = conn.execute("SELECT market_id, exit_time, duration_seconds FROM cooldowns").fetchall()
         now = datetime.now(timezone.utc)
         active: dict[str, datetime] = {}
         expired: list[str] = []
@@ -1303,7 +1328,8 @@ class Database:
                 continue
             if exit_time.tzinfo is None:
                 exit_time = exit_time.replace(tzinfo=timezone.utc)
-            if (now - exit_time).total_seconds() < max_age_seconds:
+            duration = row["duration_seconds"] if row["duration_seconds"] is not None else max_age_seconds
+            if (now - exit_time).total_seconds() < duration:
                 active[row["market_id"]] = exit_time
             else:
                 expired.append(row["market_id"])
@@ -1317,6 +1343,12 @@ class Database:
             conn.commit()
 
         return active
+
+    def load_cooldown_durations(self) -> dict[str, int]:
+        """Load persisted cooldown durations (H-15)."""
+        conn = self._get_conn()
+        rows = conn.execute("SELECT market_id, duration_seconds FROM cooldowns WHERE duration_seconds IS NOT NULL").fetchall()
+        return {row["market_id"]: row["duration_seconds"] for row in rows}
 
     def delete_cooldown(self, market_id: str):
         """Remove a cooldown entry."""

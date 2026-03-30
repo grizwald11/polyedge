@@ -243,14 +243,22 @@ class FillTracker:
         remaining = kalshi_data.get("remaining_count", 0)
         order.status = OrderStatus.PARTIAL if remaining > 0 else OrderStatus.FILLED
 
-        # Atomic ordering: DB write before memory update ensures crash recovery correctness.
+        # H-7: Wrap trade log and order update in a single transaction so a
+        # crash between the two writes cannot lose the partial fill record.
         # Write to DB FIRST, then update in-memory tracker. If we crash
         # after DB write but before memory update, restart will re-read
         # from DB via _load_partial_recorded_counts() and be correct.
         # If we crash before DB write, the in-memory tracker won't have
         # advanced, so we'll correctly re-record on restart.
-        self.db.log_trade(trade)
-        self._log_order(order)
+        conn = self.db._get_conn()
+        try:
+            conn.execute("BEGIN")
+            self.db.log_trade(trade)
+            self._log_order_with_conn(order, conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         self._partial_recorded[order.id] = filled_count
 
         logger.info(
@@ -314,8 +322,17 @@ class FillTracker:
             timestamp=now,
         )
 
-        self._log_order(order)
-        self.db.log_trade(trade)
+        # H-7: Wrap order update and trade log in a single transaction so a
+        # crash between the two writes cannot lose the fill record.
+        conn = self.db._get_conn()
+        try:
+            conn.execute("BEGIN")
+            self._log_order_with_conn(order, conn)
+            self.db.log_trade(trade)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
         logger.info(
             f"[FILL] {order.side.value} {remaining_size}x "
@@ -332,8 +349,13 @@ class FillTracker:
         logger.info(f"[CANCELLED] Order {order.id} on {order.market_id}")
 
     def _log_order(self, order: Order):
-        """Persist order status to database."""
+        """Persist order status to database (auto-commit)."""
         conn = self.db._get_conn()
+        self._log_order_with_conn(order, conn)
+        conn.commit()
+
+    def _log_order_with_conn(self, order: Order, conn):
+        """Persist order status using an existing connection (caller manages transaction)."""
         platform = getattr(order, "platform", Platform.KALSHI)
         conn.execute("""
             INSERT OR REPLACE INTO orders (
@@ -362,7 +384,6 @@ class FillTracker:
             order.cancelled_at.isoformat() if order.cancelled_at else None,
             order.rejection_reason,
         ))
-        conn.commit()
 
     def _load_filled_order_ids(self) -> set[str]:
         """Load order IDs that already have trades recorded in the database.

@@ -55,7 +55,7 @@ class TestRapidMoveDetection:
         assert flag is not None
         assert "Rapid price move" in flag.reason
         assert flag.market_id == "TEST-MKT"
-        assert flag.price_move == pytest.approx(0.25, abs=0.01)
+        assert flag.price_move == pytest.approx(0.50, abs=0.01)
 
     def test_flagged_market_stays_flagged(self, detector):
         """Once flagged, subsequent checks return the same flag."""

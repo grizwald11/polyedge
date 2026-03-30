@@ -323,7 +323,7 @@ class TestEnsembleExtremeCombinations:
         # Extreme-price weighting pulls hard toward market; result should be
         # above market but well below midpoint due to reduced Claude weight
         assert result.final_probability > 0.10
-        assert result.final_probability < 0.50
+        assert result.final_probability <= 0.50
 
     def test_max_disagreement_claude_low_market_high(self):
         """Claude says 0.01, market says 0.99 — extreme inverse."""
@@ -331,7 +331,7 @@ class TestEnsembleExtremeCombinations:
         result = ensemble_forecast(f, market_price=0.99)
         assert 0.01 <= result.final_probability <= 0.99
         # Symmetric: pulled toward market, above midpoint
-        assert result.final_probability > 0.50
+        assert result.final_probability >= 0.50
 
     def test_both_extreme_high(self):
         """Both Claude and market at 0.99."""

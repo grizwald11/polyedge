@@ -376,6 +376,24 @@ class AIProbabilityStrategy:
         edge = ensemble.edge  # positive = YES underpriced, negative = NO underpriced
 
         if abs(edge) < min_edge:
+            # H-13: Log distinct reasons for edge rejection
+            if edge < 0 and abs(edge) < min_edge:
+                logger.debug(
+                    f"Edge rejection (negative): {market.ticker} edge={edge:+.3f} — "
+                    f"market pricing is unfavorable (ensemble={ensemble.final_probability:.3f}, "
+                    f"market={market.yes_price:.3f})"
+                )
+            elif abs(edge) < 0.001:
+                logger.debug(
+                    f"Edge rejection (zero): {market.ticker} edge={edge:+.3f} — "
+                    f"market price matches ensemble estimate"
+                )
+            else:
+                logger.debug(
+                    f"Edge rejection (below threshold): {market.ticker} edge={abs(edge):.3f} "
+                    f"< min_edge={min_edge:.3f} — marginal opportunity, insufficient edge "
+                    f"(ensemble={ensemble.final_probability:.3f}, market={market.yes_price:.3f})"
+                )
             return None
 
         # Determine direction

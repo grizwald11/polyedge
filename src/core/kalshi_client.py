@@ -8,6 +8,7 @@ Uses RSA private key signing for authentication.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import ssl
 import time
@@ -48,6 +49,8 @@ class KalshiClient:
         self._min_request_interval = min_request_interval
         self._last_request_time: float = 0.0
         self._consecutive_timeouts: int = 0
+        self._consecutive_5xx: int = 0
+        self._circuit_open_until: float = 0.0
 
     def _load_private_key(self):
         """Load the RSA private key for API signing."""
@@ -193,6 +196,17 @@ class KalshiClient:
         """
         import random
         async with self._semaphore:
+            # Circuit breaker: skip API calls if too many consecutive 5xx errors
+            now_mono = time.monotonic()
+            if now_mono < self._circuit_open_until:
+                remaining = self._circuit_open_until - now_mono
+                raise httpx.HTTPStatusError(
+                    f"Circuit breaker open — {self._consecutive_5xx} consecutive 5xx errors. "
+                    f"Retry in {remaining:.0f}s.",
+                    request=httpx.Request("GET", self.host + path),
+                    response=httpx.Response(503),
+                )
+
             # Enforce minimum interval between requests
             now = time.monotonic()
             elapsed = now - self._last_request_time
@@ -202,6 +216,7 @@ class KalshiClient:
 
             client = await self._get_client()
             max_retries = 3
+            auth_retried = False  # H-5: track single auth retry
             for attempt in range(max_retries):
                 try:
                     headers = self._auth_headers(method, path)
@@ -225,12 +240,23 @@ class KalshiClient:
                                         f"(attempt {attempt + 1}/{max_retries})"
                                     )
                                 except ValueError:
-                                    wait = min(10, 2 ** (attempt + 1) + random.uniform(0, 1))
-                                    logger.warning(
-                                        f"Rate limited on {path}, invalid Retry-After header "
-                                        f"'{retry_after}', using backoff {wait:.1f}s "
-                                        f"(attempt {attempt + 1}/{max_retries})"
-                                    )
+                                    # H-4: Try HTTP-date format (e.g. "Sun, 30 Mar 2026 12:00:00 GMT")
+                                    try:
+                                        from email.utils import parsedate_to_datetime
+                                        retry_dt = parsedate_to_datetime(retry_after)
+                                        from datetime import datetime, timezone
+                                        wait = max(0, (retry_dt - datetime.now(timezone.utc)).total_seconds())
+                                        logger.warning(
+                                            f"Rate limited on {path}, parsed HTTP-date Retry-After, "
+                                            f"waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})"
+                                        )
+                                    except Exception:
+                                        wait = min(10, 2 ** (attempt + 1) + random.uniform(0, 1))
+                                        logger.warning(
+                                            f"Rate limited on {path}, invalid Retry-After header "
+                                            f"'{retry_after}', using backoff {wait:.1f}s "
+                                            f"(attempt {attempt + 1}/{max_retries})"
+                                        )
                             else:
                                 wait = min(10, 2 ** (attempt + 1) + random.uniform(0, 1))
                                 logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
@@ -238,17 +264,51 @@ class KalshiClient:
                             continue
                         logger.error(f"Rate limited on {path} after {max_retries} attempts")
                         raise KalshiRateLimitError(f"Rate limited on {path} after {max_retries} attempts")
+
+                    # H-5: Retry once on 401/403 auth errors with backoff
+                    if resp.status_code in (401, 403) and not auth_retried:
+                        auth_retried = True
+                        logger.warning(
+                            f"Auth error {resp.status_code} on {path}, retrying once after 2s"
+                        )
+                        await asyncio.sleep(2.0)
+                        continue
+
                     resp.raise_for_status()
+                    # Success — reset circuit breaker and timeout counters
+                    self._consecutive_5xx = 0
                     self._consecutive_timeouts = 0
                     if resp.status_code == 204:
                         return {}
-                    return resp.json()
+                    # H-10: Wrap JSON parsing in try/except
+                    try:
+                        return resp.json()
+                    except (ValueError, json.JSONDecodeError) as json_err:
+                        logger.error(
+                            f"Failed to parse JSON response from {path} "
+                            f"(status {resp.status_code}): {json_err}"
+                        )
+                        if attempt < max_retries - 1:
+                            wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+                            logger.warning(f"Retrying {path} after JSON parse failure in {wait:.1f}s")
+                            await asyncio.sleep(wait)
+                            continue
+                        raise
                 except httpx.HTTPStatusError as e:
-                    if e.response.status_code >= 500 and attempt < max_retries - 1:
-                        wait = 2 ** (attempt + 1) + random.uniform(0, 1)
-                        logger.warning(f"Server error {e.response.status_code} on {path}, retrying in {wait:.1f}s")
-                        await asyncio.sleep(wait)
-                        continue
+                    # H-3: Track consecutive 5xx for circuit breaker
+                    if e.response.status_code >= 500:
+                        self._consecutive_5xx += 1
+                        if self._consecutive_5xx >= 5:
+                            self._circuit_open_until = time.monotonic() + 60.0
+                            logger.error(
+                                f"Circuit breaker OPEN — {self._consecutive_5xx} consecutive 5xx errors. "
+                                f"Blocking requests for 60s."
+                            )
+                        if attempt < max_retries - 1:
+                            wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+                            logger.warning(f"Server error {e.response.status_code} on {path}, retrying in {wait:.1f}s")
+                            await asyncio.sleep(wait)
+                            continue
                     raise
                 except httpx.RequestError as e:
                     self._consecutive_timeouts += 1

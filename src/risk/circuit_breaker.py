@@ -49,13 +49,13 @@ class CircuitBreaker:
             True if trading is allowed, False if halted
         """
         if self._halted:
-            # Auto-reset daily halt if enough time has passed (at least 6 hours
-            # and a new calendar day in UTC). The 6-hour minimum prevents edge
-            # cases where the halt triggers just before midnight UTC.
+            # M-22: Auto-reset daily halt after 24 hours wall-clock time,
+            # not calendar date. Calendar date resets can allow trading to
+            # resume too quickly if the halt triggers near midnight UTC.
             if "Daily loss limit" in (self._halt_reason or "") and self._halt_time:
                 now = datetime.now(timezone.utc)
-                hours_since_halt = (now - self._halt_time).total_seconds() / 3600
-                if now.date() > self._halt_time.date() and hours_since_halt >= 6:
+                seconds_since_halt = (now - self._halt_time).total_seconds()
+                if seconds_since_halt >= 86400:
                     self.reset_daily()
                 else:
                     return False
@@ -181,9 +181,9 @@ class CircuitBreaker:
                 f"reduced_sizing={self._reduced_sizing}"
             )
 
-        # Auto-reset daily halt if we restarted on a new day
+        # M-22: Auto-reset daily halt if 24 hours have passed since halt
         if self._halted and self._halt_time:
-            if datetime.now(timezone.utc).date() > self._halt_time.date():
+            if (datetime.now(timezone.utc) - self._halt_time).total_seconds() >= 86400:
                 self.reset_daily()
 
     def _persist_state(self) -> None:

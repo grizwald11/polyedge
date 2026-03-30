@@ -132,8 +132,11 @@ class ManipulationDetector:
         if prev_price <= 0:
             return None
 
-        # Absolute price move
-        price_move = abs(curr_price - prev_price)
+        # M-17: Use relative (percentage) price change instead of absolute.
+        # This prevents false positives on low-priced markets (e.g., $0.05 → $0.10
+        # is a 100% move but only $0.05 absolute) and false negatives on
+        # high-priced markets (e.g., $0.80 → $0.95 is only 18.75% but $0.15 absolute).
+        price_move = abs(curr_price - prev_price) / max(prev_price, 0.01)
 
         if price_move >= self.rapid_move_threshold:
             flag = ManipulationFlag(

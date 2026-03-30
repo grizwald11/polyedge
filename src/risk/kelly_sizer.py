@@ -114,6 +114,14 @@ class KellySizer:
                 f"Low-price contract ({cost_price_check:.2f}) requires 10% edge, got {edge:.1%}"
             )
             return 0
+        # Contracts above $0.97 have tiny upside but full downside if the
+        # market flips — same risk profile as cheap contracts. Require 10%
+        # edge to compensate for the asymmetric payoff (H-1).
+        if cost_price_check > 0.97 and edge < 0.10:
+            logger.debug(
+                f"High-price contract ({cost_price_check:.2f}) requires 10% edge, got {edge:.1%}"
+            )
+            return 0
 
         # Payout if win: (1 - market_price) per contract
         # Risk if lose: market_price per contract

@@ -192,12 +192,14 @@ def parse_market(raw: dict[str, Any], event_category: str = "") -> Optional[Mark
                 spread = 0.0
 
         # Status — Kalshi uses "active", "closed", "settled"
+        # M-3: Canonical status set defined in models.MarketStatus enum
         status_str = raw.get("status", "active")
-        known_statuses = {"open", "active", "closed", "settled", "finalized", "determined"}
+        known_statuses = {"open", "active", "closed", "halted", "settled", "finalized", "determined"}
         if status_str not in known_statuses:
             logger.debug(f"Unknown market status '{status_str}' for {ticker} — treating as inactive")
+        # M-4: "halted" markets are non-tradeable (treated same as closed)
         active = status_str in ("open", "active")
-        closed = status_str in ("closed", "settled", "finalized", "determined")
+        closed = status_str in ("closed", "halted", "settled", "finalized", "determined")
 
         return Market(
             ticker=ticker,

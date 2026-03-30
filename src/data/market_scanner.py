@@ -60,8 +60,12 @@ class MarketScanner:
                 reasons["volume"] += 1
                 continue
 
-            # Category filter — exclude blacklisted categories
+            # Category filter — exclude blacklisted categories.
+            # M-16: Also check question text and description, not just
+            # category/tags, to catch markets that are miscategorized.
             excluded = False
+            question_lower = m.question.lower()
+            description_lower = (m.description or "").lower()
             for exc_cat in cfg.exclude_categories:
                 exc_lower = exc_cat.lower()
                 if exc_lower in m.category.value.lower():
@@ -72,6 +76,9 @@ class MarketScanner:
                         excluded = True
                         break
                 if excluded:
+                    break
+                if exc_lower in question_lower or exc_lower in description_lower:
+                    excluded = True
                     break
             if excluded:
                 reasons["excluded_cat"] += 1

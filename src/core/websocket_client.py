@@ -89,13 +89,22 @@ class KalshiWebSocket:
         host: str = "wss://demo-api.kalshi.co/trade-api/ws/v2",
         api_key_id: Optional[str] = None,
         private_key_path: Optional[str] = None,
+        ping_interval: float = 20,
+        ping_timeout: float = 30,
     ):
         self.host = host
         self.api_key_id = api_key_id
         self.private_key_path = private_key_path
+        self._ping_interval = ping_interval
+        self._ping_timeout = ping_timeout
         self._private_key = None
 
         self._subscriptions: set[str] = set()
+        # M-8: Message ordering is NOT guaranteed across channels (ticker, fill,
+        # orderbook_delta, etc.). A fill notification may arrive before the
+        # corresponding ticker price update, or vice versa. Callers should
+        # handle potential out-of-order delivery and not assume a ticker update
+        # preceding a fill means the ticker reflects the fill price.
         self._channels: list[str] = ["ticker", "fill"]
         self._ws = None
         self._cmd_id: int = 0
@@ -160,6 +169,13 @@ class KalshiWebSocket:
         Use this to sync market status via REST API after a disconnect,
         since markets may have closed/settled while disconnected.
         """
+        # L-12: Guard against unbounded callback list growth
+        if len(self._reconnect_callbacks) >= 50:
+            logger.warning(
+                f"Reconnect callbacks list has {len(self._reconnect_callbacks)} entries — "
+                f"possible leak. Not adding new callback."
+            )
+            return
         self._reconnect_callbacks.append(callback)
 
     def register_reconnect_sync(self, callback: Callable[[], Coroutine[Any, Any, None]]):
@@ -169,6 +185,13 @@ class KalshiWebSocket:
         callers can re-query tracked markets' REST status to catch any
         lifecycle changes (close, settlement) that occurred while disconnected.
         """
+        # L-12: Guard against unbounded callback list growth
+        if len(self._reconnect_callbacks) >= 50:
+            logger.warning(
+                f"Reconnect callbacks list has {len(self._reconnect_callbacks)} entries — "
+                f"possible leak. Not adding new callback."
+            )
+            return
         self._reconnect_callbacks.append(callback)
 
     def remove_callback(self, cb_id: int) -> bool:
@@ -208,8 +231,8 @@ class KalshiWebSocket:
                 async with websockets.connect(
                     self.host,
                     additional_headers=headers,
-                    ping_interval=20,   # Send keep-alive pings every 20s
-                    ping_timeout=30,    # Detect dead connections within 30s
+                    ping_interval=self._ping_interval,
+                    ping_timeout=self._ping_timeout,
                     ssl=ssl_ctx,
                 ) as ws:
                     self._ws = ws
@@ -219,23 +242,35 @@ class KalshiWebSocket:
 
                     # Resubscribe to all tickers with retry (H-2)
                     if self._subscriptions:
+                        tickers_list = list(self._subscriptions)
                         for subscribe_attempt in range(3):
                             try:
-                                await self._send_subscribe(list(self._subscriptions))
+                                await self._send_subscribe(tickers_list)
                                 break
                             except Exception as e:
                                 if subscribe_attempt < 2:
                                     logger.warning(f"Re-subscribe attempt {subscribe_attempt + 1} failed: {e}")
                                     await asyncio.sleep(0.5)
                                 else:
-                                    logger.error(f"Failed to re-subscribe after 3 attempts: {e}")
+                                    # H-9: Log at ERROR with channel and ticker details
+                                    logger.error(
+                                        f"Failed to re-subscribe after 3 attempts: {e}. "
+                                        f"Channels: {self._channels}, "
+                                        f"Tickers: {tickers_list[:10]}{'...' if len(tickers_list) > 10 else ''}"
+                                    )
 
                     # Run reconnect callbacks (e.g., market status sync via REST)
+                    # M-9: Retry each callback once (2s delay) before giving up
                     for cb in self._reconnect_callbacks:
                         try:
                             await cb()
                         except Exception as cb_err:
-                            logger.warning(f"Reconnect callback failed: {cb_err}")
+                            logger.warning(f"Reconnect callback failed: {cb_err}, retrying in 2s")
+                            try:
+                                await asyncio.sleep(2)
+                                await cb()
+                            except Exception as retry_err:
+                                logger.error(f"Reconnect callback retry also failed: {retry_err}")
 
                     await self._message_loop(ws)
 
@@ -399,6 +434,16 @@ class KalshiWebSocket:
                     f"rejecting lifecycle update (expected 0.0-1.0)"
                 )
                 return None  # Reject invalid settlement (H-19)
+            # H-8: For binary markets, settlement must be exactly 0.0 or 1.0
+            if settlement_float is not None:
+                epsilon = 0.01
+                is_binary = abs(settlement_float - 0.0) <= epsilon or abs(settlement_float - 1.0) <= epsilon
+                if not is_binary:
+                    logger.warning(
+                        f"Non-binary settlement value {settlement_float} for market "
+                        f"{data.get('market_ticker', '?')} — skipping (expected 0.0 or 1.0)"
+                    )
+                    return None
             return LifecycleUpdate(
                 market_ticker=data.get("market_ticker", ""),
                 status=data.get("status", ""),
@@ -477,7 +522,11 @@ class KalshiWebSocket:
         }
 
     def _load_private_key(self):
-        """Load the RSA private key for API signing."""
+        """Load the RSA private key for API signing.
+
+        # L-4: Consider extracting to shared src/core/key_loader.py
+        # This logic is duplicated in src/core/kalshi_client.py
+        """
         if self._private_key is not None:
             return self._private_key
         if not self.private_key_path:

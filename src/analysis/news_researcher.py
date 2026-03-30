@@ -166,6 +166,9 @@ class NewsResearcher:
         self._serper_disabled_at: float = 0.0  # Monotonic time of disable
         self._serper_cooldown_seconds: float = 3600.0  # Re-enable after 1 hour
         self._serper_auth_failure_count: int = 0  # Consecutive 4xx auth failures
+        # M-12: Track the API key at time of permanent disable so we can
+        # auto-recover if the key is rotated/changed.
+        self._serper_key_at_disable: Optional[str] = None
 
     def reset_serper(self) -> None:
         """Manually re-enable Serper after permanent disable.
@@ -234,6 +237,21 @@ class NewsResearcher:
             results = await self._search_ddg(query)
             if results:
                 return results
+
+        # M-12: Auto-recover if Serper API key has changed since permanent disable
+        if (
+            self._serper_disabled
+            and self._serper_disabled_at == float("inf")
+            and self._serper_key_at_disable is not None
+            and self.serper_api_key != self._serper_key_at_disable
+        ):
+            logger.info(
+                "Serper API key changed since permanent disable — auto-resetting"
+            )
+            self._serper_disabled = False
+            self._serper_disabled_at = 0.0
+            self._serper_auth_failure_count = 0
+            self._serper_key_at_disable = None
 
         # Re-enable Serper after cooldown — but not if permanently disabled
         # (3+ consecutive auth failures sets _serper_disabled_at to float("inf"))
@@ -359,6 +377,7 @@ class NewsResearcher:
                         )
                         self._serper_disabled = True
                         self._serper_disabled_at = float("inf")  # Never re-enable via cooldown
+                        self._serper_key_at_disable = self.serper_api_key  # M-12
                     else:
                         logger.warning(
                             f"Serper API auth failure #{self._serper_auth_failure_count} "
@@ -453,8 +472,17 @@ class NewsResearcher:
             days = int(days_match.group(1))
             if days > effective_max:
                 return True
-        # Try parsing absolute dates
-        for fmt in ("%Y-%m-%d", "%b %d, %Y", "%B %d, %Y", "%m/%d/%Y"):
+        # Try parsing absolute dates (M-13: includes timezone-aware formats)
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S%z",     # ISO 8601 with timezone offset
+            "%Y-%m-%d %H:%M:%S%z",      # ISO-like with space separator
+            "%Y-%m-%d %H:%M:%S %Z",     # With timezone name (e.g., UTC)
+            "%b %d, %Y %H:%M:%S %z",    # e.g., "Mar 15, 2026 14:30:00 +0000"
+            "%Y-%m-%d",
+            "%b %d, %Y",
+            "%B %d, %Y",
+            "%m/%d/%Y",
+        ):
             try:
                 from datetime import datetime, timezone
                 parsed = datetime.strptime(result.date.strip()[:20], fmt).replace(tzinfo=timezone.utc)

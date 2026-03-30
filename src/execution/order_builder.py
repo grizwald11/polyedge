@@ -113,6 +113,16 @@ class OrderBuilder:
             return None
         side, token_id, k_side = resolved
 
+        # H-6: Warn if market price data may be stale (>5 minutes old)
+        if market.price_updated_at is not None:
+            age_seconds = (datetime.now(timezone.utc) - market.price_updated_at).total_seconds()
+            if age_seconds > 300:
+                logger.warning(
+                    "Market order using potentially stale prices for %s: "
+                    "price data is %.0f seconds old (threshold: 300s)",
+                    market.ticker, age_seconds,
+                )
+
         # Use current market price for the appropriate side
         if signal.direction in (Direction.BUY_YES, Direction.SELL_YES):
             price = market.yes_price
@@ -192,7 +202,7 @@ class OrderBuilder:
         """Clamp price to valid Kalshi range (0.01-0.99)."""
         clamped = max(0.01, min(0.99, round(price, 2)))
         if clamped != round(price, 2):
-            logger.debug(f"Price clamped: ${price:.4f} → ${clamped:.2f}")
+            logger.warning(f"Price clamped: ${price:.4f} → ${clamped:.2f}")
         return clamped
 
     @staticmethod

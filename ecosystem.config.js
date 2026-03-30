@@ -48,7 +48,7 @@ module.exports = {
       name: "polyedge",
       script: "venv/bin/python",
       args: "-m src.main",
-      cwd: "/Users/adamgrodin/polyedge",
+      cwd: __dirname,
       interpreter: "none",
       env: envVars,
       out_file: "~/.pm2/logs/polyedge-out.log",

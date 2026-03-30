@@ -213,6 +213,9 @@ class ClaudeForecaster:
         # Hard budget check — refuse API calls if daily hard limit exceeded.
         # Pre-call estimation: a typical assess_market call uses ~1500-3000 tokens.
         # If adding the estimated usage would exceed the hard limit, skip the call.
+        # L-11: Approximate token estimate for pre-call budget check. This is a
+        # rough heuristic; should be refined with actual usage data once sufficient
+        # API calls have been logged (track via _total_tokens_today / call_count).
         ESTIMATED_CALL_TOKENS = 3000
         hard_limit = self.settings.claude.daily_token_budget * 2
         if self._total_tokens_today + ESTIMATED_CALL_TOKENS > hard_limit:
@@ -424,6 +427,82 @@ class ClaudeForecaster:
                 confidence_low=max(0, market.yes_price - 0.25),
                 confidence_high=min(1, market.yes_price + 0.25),
                 reasoning="Rate limited — retries exhausted, using market price as fallback",
+                model_used=model,
+                latency_ms=int((time.monotonic() - start_time) * 1000),
+                parse_failed=True,
+            )
+        except anthropic.APIConnectionError as e:
+            # M-11: Retryable connection error — backoff like rate limits
+            for retry_attempt in range(1, 4):
+                wait = min(10, 2 ** retry_attempt)
+                logger.warning(
+                    f"Claude API connection error, retrying in {wait}s "
+                    f"(attempt {retry_attempt}/3): {e}"
+                )
+                await asyncio.sleep(wait)
+                try:
+                    client = self._get_client()
+                    response = await asyncio.wait_for(
+                        client.messages.create(
+                            model=model,
+                            max_tokens=self.settings.claude.max_tokens,
+                            temperature=temperature,
+                            system=SYSTEM_PROMPT,
+                            messages=[{"role": "user", "content": prompt}],
+                        ),
+                        timeout=self.settings.claude.api_timeout_seconds,
+                    )
+                    latency_ms = int((time.monotonic() - start_time) * 1000)
+                    raw_text = self._extract_text(response)
+                    if raw_text is None:
+                        continue
+                    tokens_used = response.usage.input_tokens + response.usage.output_tokens
+                    self._track_tokens(
+                        tokens_used,
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        model=model,
+                    )
+                    forecast = self._parse_response(raw_text)
+                    forecast.model_used = model
+                    forecast.tokens_used = tokens_used
+                    forecast.latency_ms = latency_ms
+                    forecast.raw_response = raw_text
+                    logger.info(
+                        f"Claude connection retry {retry_attempt} succeeded for "
+                        f"'{market.question[:50]}...'"
+                    )
+                    self._consecutive_failures = 0
+                    return forecast
+                except anthropic.APIConnectionError:
+                    continue
+                except Exception as retry_e:
+                    logger.debug(f"Non-connection error during retry: {retry_e}")
+                    break
+
+            logger.warning("Claude API connection retries exhausted, returning market price as fallback")
+            self._record_api_failure()
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0, market.yes_price - 0.25),
+                confidence_high=min(1, market.yes_price + 0.25),
+                reasoning="Connection error — retries exhausted, using market price as fallback",
+                model_used=model,
+                latency_ms=int((time.monotonic() - start_time) * 1000),
+                parse_failed=True,
+            )
+        except anthropic.AuthenticationError as e:
+            # M-11: Non-retryable auth error — do not retry, fail immediately
+            logger.error(
+                f"Claude API authentication failed (non-retryable): {e}. "
+                "Check ANTHROPIC_API_KEY is valid and not expired."
+            )
+            self._record_api_failure()
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0, market.yes_price - 0.25),
+                confidence_high=min(1, market.yes_price + 0.25),
+                reasoning=f"Authentication failed (non-retryable): {e}",
                 model_used=model,
                 latency_ms=int((time.monotonic() - start_time) * 1000),
                 parse_failed=True,
@@ -720,6 +799,31 @@ class ClaudeForecaster:
 
     def _build_forecast(self, data: dict) -> ForecastResult:
         """Build a ForecastResult from parsed JSON data."""
+        # H-11: Validate that a probability key exists; check common alternatives
+        if "probability" not in data:
+            alt_keys = {"prob": None, "p": None, "forecast": None, "prediction": None}
+            found_key = None
+            for alt in alt_keys:
+                if alt in data:
+                    found_key = alt
+                    break
+            if found_key is not None:
+                logger.warning(
+                    f"JSON schema validation: 'probability' key missing, "
+                    f"using alternative key '{found_key}' = {data[found_key]}"
+                )
+                data["probability"] = data[found_key]
+            else:
+                logger.warning(
+                    "JSON schema validation: 'probability' key missing and no "
+                    f"known alternatives found in keys: {list(data.keys())}"
+                )
+                return ForecastResult(
+                    probability=0.5,
+                    reasoning=f"Missing 'probability' key in JSON. Keys: {list(data.keys())}",
+                    parse_failed=True,
+                )
+
         raw_probability = float(data.get("probability", 0.5))
         probability = max(0.01, min(0.99, raw_probability))
 

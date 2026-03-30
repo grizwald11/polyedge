@@ -247,7 +247,8 @@ class BacktestPortfolio:
             strategy=strategy,
         )
 
-    def close_position(self, market_id: str, exit_price: float) -> float:
+    def close_position(self, market_id: str, exit_price: float,
+                       use_taker_exit_fee: bool = True) -> float:
         pos = self.positions.pop(market_id, None)
         if pos is None:
             return 0.0
@@ -256,9 +257,14 @@ class BacktestPortfolio:
         # open_position deducted (size * entry_price), we get back (size * exit_price).
         gross_pnl = (exit_price - pos.entry_price) * pos.size
 
-        # C-3: deduct exit fee (maker fee on exit limit order)
+        # M-18: Exit fee defaults to taker for conservative backtesting.
+        # Maker exit fee assumes all exits are filled as limit orders, which
+        # understates costs in practice (urgency often requires taker orders).
         exit_price_cents = round(exit_price * 100)
-        exit_fee = kalshi_maker_fee(pos.size, exit_price_cents) / 100.0
+        if use_taker_exit_fee:
+            exit_fee = kalshi_taker_fee(pos.size, exit_price_cents) / 100.0
+        else:
+            exit_fee = kalshi_maker_fee(pos.size, exit_price_cents) / 100.0
         self.total_fees += exit_fee
 
         net_pnl = gross_pnl - exit_fee
@@ -266,7 +272,8 @@ class BacktestPortfolio:
         self.total_pnl += net_pnl
         return net_pnl
 
-    def resolve_position(self, market_id: str, outcome: bool) -> float:
+    def resolve_position(self, market_id: str, outcome: bool,
+                         use_taker_exit_fee: bool = True) -> float:
         """Resolve a position at market settlement."""
         pos = self.positions.get(market_id)
         if pos is None:
@@ -277,7 +284,7 @@ class BacktestPortfolio:
         else:
             exit_price = 0.0 if outcome else 1.0
 
-        return self.close_position(market_id, exit_price)
+        return self.close_position(market_id, exit_price, use_taker_exit_fee=use_taker_exit_fee)
 
 
 # ──────────────────────────────────────────────
@@ -293,11 +300,20 @@ class BacktestEngine:
         settings: Settings,
         forecaster: MockForecaster | None = None,
         strategy_filter: str | None = None,
+        use_taker_exit_fee: bool = True,
+        slippage_bps: float = 10.0,
     ):
         self.db = db
         self.settings = settings
         self.forecaster = forecaster or MockForecaster(db)
         self.strategy_filter = strategy_filter
+        # M-18: Configurable exit fee model. Default to taker fees for
+        # conservative backtesting. Set use_taker_exit_fee=False to use
+        # maker fees on exit (optimistic assumption that limit orders fill).
+        self.use_taker_exit_fee = use_taker_exit_fee
+        # M-19: Simple slippage model in basis points. Applied to entry
+        # (price worsened) and exit (price worsened) to simulate market impact.
+        self.slippage_bps = slippage_bps
         self.kelly = KellySizer(settings)
         self.circuit_breaker = CircuitBreaker(settings, db)
 
@@ -387,7 +403,7 @@ class BacktestEngine:
             for pos_id in list(portfolio.positions.keys()):
                 if pos_id in end_dates and timestamp >= end_dates[pos_id]:
                     if pos_id in outcomes:
-                        pnl = portfolio.resolve_position(pos_id, outcomes[pos_id])
+                        pnl = portfolio.resolve_position(pos_id, outcomes[pos_id], use_taker_exit_fee=self.use_taker_exit_fee)
                         daily_pnl += pnl
                         resolved_ids.append(pos_id)
                         for t in trades:
@@ -468,7 +484,13 @@ class BacktestEngine:
             if contracts > 50 and random.random() < 0.25:
                 contracts = max(1, int(contracts * random.uniform(0.4, 0.8)))
 
-            portfolio.open_position(market_id, direction, contracts, order_price, strategy)
+            # M-19: Apply slippage to entry price (worsens fill for buyer)
+            slippage = self.slippage_bps / 10000.0
+            if direction in (Direction.BUY_YES, Direction.BUY_NO):
+                slipped_price = min(0.99, order_price + slippage)
+            else:
+                slipped_price = max(0.01, order_price - slippage)
+            portfolio.open_position(market_id, direction, contracts, slipped_price, strategy)
             edges_predicted.append(abs_edge)
 
             trades.append(BacktestTrade(
@@ -494,7 +516,7 @@ class BacktestEngine:
             if market_id in outcomes:
                 # Settled market — resolve at binary outcome
                 outcome = outcomes[market_id]
-                pnl = portfolio.resolve_position(market_id, outcome)
+                pnl = portfolio.resolve_position(market_id, outcome, use_taker_exit_fee=self.use_taker_exit_fee)
                 for t in trades:
                     if t.market_id == market_id and not t.resolved:
                         t.pnl = pnl
@@ -511,10 +533,10 @@ class BacktestEngine:
                     pos = portfolio.positions[market_id]
                     last_yes, last_no = last_prices
                     exit_price = last_yes if pos.direction in (Direction.BUY_YES,) else last_no
-                    pnl = portfolio.close_position(market_id, exit_price)
+                    pnl = portfolio.close_position(market_id, exit_price, use_taker_exit_fee=self.use_taker_exit_fee)
                 else:
                     # No price data at all — assume total loss (worst case)
-                    pnl = portfolio.close_position(market_id, 0.0)
+                    pnl = portfolio.close_position(market_id, 0.0, use_taker_exit_fee=self.use_taker_exit_fee)
 
                 unresolved_positions += 1
                 logger.debug(
