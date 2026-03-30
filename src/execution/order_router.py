@@ -109,6 +109,37 @@ class OrderRouter:
             self._pending_orders.pop(order_id, None)
             self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
 
+    def _cleanup_stale_pending_orders(self) -> int:
+        """M-5: Remove pending orders older than 24 hours to prevent unbounded memory growth.
+
+        Returns the number of stale orders removed.
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        conn = self.db._get_conn()
+        # Find orders that are still marked 'open' but older than 24 hours
+        rows = conn.execute(
+            "SELECT id FROM orders WHERE status='open' AND created_at < ?",
+            (cutoff,),
+        ).fetchall()
+
+        stale_ids = {row["id"] for row in rows}
+        removed = 0
+        for order_id in list(self._pending_orders.keys()):
+            if order_id in stale_ids:
+                self.db.delete_pending_order(order_id)
+                del self._pending_orders[order_id]
+                removed += 1
+
+        if removed:
+            self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
+            logger.info(
+                f"Cleaned up {removed} stale pending orders (>24h old), "
+                f"remaining pending cost=${self._pending_order_cost:.2f}"
+            )
+        return removed
+
     def _log_gate_status(self):
         """Log live trading gate status at startup for visibility."""
         mode = self.settings.trading.mode
@@ -129,6 +160,9 @@ class OrderRouter:
         Paper mode: simulates immediate fill at order price.
         Live mode: submits to Kalshi API.
         """
+        # M-5: Clean up stale pending orders at the start of each routing cycle
+        self._cleanup_stale_pending_orders()
+
         # Validate sell orders don't exceed position size
         if order.side == Side.SELL and self.position_manager is not None:
             position = self.position_manager.get_position(order.market_id)
@@ -189,9 +223,12 @@ class OrderRouter:
         # Adverse slippage: 0 to PAPER_MAX_SLIPPAGE
         slippage = rng.random() * self.PAPER_MAX_SLIPPAGE
         if order.side == Side.BUY:
-            fill_price = min(0.99, order.price + slippage)
+            fill_price = order.price + slippage
         else:
-            fill_price = max(0.01, order.price - slippage)
+            fill_price = order.price - slippage
+
+        # L-3: Clamp fill price to valid range [0.01, 0.99]
+        fill_price = max(0.01, min(0.99, fill_price))
 
         return True, round(fill_price, 2)
 

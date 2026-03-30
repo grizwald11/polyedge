@@ -158,6 +158,16 @@ class CalibrationTracker:
                 skipped_bad += 1
                 continue
 
+            # M-4: Bounds validation — skip records with out-of-range values
+            if not (0.0 <= predicted <= 1.0) or not (0.0 <= outcome <= 1.0):
+                logger.warning(
+                    f"Skipping calibration record with out-of-bounds values: "
+                    f"market={r.get('market_id')}, predicted={predicted}, "
+                    f"outcome={outcome} (must be in [0.0, 1.0])"
+                )
+                skipped_bad += 1
+                continue
+
             brier = (predicted - outcome) ** 2
             self._bucket_brier_score(r, brier, bucket_scores)
 

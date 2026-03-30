@@ -12,6 +12,7 @@ is detected, the client disables itself for the session.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -51,33 +52,51 @@ class MetaculusClient:
         if self._api_token:
             headers["Authorization"] = f"Token {self._api_token}"
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    self._base_url,
-                    params={
-                        "search": "president election",
-                        "status": "open",
-                        "type": "forecast",
-                        "limit": 3,
-                        "order_by": "-forecasters_count",
-                    },
-                    headers=headers,
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 403:
-                logger.info(
-                    "Metaculus API requires authentication — disabling"
-                    + (" (set METACULUS_API_TOKEN)" if not self._api_token else "")
-                )
-            else:
-                logger.info(f"Metaculus API probe failed ({e.response.status_code}) — disabling")
-            return False
-        except httpx.HTTPError as e:
-            logger.info(f"Metaculus API probe failed: {e} — disabling")
-            return False
+        max_attempts = 3
+        backoff_delays = [1.0, 2.0]
+        data = None
+        for attempt in range(max_attempts):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(
+                        self._base_url,
+                        params={
+                            "search": "president election",
+                            "status": "open",
+                            "type": "forecast",
+                            "limit": 3,
+                            "order_by": "-forecasters_count",
+                        },
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                if attempt < max_attempts - 1:
+                    delay = backoff_delays[attempt]
+                    logger.debug(f"Metaculus probe transient error (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.info(f"Metaculus API probe failed: {e} — disabling")
+                    return False
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code >= 500 and attempt < max_attempts - 1:
+                    delay = backoff_delays[attempt]
+                    logger.debug(f"Metaculus probe server error (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                elif e.response.status_code == 403:
+                    logger.info(
+                        "Metaculus API requires authentication — disabling"
+                        + (" (set METACULUS_API_TOKEN)" if not self._api_token else "")
+                    )
+                    return False
+                else:
+                    logger.info(f"Metaculus API probe failed ({e.response.status_code}) — disabling")
+                    return False
+            except httpx.HTTPError as e:
+                logger.info(f"Metaculus API probe failed: {e} — disabling")
+                return False
 
         questions = data.get("results", [])
         if not questions:
@@ -132,26 +151,44 @@ class MetaculusClient:
         if self._api_token:
             headers["Authorization"] = f"Token {self._api_token}"
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    self._base_url,
-                    params={
-                        "search": query,
-                        "status": "open",
-                        "type": "forecast",
-                        "limit": 5,
-                    },
-                    headers=headers,
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPStatusError as e:
-            logger.warning(f"Metaculus API request failed: {e}")
-            return []
-        except httpx.HTTPError as e:
-            logger.warning(f"Metaculus API request failed: {e}")
-            return []
+        max_attempts = 3
+        backoff_delays = [1.0, 2.0]
+        data = None
+        for attempt in range(max_attempts):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(
+                        self._base_url,
+                        params={
+                            "search": query,
+                            "status": "open",
+                            "type": "forecast",
+                            "limit": 5,
+                        },
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                if attempt < max_attempts - 1:
+                    delay = backoff_delays[attempt]
+                    logger.debug(f"Metaculus API transient error (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.warning(f"Metaculus API request failed after {max_attempts} attempts: {e}")
+                    return []
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code >= 500 and attempt < max_attempts - 1:
+                    delay = backoff_delays[attempt]
+                    logger.debug(f"Metaculus API server error (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.warning(f"Metaculus API request failed: {e}")
+                    return []
+            except httpx.HTTPError as e:
+                logger.warning(f"Metaculus API request failed: {e}")
+                return []
 
         results = []
         questions = data.get("results", [])

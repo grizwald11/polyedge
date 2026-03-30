@@ -19,6 +19,8 @@ from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
+WASH_TRADE_COOLDOWN_SECONDS = 1800
+
 
 class RiskEngine:
     """Central risk gate — all trades must pass."""
@@ -123,6 +125,7 @@ class RiskEngine:
         self._check_signal_quality(signal, proposed_cost, failed)
         self._check_resolution_date(market, failed, warnings)
         self._check_cooldown(signal.market_id, failed)
+        self._check_wash_trade(signal.market_id, failed)
         self._check_manipulation(market, failed)
         self._check_obvious_no_limit(signal, bankroll, proposed_cost, failed)
         self._check_max_concurrent_positions(signal, failed)
@@ -344,6 +347,32 @@ class RiskEngine:
             self._cooldown_durations.pop(market_id, None)
             if self.db is not None:
                 self.db.delete_cooldown(market_id)
+
+    def _check_wash_trade(self, market_id: str, failed: list[str]) -> None:
+        """H-6: Block re-entry within 30 minutes of exiting a market."""
+        if self.db is None:
+            return
+        try:
+            conn = self.db._get_conn()
+            rows = conn.execute(
+                "SELECT timestamp FROM trades WHERE market_id = ? AND side = 'SELL' "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (market_id,),
+            ).fetchall()
+            if not rows:
+                return
+            last_sell_ts = rows[0]["timestamp"]
+            last_sell = datetime.fromisoformat(last_sell_ts)
+            if last_sell.tzinfo is None:
+                last_sell = last_sell.replace(tzinfo=timezone.utc)
+            elapsed = (datetime.now(timezone.utc) - last_sell).total_seconds()
+            if elapsed < WASH_TRADE_COOLDOWN_SECONDS:
+                minutes = (WASH_TRADE_COOLDOWN_SECONDS - elapsed) / 60.0
+                failed.append(
+                    f"Wash trading prevention: exited {market_id} {minutes:.0f} min ago (30-min cooldown)"
+                )
+        except Exception as e:
+            logger.warning(f"Wash trade check failed for {market_id}: {e}")
 
     def _check_manipulation(self, market: Market, failed: list[str]) -> None:
         """11. Manipulation detection — flag markets with suspicious activity."""

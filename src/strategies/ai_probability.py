@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 class AIProbabilityStrategy:
     """Strategy 1: Claude assesses true probability, trade when market is mispriced."""
 
+    # L-2: Category divergence thresholds — max allowed divergence between
+    # Claude's estimate and the market price before we reject as hallucination.
+    MAX_DIVERGENCE_DATA_RICH = 0.30      # Politics, Elections, Fed, Economics, Financials
+    MAX_DIVERGENCE_UNCERTAIN = 0.45      # World, Geopolitics
+    MAX_DIVERGENCE_SPECULATIVE = 0.50    # Culture, Entertainment
+    MAX_DIVERGENCE_EXTREME_PRICE = 0.25  # Extreme prices (<15¢ or >85¢)
+
     def __init__(
         self,
         forecaster: ClaudeForecaster,
@@ -297,15 +304,20 @@ class AIProbabilityStrategy:
         # legitimately diverge more.
         base_max_div = self.settings.claude.max_divergence_from_market
         category_div_overrides = {
-            "Politics": 0.30, "Elections": 0.30, "Fed": 0.30,
-            "Economics": 0.30, "Financials": 0.30,
-            "World": 0.45, "Geopolitics": 0.45,
-            "Entertainment": 0.50, "Culture": 0.50,
+            "Politics": self.MAX_DIVERGENCE_DATA_RICH,
+            "Elections": self.MAX_DIVERGENCE_DATA_RICH,
+            "Fed": self.MAX_DIVERGENCE_DATA_RICH,
+            "Economics": self.MAX_DIVERGENCE_DATA_RICH,
+            "Financials": self.MAX_DIVERGENCE_DATA_RICH,
+            "World": self.MAX_DIVERGENCE_UNCERTAIN,
+            "Geopolitics": self.MAX_DIVERGENCE_UNCERTAIN,
+            "Entertainment": self.MAX_DIVERGENCE_SPECULATIVE,
+            "Culture": self.MAX_DIVERGENCE_SPECULATIVE,
         }
         max_div = category_div_overrides.get(category.value, base_max_div)
         divergence = abs(forecast.probability - market.yes_price)
         if market.yes_price < 0.15 or market.yes_price > 0.85:
-            max_div = min(max_div, 0.25)
+            max_div = min(max_div, self.MAX_DIVERGENCE_EXTREME_PRICE)
             # Also check relative divergence: on extreme-price markets, even small
             # absolute divergences can be huge relative to the price.
             base_price = max(market.yes_price, 1.0 - market.yes_price)

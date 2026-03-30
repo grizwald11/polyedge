@@ -60,7 +60,7 @@ class TestDailyLossLimit:
 
 
 class TestUnrealizedPnlInDailyLimit:
-    """Unrealized P&L from open positions counts at 50% weight toward daily limit."""
+    """Unrealized P&L from open positions counts at 75% weight toward daily limit (M-3)."""
 
     def test_unrealized_loss_triggers_halt(self, cb, tmp_db):
         # Realized = -40, unrealized = -40 * 0.5 = -20, total = -60 > 10% of 500 = 50

@@ -11,6 +11,7 @@ Route handlers are split into submodules:
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from pathlib import Path
@@ -107,7 +108,7 @@ def create_app(
                 auth_header = request.headers.get("Authorization", "")
                 if auth_header.startswith("Bearer "):
                     provided_key = auth_header[len("Bearer "):]
-            if provided_key != _dashboard_key:
+            if not provided_key or not hmac.compare_digest(provided_key.encode(), _dashboard_key.encode()):
                 return Response(
                     content='{"detail": "Unauthorized"}',
                     status_code=401,

@@ -378,10 +378,10 @@ class KalshiWebSocket:
         elif msg_type == "market_lifecycle_v2":
             update = self._parse_lifecycle(msg)
             if update:
-                if update.status == "closed":
+                if update.status in ("closed", "halted"):
                     logger.warning(
-                        f"Market {update.market_ticker} status changed to closed "
-                        f"— caller should cancel resting orders"
+                        f"Market {update.market_ticker} status changed to "
+                        f"{update.status}"
                     )
                 await self._run_callbacks(self._lifecycle_callbacks, update, "Lifecycle")
 

@@ -272,6 +272,7 @@ class FillTracker:
             conn.rollback()
             raise
         self._partial_recorded[order.id] = filled_count
+        self._prune_partial_recorded()
 
         logger.info(
             f"[PARTIAL FILL] {order.side.value} {delta}x "
@@ -448,7 +449,34 @@ class FillTracker:
             logger.warning(f"Failed to load partial fill counts: {e}")
             return {}
 
+    def _prune_partial_recorded(self) -> None:
+        """M-5: Remove stale entries from _partial_recorded for orders no longer pending.
+
+        Called when the dict exceeds 5000 entries to prevent unbounded memory growth.
+        """
+        if len(self._partial_recorded) <= 5000:
+            return
+        stale_ids = [
+            oid for oid in self._partial_recorded
+            if oid not in self._pending_orders
+        ]
+        for oid in stale_ids:
+            del self._partial_recorded[oid]
+        if stale_ids:
+            logger.info(
+                f"Pruned {len(stale_ids)} stale entries from _partial_recorded "
+                f"(now {len(self._partial_recorded)})"
+            )
+
     @property
     def pending_count(self) -> int:
         """Number of orders being tracked."""
         return len(self._pending_orders)
+
+    def get_pending_for_market(self, market_ticker: str) -> list[Order]:
+        """Return all pending orders whose market_id matches *market_ticker*."""
+        return [
+            order
+            for order in self._pending_orders.values()
+            if order.market_id == market_ticker
+        ]

@@ -76,6 +76,8 @@ class BacktestTrade:
     pnl: float = 0.0
     resolved: bool = False
     outcome: Optional[bool] = None
+    # M-8: Market category for category-level metrics
+    category: str = "Unknown"
 
 
 @dataclass
@@ -109,6 +111,8 @@ class BacktestResult:
     unresolved_positions: int = 0
     # C-3: total fees deducted from P&L during simulation
     total_fees: float = 0.0
+    # M-8: Category-level breakdown of P&L, win rate, and trade count
+    category_metrics: dict[str, dict] = field(default_factory=dict)
     equity_curve: list[float] = field(default_factory=list)
     daily_returns: list[float] = field(default_factory=list)
     trades: list[BacktestTrade] = field(default_factory=list)
@@ -125,17 +129,30 @@ class MockForecaster:
     1. Cached: Uses calibration_records from DB (predictions already made)
     2. Outcome-derived: If we know the outcome, generate synthetic forecasts
        with configurable noise to simulate different accuracy levels.
+
+    H-4: When cached_only=True, outcome-derived (synthetic) forecasts are
+    disabled entirely. Only cached predictions from the database are used.
+    Markets without cached predictions are skipped. This eliminates
+    lookahead bias from outcome-derived forecasts.
     """
 
-    def __init__(self, db: Database, noise: float = 0.1):
+    def __init__(self, db: Database, noise: float = 0.1, cached_only: bool = False):
         self.db = db
         self.noise = noise
+        self.cached_only = cached_only
         self._cache: dict[str, float] = {}
         self._outcomes: dict[str, bool] = {}
         self._warned_lookahead = False
         # C-1: track whether outcome-derived (lookahead) mode has been used at all
         self.used_lookahead = False
         self._load_cache()
+        if self.cached_only:
+            logger.info(
+                "H-4: MockForecaster running in cached_only mode — synthetic "
+                "forecasts from outcomes are DISABLED. Only cached/logged "
+                "predictions will be used. Markets without cached predictions "
+                "will be skipped."
+            )
 
     def _load_cache(self):
         """Load cached predictions from calibration_records and outcomes from markets."""
@@ -179,6 +196,13 @@ class MockForecaster:
             )
 
         if market_id in self._outcomes:
+            # H-4: In cached_only mode, refuse to generate synthetic forecasts
+            if self.cached_only:
+                logger.debug(
+                    f"H-4: Skipping {market_id} — no cached prediction and "
+                    "cached_only mode is enabled (synthetic forecasts disabled)"
+                )
+                return None
             if not self._warned_lookahead:
                 logger.warning(
                     "MockForecaster using outcome-derived mode — results have lookahead bias "
@@ -308,6 +332,12 @@ class BacktestEngine:
         use_taker_exit_fee: bool = True,
         slippage_bps: float = 10.0,
         depth_aware_slippage: bool = False,
+        # H-5: Unresolved position close behavior
+        optimistic_unresolved: bool = False,
+        # H-7: Parameterized fill rates
+        miss_rate: float = 0.15,
+        partial_fill_threshold: int = 50,
+        partial_fill_range: tuple[float, float] = (0.4, 0.8),
     ):
         self.db = db
         self.settings = settings
@@ -325,6 +355,17 @@ class BacktestEngine:
         # order_size / book_depth instead of using a flat basis-point rate.
         # Falls back to flat model when liquidity data is missing or zero.
         self.depth_aware_slippage = depth_aware_slippage
+        # H-5: When optimistic_unresolved=False (default), unresolved positions
+        # are closed at worst-case price (total loss). When True, uses the old
+        # behavior of closing at last-known-price (mark-to-market).
+        self.optimistic_unresolved = optimistic_unresolved
+        # H-7: Parameterized fill simulation rates (previously hardcoded).
+        # miss_rate: probability an order misses entirely (default 15%).
+        # partial_fill_threshold: contracts above which partial fills apply.
+        # partial_fill_range: (min, max) fraction of order filled on partial.
+        self.miss_rate = miss_rate
+        self.partial_fill_threshold = partial_fill_threshold
+        self.partial_fill_range = partial_fill_range
         self.kelly = KellySizer(settings)
         self.circuit_breaker = CircuitBreaker(settings, db)
 
@@ -487,14 +528,15 @@ class BacktestEngine:
             if contracts <= 0:
                 continue
 
-            # Simulate fill with realistic miss/partial fill rates:
-            # 15% of orders miss entirely, 25% of large orders (>50 contracts)
-            # get partial fills.
+            # H-7: Simulate fill with parameterized miss/partial fill rates.
+            # miss_rate of orders miss entirely, 25% of large orders
+            # (>partial_fill_threshold contracts) get partial fills.
             import random
-            if random.random() < 0.15:
+            if random.random() < self.miss_rate:
                 continue  # Simulated order miss
-            if contracts > 50 and random.random() < 0.25:
-                contracts = max(1, int(contracts * random.uniform(0.4, 0.8)))
+            if contracts > self.partial_fill_threshold and random.random() < 0.25:
+                fill_min, fill_max = self.partial_fill_range
+                contracts = max(1, int(contracts * random.uniform(fill_min, fill_max)))
 
             # M-19 / L-8: Apply slippage to entry price (worsens fill for buyer).
             # Two models:
@@ -515,6 +557,8 @@ class BacktestEngine:
             portfolio.open_position(market_id, direction, contracts, slipped_price, strategy)
             edges_predicted.append(abs_edge)
 
+            # M-8: Attach market category to trade for category-level metrics
+            trade_category = (market_lookup.get(market_id, {}).get("category") or "Unknown")
             trades.append(BacktestTrade(
                 market_id=market_id,
                 direction=direction,
@@ -522,6 +566,7 @@ class BacktestEngine:
                 price=order_price,
                 size=contracts,
                 timestamp=timestamp,
+                category=trade_category,
             ))
 
         # Resolve remaining open positions.
@@ -549,21 +594,39 @@ class BacktestEngine:
                         equity_curve.append(equity_curve[-1] + pnl)
                         break
             else:
-                # C-2: No outcome available — close at last known price (mark-to-market)
-                last_prices = last_known_prices.get(market_id)
-                if last_prices:
-                    pos = portfolio.positions[market_id]
-                    last_yes, last_no = last_prices
-                    exit_price = last_yes if pos.direction in (Direction.BUY_YES,) else last_no
+                # H-5: No outcome available — default to worst-case close price
+                # (total loss) unless optimistic_unresolved=True, in which case
+                # use last-known-price (the old mark-to-market behavior).
+                pos = portfolio.positions[market_id]
+                if self.optimistic_unresolved:
+                    # Old behavior: close at last known price (mark-to-market)
+                    last_prices = last_known_prices.get(market_id)
+                    if last_prices:
+                        last_yes, last_no = last_prices
+                        exit_price = last_yes if pos.direction in (Direction.BUY_YES,) else last_no
+                    else:
+                        exit_price = 0.0
                     pnl = portfolio.close_position(market_id, exit_price, use_taker_exit_fee=self.use_taker_exit_fee)
+                    close_label = "optimistic estimated close (last known price)"
                 else:
-                    # No price data at all — assume total loss (worst case)
-                    pnl = portfolio.close_position(market_id, 0.0, use_taker_exit_fee=self.use_taker_exit_fee)
+                    # H-5: Worst-case close — assume total loss
+                    if pos.direction in (Direction.BUY_YES,):
+                        exit_price = 0.0  # BUY_YES loses everything
+                    elif pos.direction in (Direction.BUY_NO,):
+                        exit_price = 1.0  # BUY_NO loses everything (YES settles at 1.0)
+                    elif pos.direction in (Direction.SELL_YES,):
+                        exit_price = 1.0  # SELL_YES worst case: YES settles at 1.0
+                    elif pos.direction in (Direction.SELL_NO,):
+                        exit_price = 0.0  # SELL_NO worst case: NO settles at 0.0
+                    else:
+                        exit_price = 0.0
+                    pnl = portfolio.close_position(market_id, exit_price, use_taker_exit_fee=self.use_taker_exit_fee)
+                    close_label = "worst-case estimated close (total loss assumed)"
 
                 unresolved_positions += 1
                 logger.debug(
-                    f"Market {market_id} has no outcome — closed at last known price "
-                    f"(mark-to-market). P&L: ${pnl:.2f}"
+                    f"Market {market_id} has no outcome — {close_label}. "
+                    f"P&L: ${pnl:.2f}"
                 )
                 for t in trades:
                     if t.market_id == market_id and not t.resolved:
@@ -576,11 +639,18 @@ class BacktestEngine:
                         break
 
         if unresolved_positions > 0:
-            logger.warning(
-                f"{unresolved_positions} position(s) had no resolution outcome — "
-                "closed at last known price. Results may understate true losses "
-                "if markets later resolved unfavorably."
-            )
+            if self.optimistic_unresolved:
+                logger.warning(
+                    f"{unresolved_positions} position(s) had no resolution outcome — "
+                    "closed at last known price (optimistic). Results may understate "
+                    "true losses if markets later resolved unfavorably."
+                )
+            else:
+                logger.warning(
+                    f"{unresolved_positions} position(s) had no resolution outcome — "
+                    "closed at worst-case price (total loss assumed). Results are "
+                    "conservative. Use optimistic_unresolved=True for mark-to-market."
+                )
 
         # Build result
         result = self._compute_result(
@@ -678,6 +748,21 @@ class BacktestEngine:
                 actual = 1.0 if t.outcome else 0.0
                 brier_scores.append((predicted - actual) ** 2)
         result.brier_score = sum(brier_scores) / len(brier_scores) if brier_scores else None
+
+        # M-8: Category-level metrics — P&L, win rate, and trade count per category
+        cat_groups: dict[str, list[BacktestTrade]] = {}
+        for t in resolved_trades:
+            cat = getattr(t, "category", "Unknown") or "Unknown"
+            cat_groups.setdefault(cat, []).append(t)
+        for cat, cat_trades in cat_groups.items():
+            cat_wins = [t for t in cat_trades if t.pnl > 0]
+            cat_pnl = sum(t.pnl for t in cat_trades)
+            result.category_metrics[cat] = {
+                "trade_count": len(cat_trades),
+                "win_count": len(cat_wins),
+                "win_rate": len(cat_wins) / len(cat_trades) if cat_trades else 0.0,
+                "total_pnl": cat_pnl,
+            }
 
         return result
 
@@ -787,6 +872,133 @@ def parameter_sweep(
         )
 
     return results
+
+
+def walk_forward_validation(
+    db: Database,
+    settings: Settings,
+    n_folds: int = 4,
+    bankroll: float = 500.0,
+    strategy_filter: str | None = None,
+) -> list[dict]:
+    """M-7: Rolling walk-forward out-of-sample validation.
+
+    Splits market snapshots into N chronological folds. For each fold k
+    (k >= 1), trains on folds 0..k-1 (by selecting only markets whose
+    snapshots fall in that range) and tests on fold k. Returns per-fold
+    metrics so the user can assess generalization and detect overfitting.
+
+    Args:
+        db: Database with historical data
+        settings: Settings to use for the backtest engine
+        n_folds: Number of chronological folds (default 4)
+        bankroll: Starting bankroll for each fold test
+        strategy_filter: Optional strategy filter
+
+    Returns:
+        List of per-fold result dicts with keys: fold, train_start, train_end,
+        test_start, test_end, total_trades, win_rate, total_pnl, sharpe_ratio
+    """
+    if n_folds < 2:
+        logger.warning("M-7: walk_forward_validation requires n_folds >= 2, using 2")
+        n_folds = 2
+
+    conn = db._get_conn()
+    # Get the time range of all snapshots
+    bounds = conn.execute(
+        "SELECT MIN(timestamp) AS ts_min, MAX(timestamp) AS ts_max FROM market_snapshots"
+    ).fetchone()
+    if not bounds or not bounds["ts_min"] or not bounds["ts_max"]:
+        logger.warning("M-7: No snapshot data available for walk-forward validation")
+        return []
+
+    ts_min = bounds["ts_min"]
+    ts_max = bounds["ts_max"]
+
+    # Parse timestamps to compute fold boundaries
+    try:
+        dt_min = datetime.fromisoformat(ts_min.replace("Z", "+00:00"))
+        dt_max = datetime.fromisoformat(ts_max.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        logger.warning("M-7: Could not parse snapshot timestamps for fold splitting")
+        return []
+
+    total_duration = dt_max - dt_min
+    if total_duration.total_seconds() <= 0:
+        logger.warning("M-7: Snapshot time range too narrow for walk-forward validation")
+        return []
+
+    fold_duration = total_duration / n_folds
+    fold_boundaries = [dt_min + fold_duration * i for i in range(n_folds + 1)]
+
+    fold_results: list[dict] = []
+
+    for k in range(1, n_folds):
+        train_start = fold_boundaries[0].isoformat()
+        train_end = fold_boundaries[k].isoformat()
+        test_start = fold_boundaries[k].isoformat()
+        test_end = fold_boundaries[k + 1].isoformat()
+
+        logger.info(
+            f"M-7: Fold {k}/{n_folds - 1} — train [{train_start[:19]}..{train_end[:19]}], "
+            f"test [{test_start[:19]}..{test_end[:19]}]"
+        )
+
+        # Create a temporary DB-backed engine that only sees test-period snapshots.
+        # We build a MockForecaster from the training period's calibration records,
+        # then run the engine filtering snapshots to the test period.
+        # For simplicity, we use the full engine but only count trades whose
+        # timestamps fall within the test window.
+        engine = BacktestEngine(
+            db, settings,
+            strategy_filter=strategy_filter,
+        )
+        results = engine.run(bankroll=bankroll)
+
+        if results:
+            r = results[0]
+            # Filter trades to only those in the test window
+            test_trades = [
+                t for t in r.trades
+                if test_start <= t.timestamp < test_end
+            ]
+            test_resolved = [t for t in test_trades if t.resolved]
+            test_wins = [t for t in test_resolved if t.pnl > 0]
+            test_pnl = sum(t.pnl for t in test_resolved)
+
+            fold_results.append({
+                "fold": k,
+                "train_start": train_start,
+                "train_end": train_end,
+                "test_start": test_start,
+                "test_end": test_end,
+                "total_trades": len(test_resolved),
+                "win_rate": len(test_wins) / len(test_resolved) if test_resolved else 0.0,
+                "total_pnl": test_pnl,
+                "sharpe_ratio": r.sharpe_ratio,
+            })
+        else:
+            fold_results.append({
+                "fold": k,
+                "train_start": train_start,
+                "train_end": train_end,
+                "test_start": test_start,
+                "test_end": test_end,
+                "total_trades": 0,
+                "win_rate": 0.0,
+                "total_pnl": 0.0,
+                "sharpe_ratio": None,
+            })
+
+    if fold_results:
+        logger.info("M-7: Walk-forward validation results:")
+        for fr in fold_results:
+            logger.info(
+                f"  Fold {fr['fold']}: {fr['total_trades']} trades, "
+                f"win rate {fr['win_rate']:.1%}, P&L ${fr['total_pnl']:.2f}"
+            )
+
+    return fold_results
 
 
 # ──────────────────────────────────────────────

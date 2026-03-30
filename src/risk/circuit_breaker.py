@@ -15,6 +15,8 @@ from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
+MAX_UNREALIZED_LOSS_PCT = 0.15
+
 
 class CircuitBreaker:
     """Daily loss limit and consecutive loss detection."""
@@ -80,12 +82,27 @@ class CircuitBreaker:
                 logger.critical(f"CIRCUIT BREAKER HALTED: {reason}")
                 return False
 
+        # M-3: Hard gate — halt if unrealized losses alone exceed 15% of bankroll.
+        # This catches scenarios where realized P&L looks fine but open positions
+        # are deeply underwater, indicating imminent large realized losses.
+        if unrealized_pnl < 0 and bankroll > 0:
+            unrealized_loss_pct = abs(unrealized_pnl) / bankroll
+            if unrealized_loss_pct >= MAX_UNREALIZED_LOSS_PCT:
+                reason = (
+                    f"Unrealized loss gate: ${unrealized_pnl:.2f} = "
+                    f"{unrealized_loss_pct:.1%} of bankroll "
+                    f"(limit {MAX_UNREALIZED_LOSS_PCT:.0%})"
+                )
+                self._halt(reason)
+                logger.critical(f"CIRCUIT BREAKER HALTED: {reason}")
+                return False
+
         # Check daily loss limit (realized + discounted unrealized).
-        # Weight unrealized losses at 50% — balances between being too aggressive
+        # Weight unrealized losses at 75% — balances between being too aggressive
         # (100%, which would halt on normal intraday fluctuations) and too lenient
-        # (30%, which delays halt when positions are deeply underwater).
+        # (50%, which delays halt when positions are deeply underwater).
         daily_pnl = self.db.get_daily_pnl()
-        daily_pnl += unrealized_pnl * 0.5
+        daily_pnl += unrealized_pnl * 0.75
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
 
         if daily_pnl < -daily_limit:

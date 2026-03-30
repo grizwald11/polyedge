@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Optional
 
+import time
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -184,6 +186,9 @@ class NewsResearcher:
         # M-12: Track the API key at time of permanent disable so we can
         # auto-recover if the key is rotated/changed.
         self._serper_key_at_disable: Optional[str] = None
+        # M-6: Cache last successful context per market question for fallback
+        self._last_successful_context: dict[str, str] = {}
+        self._last_successful_time: dict[str, float] = {}
 
     def reset_serper(self) -> None:
         """Manually re-enable Serper after permanent disable.
@@ -694,6 +699,16 @@ class NewsResearcher:
                 )
             else:
                 logger.info(f"No news results for: {market_question[:60]}")
+            # M-6: Fallback to cached context when all backends fail
+            cache_key = market_question.strip().lower()
+            if cache_key in self._last_successful_context:
+                age = time.monotonic() - self._last_successful_time[cache_key]
+                if age < 1800:  # 30 minutes
+                    logger.warning(
+                        f"Using cached news context ({age:.0f}s old) — "
+                        f"all search backends unavailable"
+                    )
+                    return self._last_successful_context[cache_key]
             return ""
 
         # Filter stale results, deduplicate, score by relevance, keep top results
@@ -717,6 +732,10 @@ class NewsResearcher:
         logger.info(
             f"News research: {len(all_results)} results for '{market_question[:50]}...'"
         )
+        # M-6: Cache successful context for fallback
+        cache_key = market_question.strip().lower()
+        self._last_successful_context[cache_key] = context
+        self._last_successful_time[cache_key] = time.monotonic()
         return context
 
     def _format_context(self, results: list[NewsResult]) -> str:

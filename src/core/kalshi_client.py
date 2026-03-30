@@ -55,6 +55,7 @@ class KalshiClient:
         self._consecutive_5xx: int = 0
         self._circuit_breaker_triggers: int = 0  # M-10: track for exponential backoff
         self._circuit_open_until: float = 0.0
+        self._recovery_successes: int = 0  # L-1: half-open circuit breaker recovery
 
     def _load_private_key(self):
         """Load the RSA private key for API signing.
@@ -262,10 +263,21 @@ class KalshiClient:
                         continue
 
                     resp.raise_for_status()
-                    # Success — reset circuit breaker and timeout counters
-                    self._consecutive_5xx = 0
+                    # Success — reset timeout counter and handle circuit breaker recovery
                     self._consecutive_timeouts = 0
-                    self._circuit_breaker_triggers = 0
+                    if self._circuit_breaker_triggers > 0:
+                        # L-1: Half-open pattern — require 3 consecutive successes
+                        self._recovery_successes += 1
+                        if self._recovery_successes >= 3:
+                            logger.info(
+                                f"Circuit breaker recovered after {self._recovery_successes} "
+                                "consecutive successes"
+                            )
+                            self._consecutive_5xx = 0
+                            self._circuit_breaker_triggers = 0
+                            self._recovery_successes = 0
+                    else:
+                        self._consecutive_5xx = 0
                     if resp.status_code == 204:
                         return {}
                     # H-10: Wrap JSON parsing in try/except
@@ -283,6 +295,8 @@ class KalshiClient:
                             continue
                         raise
                 except httpx.HTTPStatusError as e:
+                    # L-1: Reset recovery progress on any failure
+                    self._recovery_successes = 0
                     # H-3: Track consecutive 5xx for circuit breaker
                     if e.response.status_code >= 500:
                         self._consecutive_5xx += 1
@@ -302,6 +316,8 @@ class KalshiClient:
                             continue
                     raise
                 except httpx.RequestError as e:
+                    # L-1: Reset recovery progress on any failure
+                    self._recovery_successes = 0
                     self._consecutive_timeouts += 1
                     if self._consecutive_timeouts >= 3:
                         logger.warning("3+ consecutive request errors — resetting HTTP connection pool")

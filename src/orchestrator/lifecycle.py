@@ -453,6 +453,26 @@ async def main():
                     logger.warning(f"Reconnect market status sync failed: {e}")
 
             async def _on_lifecycle(update: LifecycleUpdate):
+                if update.status in ("closed", "halted", "determined", "finalized"):
+                    # Cancel any resting orders on this market to prevent
+                    # stale fills (H-2).
+                    resting = fill_tracker.get_pending_for_market(
+                        update.market_ticker
+                    )
+                    for order in resting:
+                        try:
+                            await kalshi.cancel_order(order.id)
+                            logger.warning(
+                                f"Cancelled resting order {order.id} on "
+                                f"{update.market_ticker} — market status "
+                                f"changed to {update.status}"
+                            )
+                        except Exception as cancel_err:
+                            logger.error(
+                                f"Failed to cancel order {order.id} on "
+                                f"{update.market_ticker}: {cancel_err}"
+                            )
+
                 if update.status in ("closed", "determined", "finalized"):
                     if position_manager.has_position(update.market_ticker):
                         logger.warning(
@@ -552,6 +572,11 @@ async def main():
                 pass
             except Exception as e:
                 logger.debug(f"Dashboard task cleanup error: {e}")
+
+        try:
+            await forecaster.close()
+        except Exception as e:
+            logger.warning(f"Forecaster close failed: {e}")
 
         try:
             await discovery.close()

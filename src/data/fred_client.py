@@ -14,6 +14,7 @@ so this is an acceptable trade-off. See: https://fred.stlouisfed.org/docs/api/
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -62,23 +63,44 @@ class FREDClient:
         if cached is not None:
             return cached
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    self._base_url,
-                    params={
-                        "series_id": series_id,
-                        "api_key": self.api_key,
-                        "file_type": "json",
-                        "sort_order": "desc",
-                        "limit": 3,
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPError as e:
-            logger.warning(f"FRED API request failed for {series_id}: {e}")
-            return None
+        max_attempts = 3
+        backoff_delays = [1.0, 2.0]
+        data = None
+        for attempt in range(max_attempts):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(
+                        self._base_url,
+                        params={
+                            "series_id": series_id,
+                            "api_key": self.api_key,
+                            "file_type": "json",
+                            "sort_order": "desc",
+                            "limit": 3,
+                        },
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                if attempt < max_attempts - 1:
+                    delay = backoff_delays[attempt]
+                    logger.debug(f"FRED API transient error for {series_id} (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.warning(f"FRED API request failed for {series_id} after {max_attempts} attempts: {e}")
+                    return None
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code >= 500 and attempt < max_attempts - 1:
+                    delay = backoff_delays[attempt]
+                    logger.debug(f"FRED API server error for {series_id} (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.warning(f"FRED API request failed for {series_id}: {e}")
+                    return None
+            except httpx.HTTPError as e:
+                logger.warning(f"FRED API request failed for {series_id}: {e}")
+                return None
 
         observations = data.get("observations", [])
         if not observations:

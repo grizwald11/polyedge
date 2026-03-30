@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 from src.core.models import (
@@ -165,12 +166,19 @@ class PositionManager:
                 )
 
                 # Calculate realized P&L: gross profit minus both buy and sell fees
-                realized_pnl = (
-                    (trade.price - existing.avg_entry_price) * sell_size
-                    - proportional_buy_fee
-                    - trade.fee
+                # Use Decimal arithmetic to avoid float rounding errors (H-1)
+                d_price = Decimal(str(trade.price))
+                d_entry = Decimal(str(existing.avg_entry_price))
+                d_sell_size = Decimal(str(sell_size))
+                d_buy_fee = Decimal(str(proportional_buy_fee))
+                d_sell_fee = Decimal(str(trade.fee))
+                d_realized_pnl = (
+                    (d_price - d_entry) * d_sell_size
+                    - d_buy_fee
+                    - d_sell_fee
                 )
-                trade.realized_pnl = round(realized_pnl, 4)
+                realized_pnl = float(d_realized_pnl.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+                trade.realized_pnl = realized_pnl
 
                 # Update the DB record with the calculated P&L
                 self._update_trade_pnl(trade)
@@ -224,10 +232,11 @@ class PositionManager:
             price_delta = abs(price_for_side - position.current_price)
             if price_delta == 0:
                 position._price_stale = True
-                logger.warning(
-                    f"Stale price detected for {market_id}: ${price_for_side:.2f} unchanged "
-                    f"for {time_since_update:.0f}s — data feed may be dead"
+                logger.debug(
+                    f"Skipping stale price update for {market_id}: "
+                    f"data {time_since_update:.0f}s old, price unchanged"
                 )
+                return
             elif price_delta < 0.005:
                 position._price_stale = True
                 logger.warning(
@@ -249,11 +258,15 @@ class PositionManager:
                 return  # No valid price for this position's side
             position.current_price = yes_price
         # P&L = (current - entry) * size for BUY, (entry - current) * size for SELL
-        # Round to 4dp to prevent floating-point drift in accumulated P&L
+        # Use Decimal arithmetic to prevent floating-point drift (H-1)
+        d_current = Decimal(str(position.current_price))
+        d_entry = Decimal(str(position.avg_entry_price))
+        d_size = Decimal(str(position.size))
         if position.direction in (Direction.BUY_YES, Direction.BUY_NO):
-            position.unrealized_pnl = round((position.current_price - position.avg_entry_price) * position.size, 4)
+            d_pnl = (d_current - d_entry) * d_size
         else:
-            position.unrealized_pnl = round((position.avg_entry_price - position.current_price) * position.size, 4)
+            d_pnl = (d_entry - d_current) * d_size
+        position.unrealized_pnl = float(d_pnl.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
         # Track peak P&L for trailing stop
         if position.unrealized_pnl > position.peak_pnl:
             position.peak_pnl = position.unrealized_pnl
@@ -305,16 +318,16 @@ class PositionManager:
         # Calculate realized P&L based on settlement value vs avg entry price.
         # BUY positions: profit = (settlement - entry) * size
         # SELL positions: profit = (entry - settlement) * size
+        # Use Decimal arithmetic for settlement P&L to avoid float errors (H-1)
+        d_settlement = Decimal(str(settlement_value))
+        d_entry = Decimal(str(pos.avg_entry_price))
+        d_size = Decimal(str(pos.size))
+        d_buy_fees = Decimal(str(pos.buy_fees))
         if pos.direction in (Direction.BUY_YES, Direction.BUY_NO):
-            realized_pnl = round(
-                (settlement_value - pos.avg_entry_price) * pos.size
-                - pos.buy_fees, 4
-            )
+            d_realized = (d_settlement - d_entry) * d_size - d_buy_fees
         else:
-            realized_pnl = round(
-                (pos.avg_entry_price - settlement_value) * pos.size
-                - pos.buy_fees, 4
-            )
+            d_realized = (d_entry - d_settlement) * d_size - d_buy_fees
+        realized_pnl = float(d_realized.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
 
         # Create a synthetic SELL trade to record the settlement in trade history.
         # H-4: Include accumulated buy_fees to close the fee ledger — without this,

@@ -59,6 +59,12 @@ class ClaudeForecaster:
         self._consecutive_failures: int = 0
         self._circuit_open_until: float = 0.0  # monotonic time; 0 = circuit closed
 
+    async def close(self) -> None:
+        """Close the underlying Anthropic client, releasing connections."""
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
+
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
             api_key = self.settings.anthropic_api_key
@@ -828,19 +834,41 @@ class ClaudeForecaster:
             pct_matches = re.findall(r'(?:probability|prob)["\'\s:=]+\s*(\d{1,3})%', text, re.IGNORECASE)
             if pct_matches:
                 prob = float(pct_matches[-1]) / 100.0
+                parse_failed = True
+                # M-2: Validate extraction context — check surrounding sentence
+                parse_failed = self._validate_prose_extraction(text, prob, parse_failed)
+                # M-2: Check for ambiguous numbers (large spread among extracted values)
+                all_vals = [float(v) / 100.0 for v in pct_matches]
+                if len(all_vals) > 1 and (max(all_vals) - min(all_vals)) > 0.30:
+                    logger.warning(
+                        f"Ambiguous prose extraction: values span {min(all_vals):.2f}–{max(all_vals):.2f} "
+                        f"(delta {max(all_vals) - min(all_vals):.2f} > 0.30)"
+                    )
+                    parse_failed = True
                 logger.warning(f"Extracted probability {prob} from percentage in prose (last of {len(pct_matches)} matches)")
                 return ForecastResult(
                     probability=max(0.01, min(0.99, prob)),
                     reasoning=f"Parsed probability from prose (%). Raw: {raw_text[:200]}",
-                    parse_failed=True,
+                    parse_failed=parse_failed,
                 )
         if prob_matches:
             prob = float(prob_matches[-1])
+            parse_failed = True
+            # M-2: Validate extraction context — check surrounding sentence
+            parse_failed = self._validate_prose_extraction(text, prob, parse_failed)
+            # M-2: Check for ambiguous numbers (large spread among extracted values)
+            all_vals = [float(v) for v in prob_matches]
+            if len(all_vals) > 1 and (max(all_vals) - min(all_vals)) > 0.30:
+                logger.warning(
+                    f"Ambiguous prose extraction: values span {min(all_vals):.2f}–{max(all_vals):.2f} "
+                    f"(delta {max(all_vals) - min(all_vals):.2f} > 0.30)"
+                )
+                parse_failed = True
             logger.warning(f"Extracted probability {prob} from prose response (last of {len(prob_matches)} matches)")
             return ForecastResult(
                 probability=max(0.01, min(0.99, prob)),
                 reasoning=f"Parsed probability from prose. Raw: {raw_text[:200]}",
-                parse_failed=True,
+                parse_failed=parse_failed,
             )
 
         logger.warning(f"Failed to parse Claude response as JSON: {raw_text[:200]}")
@@ -849,6 +877,26 @@ class ClaudeForecaster:
             reasoning=f"JSON parse failed, raw: {raw_text[:200]}",
             parse_failed=True,
         )
+
+    @staticmethod
+    def _validate_prose_extraction(text: str, prob: float, parse_failed: bool) -> bool:
+        """M-2: Validate that extracted probability appears in a forecasting context.
+
+        Returns updated parse_failed flag (may be set to True if context is suspect).
+        """
+        # Check if the extracted value appears near forecasting-related words
+        context_words = {"probability", "estimate", "likely", "chance", "forecast", "predict", "assessment"}
+        # Search for any sentence containing the extracted number
+        # Build a pattern matching the number as decimal or percentage
+        text_lower = text.lower()
+        has_context = any(word in text_lower for word in context_words)
+        if not has_context:
+            logger.warning(
+                f"Prose extraction lacks forecasting context words — "
+                f"extracted {prob} may not be a probability estimate"
+            )
+            parse_failed = True
+        return parse_failed
 
     def _build_forecast(self, data: dict) -> ForecastResult:
         """Build a ForecastResult from parsed JSON data."""
