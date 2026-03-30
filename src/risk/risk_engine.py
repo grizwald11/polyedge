@@ -115,6 +115,7 @@ class RiskEngine:
         warnings: list[str] = []
         bankroll = self.bankroll
 
+        self._check_excluded_category(market, failed)
         committed = self._check_balance(bankroll, proposed_cost, pending_order_cost, failed)
         self._check_position_size(bankroll, proposed_cost, failed)
         self._check_total_exposure(bankroll, proposed_cost, committed, failed)
@@ -150,6 +151,39 @@ class RiskEngine:
         return result
 
     # -- Individual risk checks --------------------------------------------------
+
+    def _check_excluded_category(
+        self, market: Market, failed: list[str],
+    ) -> None:
+        """0. Category gate — reject markets in excluded categories (defense-in-depth).
+
+        The scanner already filters excluded categories, but this check ensures
+        that no excluded market can reach execution even if it bypasses the scanner.
+        """
+        excluded = self.settings.scanning.exclude_categories
+        if not excluded:
+            return
+        market_cat = market.category.value if hasattr(market.category, 'value') else str(market.category)
+        cat_lower = market_cat.lower()
+        # Check category name — match in both directions (e.g., "Crypto" in "Crypto Prices"
+        # or "Crypto Prices" in "Crypto Price Markets")
+        for exc in excluded:
+            exc_lower = exc.lower()
+            if exc_lower in cat_lower or cat_lower in exc_lower:
+                failed.append(
+                    f"Excluded category: market category '{market_cat}' matches exclusion '{exc}'"
+                )
+                return
+        # Check tags
+        for tag in market.tags:
+            tag_lower = tag.lower()
+            for exc in excluded:
+                exc_lower = exc.lower()
+                if exc_lower in tag_lower or tag_lower in exc_lower:
+                    failed.append(
+                        f"Excluded category: market tag '{tag}' matches exclusion '{exc}'"
+                    )
+                    return
 
     def _check_balance(
         self, bankroll: float, proposed_cost: float, pending_order_cost: float,
@@ -325,10 +359,17 @@ class RiskEngine:
     def _check_resolution_date(
         self, market: Market, failed: list[str], warnings: list[str],
     ) -> None:
-        """9. Resolution date check."""
+        """9. Resolution date check.
+
+        M-5: Markets resolving within 4 hours are rejected outright (insufficient
+        time for limit orders to fill and for the thesis to play out). Markets
+        resolving in <1 day get a warning but are allowed.
+        """
         days = market.days_to_resolution
-        if days is not None and days < 1:
-            failed.append(f"Market resolves in <1 day ({days:.1f} days)")
+        if days is not None and days < 0.167:
+            failed.append(f"Market resolves in <4 hours ({days:.2f} days)")
+        elif days is not None and days < 1:
+            warnings.append(f"Market resolves in <1 day ({days:.1f} days)")
         elif days is not None and days > 365:
             warnings.append(f"Long-dated market: {days:.0f} days to resolution")
 

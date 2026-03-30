@@ -294,7 +294,7 @@ def build_prompt(
     news_context: str = "No additional context available.",
     base_rate_context: str = "",
 ) -> str:  # M-6: explicit return type
-    """Build a complete prompt for Claude from market data.
+    """Build a complete prompt for Claude from market data and context.
 
     All external text (question, resolution criteria, news) is sanitized
     to mitigate prompt injection from untrusted API sources.

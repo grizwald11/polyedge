@@ -17,8 +17,15 @@ from src.orchestrator.startup import _check_disk_space, _sync_bankroll
 from src.orchestrator.trade_cycle import _execute_signals, _process_exits
 
 
-async def _check_fills_and_cleanup(fill_tracker, position_manager, order_router, settings, logger):
+async def _check_fills_and_cleanup(fill_tracker, position_manager, order_router, settings, logger, kalshi=None) -> None:
     """Check for fills on pending orders and cancel stale ones."""
+    # M-1: Automate Kalshi key freshness check every fill/cleanup cycle
+    if kalshi is not None:
+        try:
+            kalshi.check_key_freshness()
+        except Exception as e:
+            logger.debug(f"Key freshness check in fill/cleanup: {e}")
+
     try:
         new_fills = await fill_tracker.check_fills()
         for fill in new_fills:
@@ -37,7 +44,7 @@ async def _check_fills_and_cleanup(fill_tracker, position_manager, order_router,
         logger.error(f"Stale order cancellation failed: {e}", exc_info=True)
 
 
-async def _scan_markets(scanner, poly_scanner, metrics, logger):
+async def _scan_markets(scanner, poly_scanner, metrics, logger) -> None:
     """Scan and filter markets from all platforms. Returns (markets, poly_markets)."""
     poly_markets: list[Market] = []
     try:
@@ -245,7 +252,7 @@ async def scan_and_trade(
     poly_scanner=None,
     cross_platform_arb=None,
 ):
-    """Execute one scan-assess-trade cycle.
+    """Execute one complete scan-assess-trade cycle.
 
     Decomposed into sub-functions for maintainability:
     1. _sync_bankroll — live mode balance reconciliation
@@ -273,7 +280,7 @@ async def scan_and_trade(
         logger.debug(f"Key freshness check: {e}")
 
     # 2. Check fills and cleanup stale orders
-    await _check_fills_and_cleanup(fill_tracker, position_manager, order_router, settings, logger)
+    await _check_fills_and_cleanup(fill_tracker, position_manager, order_router, settings, logger, kalshi=kalshi)
 
     # 3. Circuit breaker check
     unrealized_pnl = position_manager.get_total_unrealized_pnl()

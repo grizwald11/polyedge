@@ -36,6 +36,8 @@ class ClaudeForecaster:
         self.news_researcher = NewsResearcher(
             serper_api_key=settings.serper_api_key,
             searxng_url=settings.searxng_url,
+            serper_url=settings.news.serper_url,
+            staleness_thresholds=settings.news.staleness_thresholds,
         )
         # Token and cost tracking for budget awareness
         self._total_tokens_today: int = 0

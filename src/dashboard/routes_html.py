@@ -8,8 +8,15 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
-def register_html_routes(app, *, db, render, position_manager, calibration_analyzer, circuit_breaker, bankroll):
+def register_html_routes(app, *, db, render, position_manager, calibration_analyzer, circuit_breaker, bankroll) -> None:
     """Register all HTML page routes on the FastAPI app."""
+    _register_portfolio_page(app, db=db, render=render, position_manager=position_manager, circuit_breaker=circuit_breaker, bankroll=bankroll)
+    _register_analysis_pages(app, db=db, render=render, calibration_analyzer=calibration_analyzer)
+    _register_risk_page(app, db=db, render=render, position_manager=position_manager, bankroll=bankroll)
+
+
+def _register_portfolio_page(app, *, db, render, position_manager, circuit_breaker, bankroll) -> None:
+    """Register the portfolio overview page route."""
     from fastapi.responses import HTMLResponse
 
     @app.get("/", response_class=HTMLResponse)
@@ -70,6 +77,11 @@ def register_html_routes(app, *, db, render, position_manager, calibration_analy
             active_page="portfolio",
         )
 
+
+def _register_analysis_pages(app, *, db, render, calibration_analyzer) -> None:
+    """Register strategy, calibration, and signals page routes."""
+    from fastapi.responses import HTMLResponse
+
     @app.get("/strategies", response_class=HTMLResponse)
     async def strategies_page():
         """Strategy breakdown page."""
@@ -103,6 +115,11 @@ def register_html_routes(app, *, db, render, position_manager, calibration_analy
             "signals.html",
             active_page="signals",
         )
+
+
+def _register_risk_page(app, *, db, render, position_manager, bankroll) -> None:
+    """Register the risk management page route."""
+    from fastapi.responses import HTMLResponse
 
     @app.get("/risk", response_class=HTMLResponse)
     async def risk_page():

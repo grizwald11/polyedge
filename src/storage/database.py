@@ -833,8 +833,8 @@ class Database:
         """Log a completed trade. Ignores duplicates (same order_id + side)."""
         conn = self._get_conn()
         platform = trade.platform.value if hasattr(trade.platform, 'value') else str(trade.platform)
-        if not self._write_lock.acquire(timeout=10):
-            logger.error("Database write lock timeout (10s) in log_trade — concurrent write contention")
+        if not self._write_lock.acquire(timeout=30):
+            logger.error("Database write lock timeout (30s) in log_trade — concurrent write contention")
             raise TimeoutError("Database write lock acquisition timed out in log_trade")
         try:
             cursor = conn.execute("""
@@ -870,8 +870,8 @@ class Database:
         On restart, load_pending_orders() rebuilds the dict from this table.
         """
         conn = self._get_conn()
-        if not self._write_lock.acquire(timeout=10):
-            logger.error("Database write lock timeout (10s) in save_pending_order — concurrent write contention")
+        if not self._write_lock.acquire(timeout=30):
+            logger.error("Database write lock timeout (30s) in save_pending_order — concurrent write contention")
             raise TimeoutError("Database write lock acquisition timed out in save_pending_order")
         try:
             conn.execute(
@@ -885,8 +885,8 @@ class Database:
     def delete_pending_order(self, order_id: str) -> None:
         """Remove a pending order record (order filled, cancelled, or expired)."""
         conn = self._get_conn()
-        if not self._write_lock.acquire(timeout=10):
-            logger.error("Database write lock timeout (10s) in delete_pending_order — concurrent write contention")
+        if not self._write_lock.acquire(timeout=30):
+            logger.error("Database write lock timeout (30s) in delete_pending_order — concurrent write contention")
             raise TimeoutError("Database write lock acquisition timed out in delete_pending_order")
         try:
             conn.execute(
@@ -919,8 +919,8 @@ class Database:
         """Log the reason a position was exited."""
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
-        if not self._write_lock.acquire(timeout=10):
-            logger.error("Database write lock timeout (10s) in log_exit_reason — concurrent write contention")
+        if not self._write_lock.acquire(timeout=30):
+            logger.error("Database write lock timeout (30s) in log_exit_reason — concurrent write contention")
             raise TimeoutError("Database write lock acquisition timed out in log_exit_reason")
         try:
             conn.execute("""

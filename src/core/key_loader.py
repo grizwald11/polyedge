@@ -16,7 +16,7 @@ def load_rsa_private_key(
     private_key_path: str,
     check_permissions: bool = False,
 ) -> Optional[Any]:
-    """Load an RSA private key from a PEM file.
+    """Load RSA private key from PEM file with permission checks.
 
     Args:
         private_key_path: Filesystem path to the PEM-encoded private key.

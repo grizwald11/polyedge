@@ -174,9 +174,11 @@ class NewsResearcher:
         serper_api_key: Optional[str] = None,
         searxng_url: Optional[str] = None,
         serper_url: str = SERPER_SEARCH_URL,
+        staleness_thresholds: Optional[dict[str, int]] = None,
     ):
         self.serper_api_key = serper_api_key
         self.serper_url = serper_url
+        self._staleness_thresholds = staleness_thresholds or {}
         # searxng_url kept for backward compatibility
         self.searxng_url = searxng_url
         self._serper_disabled = False  # Set True after credit/auth failures
@@ -466,13 +468,24 @@ class NewsResearcher:
         """
         # Category-specific staleness thresholds (more time-sensitive categories
         # get shorter windows to avoid injecting outdated context into Claude)
-        category_max_days = {
-            "Fed": 5, "Fed_Macro": 5,
+        # Use config thresholds if provided, fall back to built-in defaults
+        default_thresholds = {
+            "Fed": 5, "Fed_Macro": 5, "Fed/Macro": 5,
             "Geopolitics": 7,
             "Politics": 14,
             "Culture": 30,
-            "Tech": 10, "Tech_AI": 10,
+            "Tech": 10, "Tech_AI": 10, "Tech/AI": 10,
         }
+        # Config thresholds override defaults; also expand slash-form keys
+        # (e.g., "Fed/Macro" → also sets "Fed" and "Fed_Macro")
+        category_max_days = dict(default_thresholds)
+        for key, val in self._staleness_thresholds.items():
+            category_max_days[key] = val
+            # Expand "Fed/Macro" → "Fed", "Fed_Macro" for legacy lookup
+            if "/" in key:
+                parts = key.split("/")
+                category_max_days[parts[0]] = val
+                category_max_days[key.replace("/", "_")] = val
         effective_max = category_max_days.get(category, max_age_days)
         if not result.date:
             return False  # No date — can't determine staleness, keep it

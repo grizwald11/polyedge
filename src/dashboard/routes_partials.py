@@ -8,7 +8,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def register_partial_routes(app, *, db, position_manager):
+def register_partial_routes(app, *, db, position_manager) -> None:
     """Register HTMX partial routes on the FastAPI app."""
     from fastapi.responses import HTMLResponse
 

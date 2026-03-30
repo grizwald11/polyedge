@@ -49,7 +49,7 @@ def create_app(
     circuit_breaker=None,
     bankroll: float = 500.0,
 ) -> Optional[object]:
-    """Create the FastAPI dashboard application.
+    """Create and configure the FastAPI dashboard application.
 
     Args:
         db: Database instance (required).
@@ -181,7 +181,7 @@ async def start_dashboard(
     host: str = "0.0.0.0",
     port: int = 8080,
 ):
-    """Start the dashboard server as a background task."""
+    """Start the dashboard web server as a background task."""
     app = create_app(
         db,
         metrics=metrics,

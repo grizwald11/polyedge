@@ -114,6 +114,36 @@ def _parse_outcome_prices(raw: dict) -> tuple[float, float]:
     return yes_price, no_price
 
 
+def _parse_polymarket_prices(raw: dict[str, Any]) -> tuple[float, float, float]:
+    """Extract (yes_price, no_price, spread) from a raw Polymarket market dict.
+
+    Delegates price extraction to _parse_outcome_prices and computes spread
+    from bid/ask or price deviation.
+    """
+    yes_price, no_price = _parse_outcome_prices(raw)
+
+    # Spread: use actual bid-ask data if available, fall back to price deviation
+    best_bid = raw.get("bestBid")
+    best_ask = raw.get("bestAsk")
+    if best_bid is not None and best_ask is not None:
+        try:
+            spread = max(0.0, float(best_ask) - float(best_bid))
+        except (ValueError, TypeError):
+            spread = abs(yes_price + no_price - 1.0) if yes_price > 0 else 0.0
+    else:
+        # Fallback: price deviation from 1.0 as proxy for data quality
+        spread = abs(yes_price + no_price - 1.0) if yes_price > 0 else 0.0
+
+    return yes_price, no_price, spread
+
+
+def _parse_polymarket_status(raw: dict[str, Any]) -> tuple[bool, bool]:
+    """Extract (active, closed) from a raw Polymarket market dict."""
+    closed = raw.get("closed", False)
+    active = raw.get("active", True) and not closed
+    return active, closed
+
+
 def parse_polymarket_market(raw: dict[str, Any]) -> Optional[Market]:
     """Parse a raw Gamma API market response into a Market model."""
     try:
@@ -125,7 +155,7 @@ def parse_polymarket_market(raw: dict[str, Any]) -> Optional[Market]:
         if not question:
             return None
 
-        yes_price, no_price = _parse_outcome_prices(raw)
+        yes_price, no_price, spread = _parse_polymarket_prices(raw)
         if yes_price <= 0 and no_price <= 0:
             return None
 
@@ -156,18 +186,6 @@ def parse_polymarket_market(raw: dict[str, Any]) -> Optional[Market]:
         # Liquidity
         liquidity = float(raw.get("liquidity", 0) or 0)
 
-        # Spread: use actual bid-ask data if available, fall back to price deviation
-        best_bid = raw.get("bestBid")
-        best_ask = raw.get("bestAsk")
-        if best_bid is not None and best_ask is not None:
-            try:
-                spread = max(0.0, float(best_ask) - float(best_bid))
-            except (ValueError, TypeError):
-                spread = abs(yes_price + no_price - 1.0) if yes_price > 0 else 0.0
-        else:
-            # Fallback: price deviation from 1.0 as proxy for data quality
-            spread = abs(yes_price + no_price - 1.0) if yes_price > 0 else 0.0
-
         # End date
         end_date = None
         end_date_str = raw.get("endDate") or raw.get("end_date_iso")
@@ -195,9 +213,8 @@ def parse_polymarket_market(raw: dict[str, Any]) -> Optional[Market]:
         if category == MarketCategory.OTHER:
             category = classify_market_category(question, tags)
 
-        # Status
-        closed = raw.get("closed", False)
-        active = raw.get("active", True) and not closed
+        # Status — delegated to helper
+        active, closed = _parse_polymarket_status(raw)
 
         # Event grouping
         event_slug = raw.get("groupItemTitle", "") or raw.get("slug", "")

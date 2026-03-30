@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
+
+def _sanitize_url(url: str) -> str:
+    """Replace the api_key query parameter value with '***' in a URL.
+
+    Prevents FRED API keys from leaking into log output.
+    """
+    import re
+    return re.sub(r'([?&])api_key=[^&]*', r'\1api_key=***', url)
+
 # Key economic series and their display names
 MACRO_SERIES = {
     "CPIAUCSL": "CPI (All Urban Consumers)",
@@ -83,23 +92,25 @@ class FREDClient:
                     data = response.json()
                     break
             except (httpx.TimeoutException, httpx.ConnectError) as e:
+                safe_err = _sanitize_url(str(e))
                 if attempt < max_attempts - 1:
                     delay = backoff_delays[attempt]
-                    logger.debug(f"FRED API transient error for {series_id} (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {e}")
+                    logger.debug(f"FRED API transient error for {series_id} (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {safe_err}")
                     await asyncio.sleep(delay)
                 else:
-                    logger.warning(f"FRED API request failed for {series_id} after {max_attempts} attempts: {e}")
+                    logger.warning(f"FRED API request failed for {series_id} after {max_attempts} attempts: {safe_err}")
                     return None
             except httpx.HTTPStatusError as e:
+                safe_err = _sanitize_url(str(e))
                 if e.response.status_code >= 500 and attempt < max_attempts - 1:
                     delay = backoff_delays[attempt]
-                    logger.debug(f"FRED API server error for {series_id} (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {e}")
+                    logger.debug(f"FRED API server error for {series_id} (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s: {safe_err}")
                     await asyncio.sleep(delay)
                 else:
-                    logger.warning(f"FRED API request failed for {series_id}: {e}")
+                    logger.warning(f"FRED API request failed for {series_id}: {safe_err}")
                     return None
             except httpx.HTTPError as e:
-                logger.warning(f"FRED API request failed for {series_id}: {e}")
+                logger.warning(f"FRED API request failed for {series_id}: {_sanitize_url(str(e))}")
                 return None
 
         observations = data.get("observations", [])

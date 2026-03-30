@@ -185,8 +185,25 @@ class TestCheckAll:
         assert result.passed is False
         assert any("Edge too small" in c for c in result.failed_checks)
 
-    def test_fails_market_resolving_soon(self, engine, signal):
+    def test_fails_market_resolving_within_4_hours(self, engine, signal):
+        """M-5: Markets resolving in <4 hours are rejected outright."""
         expiring_market = Market(
+            ticker="FED-RATE-CUT-MAY26",
+            question="Resolving very soon",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.34),
+                MarketToken(token_id="no", outcome="No", price=0.66),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(hours=2),
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, expiring_market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+        assert any("<4 hours" in c for c in result.failed_checks)
+
+    def test_warns_market_resolving_under_1_day(self, engine, signal):
+        """M-5: Markets resolving in <1 day (but >4 hours) get a warning but pass."""
+        soon_market = Market(
             ticker="FED-RATE-CUT-MAY26",
             question="Resolving soon",
             tokens=[
@@ -196,9 +213,9 @@ class TestCheckAll:
             end_date=datetime.now(timezone.utc) + timedelta(hours=12),
             liquidity=50000,
         )
-        result = engine.check_all(signal, expiring_market, proposed_size=10, proposed_cost=3.40)
-        assert result.passed is False
-        assert any("<1 day" in c for c in result.failed_checks)
+        result = engine.check_all(signal, soon_market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is True
+        assert any("<1 day" in w for w in result.warnings)
 
     def test_fails_cooldown(self, engine, signal, market):
         engine.record_exit("FED-RATE-CUT-MAY26")
@@ -414,3 +431,168 @@ class TestEdgeProbabilityValidation:
         )
         result = engine.check_all(signal, market, proposed_size=5, proposed_cost=1.70)
         assert not any("implies market_price" in c for c in result.failed_checks)
+
+
+class TestExcludedCategory:
+    """H-1: Defense-in-depth — risk engine rejects markets in excluded categories."""
+
+    def test_rejects_crypto_category(self, engine, signal):
+        crypto_market = Market(
+            ticker="BTC-PRICE-100K",
+            question="Will BTC hit $100K?",
+            category=MarketCategory.CRYPTO,
+            tokens=[
+                MarketToken(token_id="BTC-yes", outcome="Yes", price=0.50),
+                MarketToken(token_id="BTC-no", outcome="No", price=0.50),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=30),
+            volume_24h=100000,
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, crypto_market, proposed_size=5, proposed_cost=2.50)
+        assert result.passed is False
+        assert any("Excluded category" in c for c in result.failed_checks)
+
+    def test_rejects_sports_category(self, engine, signal):
+        sports_market = Market(
+            ticker="NBA-FINALS",
+            question="Will the Lakers win?",
+            category=MarketCategory.SPORTS,
+            tokens=[
+                MarketToken(token_id="NBA-yes", outcome="Yes", price=0.40),
+                MarketToken(token_id="NBA-no", outcome="No", price=0.60),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=14),
+            volume_24h=100000,
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, sports_market, proposed_size=5, proposed_cost=2.00)
+        assert result.passed is False
+        assert any("Excluded category" in c for c in result.failed_checks)
+
+    def test_rejects_excluded_tag(self, engine, signal):
+        tagged_market = Market(
+            ticker="SOME-MARKET",
+            question="Some crypto question",
+            category=MarketCategory.OTHER,
+            tags=["Crypto Prices", "Bitcoin"],
+            tokens=[
+                MarketToken(token_id="SOME-yes", outcome="Yes", price=0.50),
+                MarketToken(token_id="SOME-no", outcome="No", price=0.50),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=30),
+            volume_24h=100000,
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, tagged_market, proposed_size=5, proposed_cost=2.50)
+        assert result.passed is False
+        assert any("Excluded category" in c for c in result.failed_checks)
+
+    def test_allows_politics_category(self, engine, signal, market):
+        """Politics is an allowed category — should not be blocked."""
+        market.category = MarketCategory.POLITICS
+        result = engine.check_all(signal, market, proposed_size=5, proposed_cost=1.70)
+        assert not any("Excluded category" in c for c in result.failed_checks)
+
+    def test_allows_fed_macro_category(self, engine, signal, market):
+        market.category = MarketCategory.FED_MACRO
+        result = engine.check_all(signal, market, proposed_size=5, proposed_cost=1.70)
+        assert not any("Excluded category" in c for c in result.failed_checks)
+
+    def test_case_insensitive_match(self, engine, signal):
+        """Exclusion matching should be case-insensitive."""
+        market = Market(
+            ticker="CRYPTO-TEST",
+            question="Test",
+            category=MarketCategory.CRYPTO,
+            tokens=[
+                MarketToken(token_id="t-yes", outcome="Yes", price=0.50),
+                MarketToken(token_id="t-no", outcome="No", price=0.50),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=30),
+            volume_24h=100000,
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, market, proposed_size=5, proposed_cost=2.50)
+        assert result.passed is False
+
+
+class TestResolutionDateBoundaries:
+    """M-5: Markets resolving within 4 hours are rejected, <1 day warns."""
+
+    def test_rejects_market_resolving_in_2_hours(self, engine, signal):
+        market = Market(
+            ticker="FED-RATE-CUT-MAY26",
+            question="Imminently resolving",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.34),
+                MarketToken(token_id="no", outcome="No", price=0.66),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(hours=2),
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+        assert any("<4 hours" in c for c in result.failed_checks)
+
+    def test_rejects_market_resolving_in_3_hours(self, engine, signal):
+        market = Market(
+            ticker="FED-RATE-CUT-MAY26",
+            question="Resolving in 3 hours",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.34),
+                MarketToken(token_id="no", outcome="No", price=0.66),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(hours=3),
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is False
+        assert any("<4 hours" in c for c in result.failed_checks)
+
+    def test_warns_market_resolving_in_6_hours(self, engine, signal):
+        """6 hours = 0.25 days: above 4h threshold but below 1 day -> warning, not failure."""
+        market = Market(
+            ticker="FED-RATE-CUT-MAY26",
+            question="Resolving in 6 hours",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.34),
+                MarketToken(token_id="no", outcome="No", price=0.66),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(hours=6),
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
+        assert result.passed is True
+        assert any("<1 day" in w for w in result.warnings)
+
+    def test_boundary_at_4_hours(self, engine, signal):
+        """Exactly at the 4-hour boundary (0.167 days) should pass (>= 0.167)."""
+        market = Market(
+            ticker="FED-RATE-CUT-MAY26",
+            question="Resolving at boundary",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.34),
+                MarketToken(token_id="no", outcome="No", price=0.66),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(hours=4, minutes=5),
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
+        # Should not fail on resolution date (but may warn <1 day)
+        assert not any("<4 hours" in c for c in result.failed_checks)
+
+    def test_passes_market_resolving_in_2_days(self, engine, signal):
+        market = Market(
+            ticker="FED-RATE-CUT-MAY26",
+            question="Normal resolution",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.34),
+                MarketToken(token_id="no", outcome="No", price=0.66),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=2),
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
+        assert not any("<4 hours" in c for c in result.failed_checks)
+        assert not any("<1 day" in w for w in result.warnings)

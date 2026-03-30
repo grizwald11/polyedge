@@ -465,11 +465,20 @@ class PositionManager:
         else:
             max_gain = position.avg_entry_price * position.size
         if max_gain > 0 and position.unrealized_pnl >= max_gain * effective_take_profit:
-            return True, (
-                f"take_profit: captured {position.unrealized_pnl / max_gain:.0%} of max gain "
-                f"(${position.unrealized_pnl:.2f} / ${max_gain:.2f}, "
-                f"threshold {effective_take_profit:.0%} incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
-            )
+            # M-4: Require fresh price data (<2 min) for take-profit to avoid false exits
+            # after WebSocket fills when price data may not yet be refreshed.
+            price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
+            if price_age > 120:
+                logger.warning(
+                    f"Take-profit blocked by stale price for {position.market_id}: "
+                    f"gain={position.unrealized_pnl / max_gain:.0%}, price age={price_age:.0f}s"
+                )
+            else:
+                return True, (
+                    f"take_profit: captured {position.unrealized_pnl / max_gain:.0%} of max gain "
+                    f"(${position.unrealized_pnl:.2f} / ${max_gain:.2f}, "
+                    f"threshold {effective_take_profit:.0%} incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
+                )
 
         # 4. Time-based exit
         now = datetime.now(timezone.utc)
@@ -490,10 +499,19 @@ class PositionManager:
         if market is not None:
             remaining_edge = self._calculate_remaining_edge(position, market)
             if remaining_edge < effective_edge_gone:
-                return True, (
-                    f"edge_gone: remaining edge {remaining_edge:.1%} < "
-                    f"{effective_edge_gone:.1%} threshold (incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
-                )
+                # M-4: Require fresh price data (<2 min) for edge-gone to avoid false exits
+                # after WebSocket fills when price data may not yet be refreshed.
+                price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
+                if price_age > 120:
+                    logger.debug(
+                        f"Skipping edge_gone for {position.market_id}: "
+                        f"price data stale ({price_age:.0f}s old)"
+                    )
+                else:
+                    return True, (
+                        f"edge_gone: remaining edge {remaining_edge:.1%} < "
+                        f"{effective_edge_gone:.1%} threshold (incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
+                    )
 
         # 6. Capital rotation: when portfolio is crowded, exit profitable positions
         #    where most of the edge has been captured to free capital for new trades.

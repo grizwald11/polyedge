@@ -41,6 +41,7 @@ class KalshiClient:
         private_key_path: Optional[str] = None,
         max_concurrent: int = 5,
         min_request_interval: float = 0.1,
+        metrics: Optional[Any] = None,
     ):
         self.host = host.rstrip("/")
         self.api_key_id = api_key_id
@@ -56,6 +57,7 @@ class KalshiClient:
         self._circuit_breaker_triggers: int = 0  # M-10: track for exponential backoff
         self._circuit_open_until: float = 0.0
         self._recovery_successes: int = 0  # L-1: half-open circuit breaker recovery
+        self._metrics = metrics  # L-5: Optional Metrics instance for latency tracking
 
     def _load_private_key(self):
         """Load the RSA private key for API signing.
@@ -208,6 +210,7 @@ class KalshiClient:
             for attempt in range(max_retries):
                 try:
                     headers = self._auth_headers(method, path)
+                    _req_start = time.monotonic()
                     if method.upper() == "GET":
                         resp = await client.get(path, params=params, headers=headers)
                     elif method.upper() == "POST":
@@ -216,6 +219,10 @@ class KalshiClient:
                         resp = await client.delete(path, headers=headers)
                     else:
                         raise ValueError(f"Unsupported method: {method}")
+                    # L-5: Record API latency if metrics available
+                    if self._metrics is not None:
+                        _latency_ms = (time.monotonic() - _req_start) * 1000
+                        self._metrics.record_api_latency(path, _latency_ms)
 
                     if resp.status_code == 429:
                         if attempt < max_retries - 1:

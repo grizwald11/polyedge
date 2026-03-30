@@ -147,6 +147,14 @@ class NewsConfig(BaseModel):
     poll_interval_seconds: int = 120
     min_relevance: float = 0.3
     max_article_age_minutes: int = 30
+    serper_url: str = "https://google.serper.dev/search"
+    staleness_thresholds: dict[str, int] = Field(default_factory=lambda: {
+        "Fed/Macro": 5,
+        "Tech/AI": 10,
+        "Geopolitics": 7,
+        "Politics": 14,
+        "Culture": 30,
+    })
 
 
 class WhaleConfig(BaseModel):

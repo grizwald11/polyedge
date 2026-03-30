@@ -108,6 +108,66 @@ def _parse_dollar_str(value: Any) -> float:
         return 0.0
 
 
+def _parse_prices(raw: dict[str, Any]) -> tuple[float, float, float]:
+    """Extract (yes_price, no_price, spread) from a raw Kalshi market dict.
+
+    Uses *_dollars fields (dollar strings) with midpoint fallback to last_price.
+    Returns prices clamped to [0, 1] and spread >= 0.
+    """
+    yes_bid = _parse_dollar_str(raw.get("yes_bid_dollars") or raw.get("yes_bid"))
+    yes_ask = _parse_dollar_str(raw.get("yes_ask_dollars") or raw.get("yes_ask"))
+    no_bid = _parse_dollar_str(raw.get("no_bid_dollars") or raw.get("no_bid"))
+    no_ask = _parse_dollar_str(raw.get("no_ask_dollars") or raw.get("no_ask"))
+    last_price = _parse_dollar_str(raw.get("last_price_dollars") or raw.get("last_price"))
+
+    # Determine YES price: prefer midpoint of bid/ask, fall back to last_price
+    if yes_bid > 0 and yes_ask > 0:
+        yes_price = (yes_bid + yes_ask) / 2
+    elif last_price > 0:
+        yes_price = last_price
+    else:
+        yes_price = yes_bid or yes_ask
+
+    # NO price: complement of YES, or from bid/ask
+    if yes_price > 0:
+        no_price = 1.0 - yes_price
+    elif no_bid > 0 and no_ask > 0:
+        no_price = (no_bid + no_ask) / 2
+    else:
+        no_price = no_bid or no_ask
+
+    # Clamp to valid range
+    yes_price = max(0.0, min(1.0, round(yes_price, 4)))
+    no_price = max(0.0, min(1.0, round(no_price, 4)))
+
+    # Spread — negative spread (bid > ask) indicates stale/crossed orderbook
+    spread = 0.0
+    if yes_bid > 0 and yes_ask > 0:
+        spread = round(yes_ask - yes_bid, 4)
+        if spread < 0:
+            ticker = raw.get("ticker", "?")
+            logger.debug(f"Negative spread for {ticker}: bid={yes_bid}, ask={yes_ask} — orderbook crossed")
+            spread = 0.0
+
+    return yes_price, no_price, spread
+
+
+def _parse_status(raw: dict[str, Any]) -> tuple[str, bool, bool]:
+    """Normalize Kalshi market status to (status_str, active, closed).
+
+    Known statuses: open, active, closed, halted, settled, finalized, determined.
+    """
+    status_str = raw.get("status", "active")
+    known_statuses = {"open", "active", "closed", "halted", "settled", "finalized", "determined"}
+    if status_str not in known_statuses:
+        ticker = raw.get("ticker", "?")
+        logger.debug(f"Unknown market status '{status_str}' for {ticker} — treating as inactive")
+    # "halted" markets are non-tradeable (treated same as closed)
+    active = status_str in ("open", "active")
+    closed = status_str in ("closed", "halted", "settled", "finalized", "determined")
+    return status_str, active, closed
+
+
 def parse_market(raw: dict[str, Any], event_category: str = "") -> Optional[Market]:
     """Parse a raw Kalshi API market response into a Market model.
 
@@ -133,32 +193,8 @@ def parse_market(raw: dict[str, Any], event_category: str = "") -> Optional[Mark
         else:
             category = classify_market_category(full_text, tags)
 
-        # Prices — Kalshi uses *_dollars fields (dollar strings)
-        yes_bid = _parse_dollar_str(raw.get("yes_bid_dollars") or raw.get("yes_bid"))
-        yes_ask = _parse_dollar_str(raw.get("yes_ask_dollars") or raw.get("yes_ask"))
-        no_bid = _parse_dollar_str(raw.get("no_bid_dollars") or raw.get("no_bid"))
-        no_ask = _parse_dollar_str(raw.get("no_ask_dollars") or raw.get("no_ask"))
-        last_price = _parse_dollar_str(raw.get("last_price_dollars") or raw.get("last_price"))
-
-        # Determine YES price: prefer midpoint of bid/ask, fall back to last_price
-        if yes_bid > 0 and yes_ask > 0:
-            yes_price = (yes_bid + yes_ask) / 2
-        elif last_price > 0:
-            yes_price = last_price
-        else:
-            yes_price = yes_bid or yes_ask
-
-        # NO price: complement of YES, or from bid/ask
-        if yes_price > 0:
-            no_price = 1.0 - yes_price
-        elif no_bid > 0 and no_ask > 0:
-            no_price = (no_bid + no_ask) / 2
-        else:
-            no_price = no_bid or no_ask
-
-        # Clamp to valid range
-        yes_price = max(0.0, min(1.0, round(yes_price, 4)))
-        no_price = max(0.0, min(1.0, round(no_price, 4)))
+        # Prices — delegated to helper
+        yes_price, no_price, spread = _parse_prices(raw)
 
         tokens = [
             MarketToken(token_id=f"{ticker}_yes", outcome="Yes", price=yes_price),
@@ -183,23 +219,8 @@ def parse_market(raw: dict[str, Any], event_category: str = "") -> Optional[Mark
         liquidity_dollars = _parse_dollar_str(raw.get("liquidity_dollars") or raw.get("liquidity"))
         liquidity = max(open_interest, liquidity_dollars)
 
-        # Spread — negative spread (bid > ask) indicates stale/crossed orderbook
-        spread = 0.0
-        if yes_bid > 0 and yes_ask > 0:
-            spread = round(yes_ask - yes_bid, 4)
-            if spread < 0:
-                logger.debug(f"Negative spread for {ticker}: bid={yes_bid}, ask={yes_ask} — orderbook crossed")
-                spread = 0.0
-
-        # Status — Kalshi uses "active", "closed", "settled"
-        # M-3: Canonical status set defined in models.MarketStatus enum
-        status_str = raw.get("status", "active")
-        known_statuses = {"open", "active", "closed", "halted", "settled", "finalized", "determined"}
-        if status_str not in known_statuses:
-            logger.debug(f"Unknown market status '{status_str}' for {ticker} — treating as inactive")
-        # M-4: "halted" markets are non-tradeable (treated same as closed)
-        active = status_str in ("open", "active")
-        closed = status_str in ("closed", "halted", "settled", "finalized", "determined")
+        # Status — delegated to helper
+        status_str, active, closed = _parse_status(raw)
 
         return Market(
             ticker=ticker,

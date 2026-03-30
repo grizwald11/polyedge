@@ -8,8 +8,16 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
-def register_api_routes(app, *, db, metrics, position_manager, calibration_tracker, circuit_breaker, bankroll):
+def register_api_routes(app, *, db, metrics, position_manager, calibration_tracker, circuit_breaker, bankroll) -> None:
     """Register all JSON API routes on the FastAPI app."""
+    _register_portfolio_routes(app, db=db, position_manager=position_manager)
+    _register_signal_routes(app, db=db, calibration_tracker=calibration_tracker)
+    _register_calibration_routes(app, db=db, calibration_tracker=calibration_tracker)
+    _register_risk_routes(app, db=db, metrics=metrics, position_manager=position_manager, circuit_breaker=circuit_breaker)
+
+
+def _register_portfolio_routes(app, *, db, position_manager) -> None:
+    """Register portfolio-related API routes."""
 
     @app.get("/api/stats")
     async def api_stats():
@@ -42,6 +50,39 @@ def register_api_routes(app, *, db, metrics, position_manager, calibration_track
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return db.get_trades_for_date(today)
 
+    @app.get("/api/portfolio")
+    async def api_portfolio():
+        stats = db.get_stats()
+        summary = db.get_portfolio_summary()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        daily_pnl = db.get_daily_pnl(today)
+        cb_state = db.load_circuit_breaker_state()
+
+        if position_manager is not None:
+            unrealized = position_manager.get_total_unrealized_pnl()
+            open_positions = position_manager.get_position_count()
+            exposure = position_manager.get_total_exposure()
+        else:
+            db_positions = db.get_positions_with_pnl()
+            unrealized = sum(p["unrealized_pnl"] for p in db_positions)
+            open_positions = len(db_positions)
+            exposure = sum(p["cost_basis"] for p in db_positions)
+
+        return {
+            **stats,
+            **summary,
+            "daily_pnl": daily_pnl,
+            "unrealized_pnl": round(unrealized, 2),
+            "total_pnl_incl_unrealized": round(summary.get("total_pnl", 0) + unrealized, 2),
+            "open_positions": open_positions,
+            "exposure": round(exposure, 2),
+            "circuit_breaker": cb_state,
+        }
+
+
+def _register_signal_routes(app, *, db, calibration_tracker) -> None:
+    """Register signal and strategy API routes."""
+
     @app.get("/api/signals")
     async def api_signals():
         return db.get_recent_signals(limit=50)
@@ -62,6 +103,10 @@ def register_api_routes(app, *, db, metrics, position_manager, calibration_track
                     logger.debug(f"Brier score lookup failed for {s.get('strategy')}: {e}")
                     s["brier_score"] = None
         return stats
+
+
+def _register_calibration_routes(app, *, db, calibration_tracker) -> None:
+    """Register calibration API routes."""
 
     @app.get("/api/calibration")
     async def api_calibration():
@@ -96,6 +141,10 @@ def register_api_routes(app, *, db, metrics, position_manager, calibration_track
             return calibration_tracker.get_accuracy_by_category()
         return {}
 
+
+def _register_risk_routes(app, *, db, metrics, position_manager, circuit_breaker) -> None:
+    """Register risk, health, and monitoring API routes."""
+
     @app.get("/api/risk")
     async def api_risk():
         """Exposure levels, halt status."""
@@ -125,35 +174,6 @@ def register_api_routes(app, *, db, metrics, position_manager, calibration_track
     async def api_whale_activity():
         """Recent whale trades."""
         return db.get_whale_activity(limit=50)
-
-    @app.get("/api/portfolio")
-    async def api_portfolio():
-        stats = db.get_stats()
-        summary = db.get_portfolio_summary()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        daily_pnl = db.get_daily_pnl(today)
-        cb_state = db.load_circuit_breaker_state()
-
-        if position_manager is not None:
-            unrealized = position_manager.get_total_unrealized_pnl()
-            open_positions = position_manager.get_position_count()
-            exposure = position_manager.get_total_exposure()
-        else:
-            db_positions = db.get_positions_with_pnl()
-            unrealized = sum(p["unrealized_pnl"] for p in db_positions)
-            open_positions = len(db_positions)
-            exposure = sum(p["cost_basis"] for p in db_positions)
-
-        return {
-            **stats,
-            **summary,
-            "daily_pnl": daily_pnl,
-            "unrealized_pnl": round(unrealized, 2),
-            "total_pnl_incl_unrealized": round(summary.get("total_pnl", 0) + unrealized, 2),
-            "open_positions": open_positions,
-            "exposure": round(exposure, 2),
-            "circuit_breaker": cb_state,
-        }
 
     @app.get("/api/health")
     async def api_health():

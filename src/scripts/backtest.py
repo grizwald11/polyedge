@@ -35,7 +35,7 @@ async def fetch_settled_events(
     kalshi: KalshiClient,
     max_events: int = 200,
 ) -> list[dict]:
-    """Fetch recently settled events with nested markets from Kalshi API.
+    """Fetch settled events from Kalshi for backtesting.
 
     Returns raw market dicts tagged with event category (same format as
     MarketDiscovery.get_all_active_markets).
@@ -162,7 +162,7 @@ async def run_backtest(
     delay: float = 2.0,
     dry_run: bool = False,
 ) -> None:
-    """Run the full backtest pipeline."""
+    """Run blind Claude assessments on settled markets and calculate accuracy."""
     # Initialize clients
     kalshi = KalshiClient(
         host=settings.kalshi.active_host,
@@ -209,6 +209,8 @@ async def run_backtest(
         news_researcher = NewsResearcher(
             serper_api_key=settings.serper_api_key,
             searxng_url=settings.searxng_url,
+            serper_url=settings.news.serper_url,
+            staleness_thresholds=settings.news.staleness_thresholds,
         )
 
         # Step 4: Process each market

@@ -36,7 +36,7 @@ def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log")
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
-async def _sync_bankroll(settings, kalshi, risk_engine, position_manager, bankroll, logger):
+async def _sync_bankroll(settings, kalshi, risk_engine, position_manager, bankroll, logger) -> None:
     """Re-sync bankroll from Kalshi balance in live mode."""
     if settings.trading.mode != "live":
         return bankroll

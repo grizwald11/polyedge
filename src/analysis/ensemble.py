@@ -35,7 +35,7 @@ def ensemble_forecast(
     market_price: float,
     claude_weight: float = 0.85,
 ) -> EnsembleForecast:
-    """Combine Claude's estimate with market price using extremal adjustment.
+    """Combine Claude forecast with market price using adaptive weights.
 
     The ensemble applies a weighted average biased toward Claude but pulled
     toward the market price for humility. This prevents overconfidence
@@ -113,7 +113,7 @@ def multi_model_ensemble(
     category: str = "",
     category_brier_scores: Optional[dict[str, dict[str, float]]] = None,
 ) -> EnsembleForecast:
-    """Combine multiple model forecasts with Brier-score-weighted averaging.
+    """Combine multiple model forecasts using Brier-score-weighted averaging.
 
     When Brier scores are available, models with better historical accuracy
     get higher weights. The market price is included as an additional source

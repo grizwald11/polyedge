@@ -172,64 +172,76 @@ async def run_trading_loop(
             pass  # Normal timeout — proceed to next cycle
 
 
-async def main():
-    """Main entry point."""
-    if not _acquire_pid_lock():
-        logging.critical("Another PolyEdge instance is already running (PID lock exists). Exiting.")
-        sys.exit(1)
+class _Components:
+    """Container for all initialized components, used to pass them between lifecycle stages."""
 
-    settings = load_settings()
-    setup_logging(settings.logging.level, settings.logging.file)
-    logger = logging.getLogger("polyedge.main")
+    def __init__(self) -> None:
+        self.db: Database | None = None
+        self.kalshi: KalshiClient | None = None
+        self.discovery: MarketDiscovery | None = None
+        self.scanner: MarketScanner | None = None
+        self.forecaster: ClaudeForecaster | None = None
+        self.calibration: CalibrationTracker | None = None
+        self.resolution_tracker: ResolutionTracker | None = None
+        self.calibration_analyzer: CalibrationAnalyzer | None = None
+        self.data_enricher: DataEnricher | None = None
+        self.ai_strategy: AIProbabilityStrategy | None = None
+        self.no_strategy: ObviousNoStrategy | None = None
+        self.news_strategy: NewsReactiveStrategy | None = None
+        self.cross_arb_strategy: CrossArbStrategy | None = None
+        self.whale_strategy: WhaleTrackerStrategy | None = None
+        self.market_graph: MarketGraph | None = None
+        self.portfolio_risk: PortfolioRisk | None = None
+        self.poly_scanner = None
+        self.cross_platform_arb: CrossPlatformArbStrategy | None = None
+        self.polymarket_client = None
+        self.order_builder: OrderBuilder | None = None
+        self.position_manager: PositionManager | None = None
+        self.order_router: OrderRouter | None = None
+        self.fill_tracker: FillTracker | None = None
+        self.alert_manager: AlertManager | None = None
+        self.daily_report: DailyReport | None = None
+        self.circuit_breaker: CircuitBreaker | None = None
+        self.kelly_sizer: KellySizer | None = None
+        self.risk_engine: RiskEngine | None = None
+        self.metrics: Metrics | None = None
+        self.ws_client: KalshiWebSocket | None = None
+        self.ws_task = None
+        self.dashboard_task = None
+        self.kalshi_healthy: bool = False
 
-    # Validate required API keys early
-    settings.validate_required_keys()
 
-    logger.info("=" * 60)
-    logger.info("PolyEdge Starting — Phase 3: Paper Trading")
-    logger.info(f"  Mode: {settings.trading.mode}")
-    logger.info(f"  Bankroll: ${settings.trading.bankroll:,.2f}")
-    logger.info(f"  Kelly fraction: {settings.trading.kelly_fraction}")
-    logger.info(f"  Max position: {settings.trading.max_position_pct:.0%}")
-    logger.info(f"  Daily loss limit: {settings.trading.daily_loss_limit_pct:.0%}")
-    logger.info(f"  Scan interval: {settings.scanning.interval_seconds}s")
-    logger.info(f"  Kalshi API: {settings.kalshi.active_host}")
-    logger.info(f"  Polymarket: {'enabled' if settings.polymarket.enabled else 'disabled'}")
-    logger.info("=" * 60)
+async def _initialize_services(settings, logger) -> _Components:
+    """Initialize all core services: database, API clients, analysis, data enrichment."""
+    c = _Components()
+    c.db = Database(settings.database.path, settings.database.wal_mode)
 
-    # Initialize core components
-    db = Database(settings.database.path, settings.database.wal_mode)
-
-    kalshi = KalshiClient(
+    c.kalshi = KalshiClient(
         host=settings.kalshi.active_host,
         api_key_id=settings.kalshi_api_key_id,
         private_key_path=settings.kalshi_private_key_path,
     )
 
-    # Check Kalshi API health
-    healthy = await kalshi.health_check()
-    if healthy:
+    c.kalshi_healthy = await c.kalshi.health_check()
+    if c.kalshi_healthy:
         logger.info("Kalshi API: healthy")
     else:
         logger.warning("Kalshi API: unreachable (continuing in offline mode)")
 
     if settings.kalshi_api_key_id and settings.kalshi_private_key_path:
-        balance = await kalshi.get_balance()
+        balance = await c.kalshi.get_balance()
         if balance is not None:
             logger.info(f"Account balance: ${balance:,.2f}")
 
-    # Market discovery and scanning
-    discovery = MarketDiscovery(kalshi)
-    scanner = MarketScanner(discovery, db, settings)
+    c.discovery = MarketDiscovery(c.kalshi)
+    c.scanner = MarketScanner(c.discovery, c.db, settings)
 
-    # Analysis — validate Anthropic key early to fail fast
     if not settings.anthropic_api_key:
         logger.error("ANTHROPIC_API_KEY not set — Claude forecasting will not work")
-    forecaster = ClaudeForecaster(settings)
-    # Validate Anthropic API key works before starting trading loop
+    c.forecaster = ClaudeForecaster(settings)
     if settings.anthropic_api_key:
         try:
-            await forecaster.health_check()
+            await c.forecaster.health_check()
             logger.info("Anthropic API: key validated successfully")
         except Exception as e:
             logger.critical(
@@ -240,23 +252,19 @@ async def main():
                 "Check ANTHROPIC_API_KEY and API status at https://status.anthropic.com",
                 exc_info=True,
             )
-    calibration = CalibrationTracker(db)
-    resolution_tracker = ResolutionTracker(kalshi, db)
-    calibration_analyzer = CalibrationAnalyzer(db)
+    c.calibration = CalibrationTracker(c.db)
+    c.resolution_tracker = ResolutionTracker(c.kalshi, c.db)
+    c.calibration_analyzer = CalibrationAnalyzer(c.db)
+    c.data_enricher = DataEnricher(settings)
+    return c
 
-    # Data enrichment
-    data_enricher = DataEnricher(settings)
 
-    # Strategies — core
-    ai_strategy = AIProbabilityStrategy(forecaster, settings, db, calibration_analyzer, data_enricher)
-    no_strategy = ObviousNoStrategy(settings)
-
-    # Strategies — optional (gracefully skip if deps missing)
-    news_strategy: NewsReactiveStrategy | None = None
-    cross_arb_strategy: CrossArbStrategy | None = None
-    whale_strategy: WhaleTrackerStrategy | None = None
-    market_graph: MarketGraph | None = None
-    portfolio_risk: PortfolioRisk | None = None
+async def _setup_strategies(settings, c: _Components, logger) -> None:
+    """Initialize all trading strategies (core + optional)."""
+    c.ai_strategy = AIProbabilityStrategy(
+        c.forecaster, settings, c.db, c.calibration_analyzer, c.data_enricher,
+    )
+    c.no_strategy = ObviousNoStrategy(settings)
 
     try:
         news_ingestion = NewsIngestion(
@@ -264,22 +272,22 @@ async def main():
             max_article_age_minutes=settings.news.max_article_age_minutes,
             min_relevance=settings.news.min_relevance,
         )
-        news_strategy = NewsReactiveStrategy(forecaster, news_ingestion, settings, db)
+        c.news_strategy = NewsReactiveStrategy(c.forecaster, news_ingestion, settings, c.db)
         logger.info("News-reactive strategy enabled")
     except Exception as e:
         logger.info(f"News-reactive strategy disabled: {e}")
 
     try:
-        market_graph = MarketGraph()
-        cross_arb_strategy = CrossArbStrategy(market_graph, forecaster, settings, db)
+        c.market_graph = MarketGraph()
+        c.cross_arb_strategy = CrossArbStrategy(c.market_graph, c.forecaster, settings, c.db)
         logger.info("Cross-arb strategy enabled")
     except Exception as e:
         logger.info(f"Cross-arb strategy disabled: {e}")
 
     try:
-        whale_monitor = WhaleMonitor(settings, db)
+        whale_monitor = WhaleMonitor(settings, c.db)
         if whale_monitor.basket_size > 0:
-            whale_strategy = WhaleTrackerStrategy(whale_monitor, settings, db)
+            c.whale_strategy = WhaleTrackerStrategy(whale_monitor, settings, c.db)
             logger.info(f"Whale tracker strategy enabled ({whale_monitor.basket_size} whales)")
         else:
             logger.info("Whale tracker strategy disabled: empty basket")
@@ -287,9 +295,6 @@ async def main():
         logger.info(f"Whale tracker strategy disabled: {e}")
 
     # Polymarket integration (conditional)
-    poly_scanner = None
-    cross_platform_arb: CrossPlatformArbStrategy | None = None
-    polymarket_client = None
     if settings.polymarket.enabled:
         try:
             from src.core.polymarket_client import PolymarketClient
@@ -300,38 +305,39 @@ async def main():
             poly_discovery = PolymarketDiscovery(settings.polymarket.gamma_host)
 
             if settings.polymarket_private_key:
-                polymarket_client = PolymarketClient(
+                c.polymarket_client = PolymarketClient(
                     host=settings.polymarket.clob_host,
                     private_key=settings.polymarket_private_key,
                     chain_id=settings.polymarket.chain_id,
                     signature_type=settings.polymarket.signature_type,
                 )
-                await polymarket_client.initialize()
+                await c.polymarket_client.initialize()
                 logger.info("Polymarket client initialized (trading enabled)")
             else:
                 logger.info("Polymarket: no private key — read-only mode (scanning only)")
 
-            poly_scanner = PolymarketScanner(poly_discovery, db, settings)
+            c.poly_scanner = PolymarketScanner(poly_discovery, c.db, settings)
             logger.info("Polymarket scanner enabled")
 
             cross_ref = PolymarketCrossRef(ttl_seconds=300)
-            cross_platform_arb = CrossPlatformArbStrategy(settings, db, cross_ref)
+            c.cross_platform_arb = CrossPlatformArbStrategy(settings, c.db, cross_ref)
             logger.info("Cross-platform arbitrage strategy enabled")
 
-            # Enable Polymarket resolution tracking
-            resolution_tracker.polymarket_discovery = poly_discovery
+            c.resolution_tracker.polymarket_discovery = poly_discovery
         except Exception as e:
             logger.warning(f"Polymarket integration failed to initialize: {e}")
-            poly_scanner = None
-            cross_platform_arb = None
-            polymarket_client = None
+            c.poly_scanner = None
+            c.cross_platform_arb = None
+            c.polymarket_client = None
     else:
         logger.info("Polymarket integration disabled (polymarket.enabled=false)")
 
-    # Execution
-    order_builder = OrderBuilder(settings)
-    position_manager = PositionManager(
-        db,
+
+async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
+    """Initialize execution layer, risk management, and alerts."""
+    c.order_builder = OrderBuilder(settings)
+    c.position_manager = PositionManager(
+        c.db,
         bankroll=settings.trading.bankroll,
         stop_loss_pct=settings.execution.stop_loss_pct,
         max_hold_days=settings.execution.max_hold_days,
@@ -341,23 +347,30 @@ async def main():
         take_profit_pct=settings.execution.take_profit_pct,
         capital_rotation_edge=settings.execution.capital_rotation_edge,
     )
-    order_router = OrderRouter(settings, kalshi, db, position_manager=position_manager, polymarket=polymarket_client)
-    fill_tracker = FillTracker(kalshi, db, poll_timeout=settings.execution.order_poll_timeout_seconds, polymarket=polymarket_client)
+    c.order_router = OrderRouter(
+        settings, c.kalshi, c.db,
+        position_manager=c.position_manager,
+        polymarket=c.polymarket_client,
+    )
+    c.fill_tracker = FillTracker(
+        c.kalshi, c.db,
+        poll_timeout=settings.execution.order_poll_timeout_seconds,
+        polymarket=c.polymarket_client,
+    )
 
     try:
-        portfolio_risk = PortfolioRisk(position_manager, db)
+        c.portfolio_risk = PortfolioRisk(c.position_manager, c.db)
     except Exception as e:
         logger.info(f"Portfolio risk module disabled: {e}")
 
     # Sync positions with Kalshi on startup (live mode only)
-    if settings.trading.mode == "live" and healthy:
-        mismatches = await position_manager.sync_with_kalshi(kalshi)
+    if settings.trading.mode == "live" and c.kalshi_healthy:
+        mismatches = await c.position_manager.sync_with_kalshi(c.kalshi)
         if mismatches:
             logger.warning(f"Position sync found {mismatches} mismatches — review manually")
 
-        # M-25: Check for orphaned orders from a previous crash
         try:
-            open_orders = await asyncio.wait_for(kalshi.get_open_orders(), timeout=10.0)
+            open_orders = await asyncio.wait_for(c.kalshi.get_open_orders(), timeout=10.0)
             if open_orders:
                 logger.warning(
                     f"Found {len(open_orders)} open orders on Kalshi at startup — "
@@ -368,78 +381,63 @@ async def main():
             logger.info(f"Could not check for orphaned orders: {e}")
 
     # Alerts
-    alert_manager = AlertManager()
-    alert_manager.register(LogBackend())
+    c.alert_manager = AlertManager()
+    c.alert_manager.register(LogBackend())
     if settings.alerts.imessage_enabled and settings.alerts.imessage_endpoint:
-        alert_manager.register(IMessageBackend(settings.alerts.imessage_endpoint))
+        c.alert_manager.register(IMessageBackend(settings.alerts.imessage_endpoint))
         logger.info(f"iMessage alerts enabled: {settings.alerts.imessage_endpoint}")
-    daily_report = DailyReport(db, alert_manager, settings)
+    c.daily_report = DailyReport(c.db, c.alert_manager, settings)
 
     # Risk
-    circuit_breaker = CircuitBreaker(settings, db)
-    kelly_sizer = KellySizer(settings)
-    risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db, portfolio_risk)
-    risk_engine.restore_bankroll()  # Restore live-synced bankroll from DB
+    c.circuit_breaker = CircuitBreaker(settings, c.db)
+    c.kelly_sizer = KellySizer(settings)
+    c.risk_engine = RiskEngine(
+        settings, c.position_manager, c.circuit_breaker, c.db, c.portfolio_risk,
+    )
+    c.risk_engine.restore_bankroll()
 
     # Metrics
-    metrics = Metrics()
+    c.metrics = Metrics()
+    # L-5: Wire metrics into KalshiClient for API latency tracking
+    c.kalshi._metrics = c.metrics
 
-    # Run initial scan
-    logger.info("Running initial scan cycle...")
-    markets = await scanner.run_scan_cycle()
-    logger.info(f"Initial scan: {len(markets)} qualifying markets")
 
-    for i, m in enumerate(markets[:10], 1):
-        logger.info(
-            f"  #{i:2d} [{m.category.value:12s}] "
-            f"YES={m.yes_price:.2f} NO={m.no_price:.2f} "
-            f"vol=${m.volume_24h:>10,.0f} | "
-            f"{m.question[:65]}"
-        )
-
+async def _setup_background_tasks(settings, c: _Components, logger) -> None:
+    """Start WebSocket client and dashboard as background tasks."""
     # Start WebSocket for real-time price feeds
-    ws_client: KalshiWebSocket | None = None
-    ws_task = None
     if settings.kalshi_api_key_id and settings.kalshi_private_key_path:
         try:
-            # Build WebSocket URL: strip the REST path suffix and add WS path
             base = settings.kalshi.active_host.replace("https://", "wss://")
-            # Remove /trade-api/v2 or /v2 suffix if present to get the base host
             for suffix in ("/trade-api/v2", "/v2"):
                 if base.endswith(suffix):
                     base = base[:-len(suffix)]
                     break
             ws_host = base.rstrip("/") + "/trade-api/ws/v2"
-            ws_client = KalshiWebSocket(
+            c.ws_client = KalshiWebSocket(
                 host=ws_host,
                 api_key_id=settings.kalshi_api_key_id,
                 private_key_path=settings.kalshi_private_key_path,
             )
-            ws_client.set_channels(["ticker", "fill", "market_lifecycle_v2"])
+            c.ws_client.set_channels(["ticker", "fill", "market_lifecycle_v2"])
 
             async def _on_price(update: TickerUpdate):
-                # Use yes_bid as the YES price when available (more accurate than last trade)
                 yes_price = update.yes_bid if update.yes_bid > 0 else update.price
                 no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
-                position_manager.update_price(update.market_ticker, yes_price, no_price)
+                c.position_manager.update_price(update.market_ticker, yes_price, no_price)
 
             async def _on_fill(update: FillUpdate):
-                trade = await fill_tracker.handle_ws_fill(update)
+                trade = await c.fill_tracker.handle_ws_fill(update)
                 if trade:
-                    position_manager.update_from_trade(trade)
+                    c.position_manager.update_from_trade(trade)
 
             async def _on_ws_reconnect():
-                """Sync tracked market statuses via REST after WebSocket reconnects.
-
-                Markets may have closed or settled while disconnected — query
-                Kalshi REST API to catch any missed lifecycle changes.
-                """
+                """Sync tracked market statuses via REST after WebSocket reconnects."""
                 logger.info("WebSocket reconnected — syncing tracked market statuses via REST")
                 try:
-                    tracked = list(ws_client._subscriptions)
+                    tracked = list(c.ws_client._subscriptions)
                     for ticker in tracked:
                         try:
-                            market_data = await kalshi.get_market(ticker)
+                            market_data = await c.kalshi.get_market(ticker)
                             if market_data:
                                 status = market_data.get("status", "")
                                 if status in ("closed", "determined", "finalized"):
@@ -454,14 +452,12 @@ async def main():
 
             async def _on_lifecycle(update: LifecycleUpdate):
                 if update.status in ("closed", "halted", "determined", "finalized"):
-                    # Cancel any resting orders on this market to prevent
-                    # stale fills (H-2).
-                    resting = fill_tracker.get_pending_for_market(
+                    resting = c.fill_tracker.get_pending_for_market(
                         update.market_ticker
                     )
                     for order in resting:
                         try:
-                            await kalshi.cancel_order(order.id)
+                            await c.kalshi.cancel_order(order.id)
                             logger.warning(
                                 f"Cancelled resting order {order.id} on "
                                 f"{update.market_ticker} — market status "
@@ -474,41 +470,39 @@ async def main():
                             )
 
                 if update.status in ("closed", "determined", "finalized"):
-                    if position_manager.has_position(update.market_ticker):
+                    if c.position_manager.has_position(update.market_ticker):
                         logger.warning(
                             f"Market {update.market_ticker} settled via WebSocket "
                             f"(status={update.status}, settlement={update.settlement_value}) "
                             f"— marking for exit"
                         )
-                        # Record settlement value for accurate P&L calculation
                         if update.settlement_value is not None:
-                            position_manager.record_settlement(
+                            c.position_manager.record_settlement(
                                 update.market_ticker, update.settlement_value
                             )
-                        position_manager.mark_pending_exit(update.market_ticker)
+                        c.position_manager.mark_pending_exit(update.market_ticker)
 
-            ws_client.on_price_update(_on_price)
-            ws_client.on_fill(_on_fill)
-            ws_client.on_lifecycle(_on_lifecycle)
-            ws_client.register_reconnect_sync(_on_ws_reconnect)
-            ws_task = asyncio.create_task(ws_client.connect())
+            c.ws_client.on_price_update(_on_price)
+            c.ws_client.on_fill(_on_fill)
+            c.ws_client.on_lifecycle(_on_lifecycle)
+            c.ws_client.register_reconnect_sync(_on_ws_reconnect)
+            c.ws_task = asyncio.create_task(c.ws_client.connect())
             logger.info(f"WebSocket client starting: {ws_host}")
         except Exception as e:
             logger.info(f"WebSocket client disabled: {e}")
     else:
         logger.info("WebSocket client disabled (no API keys)")
 
-    # Start dashboard as background task (if FastAPI available)
-    dashboard_task = None
+    # Start dashboard
     try:
         from src.dashboard.server import start_dashboard
-        dashboard_task = asyncio.create_task(start_dashboard(
-            db,
-            metrics=metrics,
-            position_manager=position_manager,
-            calibration_tracker=calibration,
-            calibration_analyzer=calibration_analyzer,
-            circuit_breaker=circuit_breaker,
+        c.dashboard_task = asyncio.create_task(start_dashboard(
+            c.db,
+            metrics=c.metrics,
+            position_manager=c.position_manager,
+            calibration_tracker=c.calibration,
+            calibration_analyzer=c.calibration_analyzer,
+            circuit_breaker=c.circuit_breaker,
             bankroll=settings.trading.bankroll,
         ))
         logger.info("Dashboard starting at http://0.0.0.0:8080")
@@ -517,8 +511,114 @@ async def main():
     except Exception as e:
         logger.warning(f"Dashboard failed to start: {e}")
 
-    # Graceful shutdown event — set by signal handlers so the trading loop
-    # can exit cleanly between cycles instead of being killed mid-trade.
+
+async def _shutdown(c: _Components, logger) -> None:
+    """Graceful shutdown: close each component independently."""
+    try:
+        if c.ws_client is not None:
+            await c.ws_client.close()
+    except Exception as e:
+        logger.warning(f"WebSocket close failed: {e}")
+
+    if c.ws_task is not None:
+        c.ws_task.cancel()
+        try:
+            await c.ws_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"WebSocket task cleanup error: {e}")
+
+    if c.dashboard_task is not None:
+        c.dashboard_task.cancel()
+        try:
+            await c.dashboard_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"Dashboard task cleanup error: {e}")
+
+    try:
+        if c.forecaster is not None:
+            await c.forecaster.close()
+    except Exception as e:
+        logger.warning(f"Forecaster close failed: {e}")
+
+    try:
+        if c.discovery is not None:
+            await c.discovery.close()
+    except Exception as e:
+        logger.warning(f"Discovery close failed: {e}")
+
+    try:
+        if c.kalshi is not None:
+            await c.kalshi.close()
+    except Exception as e:
+        logger.warning(f"Kalshi client close failed: {e}")
+
+    if c.polymarket_client is not None:
+        try:
+            await c.polymarket_client.close()
+        except Exception as e:
+            logger.warning(f"Polymarket client close failed: {e}")
+
+    try:
+        if c.db is not None:
+            c.db.close()
+    except Exception as e:
+        logger.warning(f"Database close failed: {e}")
+
+
+async def main():
+    """Main entry point — orchestrates initialization, trading loop, and shutdown."""
+    if not _acquire_pid_lock():
+        logging.critical("Another PolyEdge instance is already running (PID lock exists). Exiting.")
+        sys.exit(1)
+
+    settings = load_settings()
+    setup_logging(settings.logging.level, settings.logging.file)
+    logger = logging.getLogger("polyedge.main")
+
+    settings.validate_required_keys()
+
+    logger.info("=" * 60)
+    logger.info("PolyEdge Starting — Phase 3: Paper Trading")
+    logger.info(f"  Mode: {settings.trading.mode}")
+    logger.info(f"  Bankroll: ${settings.trading.bankroll:,.2f}")
+    logger.info(f"  Kelly fraction: {settings.trading.kelly_fraction}")
+    logger.info(f"  Max position: {settings.trading.max_position_pct:.0%}")
+    logger.info(f"  Daily loss limit: {settings.trading.daily_loss_limit_pct:.0%}")
+    logger.info(f"  Scan interval: {settings.scanning.interval_seconds}s")
+    logger.info(f"  Kalshi API: {settings.kalshi.active_host}")
+    logger.info(f"  Polymarket: {'enabled' if settings.polymarket.enabled else 'disabled'}")
+    logger.info("=" * 60)
+
+    # Phase 1: Initialize all services
+    c = await _initialize_services(settings, logger)
+
+    # Phase 2: Setup strategies
+    await _setup_strategies(settings, c, logger)
+
+    # Phase 3: Setup execution, risk, alerts
+    await _setup_execution_and_risk(settings, c, logger)
+
+    # Run initial scan
+    logger.info("Running initial scan cycle...")
+    markets = await c.scanner.run_scan_cycle()
+    logger.info(f"Initial scan: {len(markets)} qualifying markets")
+
+    for i, m in enumerate(markets[:10], 1):
+        logger.info(
+            f"  #{i:2d} [{m.category.value:12s}] "
+            f"YES={m.yes_price:.2f} NO={m.no_price:.2f} "
+            f"vol=${m.volume_24h:>10,.0f} | "
+            f"{m.question[:65]}"
+        )
+
+    # Phase 4: Start background tasks (WebSocket, dashboard)
+    await _setup_background_tasks(settings, c, logger)
+
+    # Graceful shutdown event
     shutdown_event = asyncio.Event()
 
     def _signal_handler(sig, _frame):
@@ -533,71 +633,20 @@ async def main():
     logger.info(f"\nEntering trading loop (every {settings.scanning.interval_seconds}s)...")
     try:
         await run_trading_loop(
-            scanner, kalshi, ai_strategy, no_strategy, news_strategy,
-            cross_arb_strategy, whale_strategy, market_graph,
-            risk_engine, kelly_sizer,
-            circuit_breaker, order_builder, order_router, position_manager,
-            calibration, resolution_tracker, calibration_analyzer,
-            fill_tracker, alert_manager, daily_report, metrics,
+            c.scanner, c.kalshi, c.ai_strategy, c.no_strategy, c.news_strategy,
+            c.cross_arb_strategy, c.whale_strategy, c.market_graph,
+            c.risk_engine, c.kelly_sizer,
+            c.circuit_breaker, c.order_builder, c.order_router, c.position_manager,
+            c.calibration, c.resolution_tracker, c.calibration_analyzer,
+            c.fill_tracker, c.alert_manager, c.daily_report, c.metrics,
             settings, settings.scanning.interval_seconds,
-            poly_scanner=poly_scanner,
-            cross_platform_arb=cross_platform_arb,
+            poly_scanner=c.poly_scanner,
+            cross_platform_arb=c.cross_platform_arb,
             shutdown_event=shutdown_event,
         )
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down...")
     finally:
-        # Graceful shutdown: close each component independently so one
-        # failure doesn't prevent cleanup of the others.
-        try:
-            if ws_client is not None:
-                await ws_client.close()
-        except Exception as e:
-            logger.warning(f"WebSocket close failed: {e}")
-
-        if ws_task is not None:
-            ws_task.cancel()
-            try:
-                await ws_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.warning(f"WebSocket task cleanup error: {e}")
-
-        if dashboard_task is not None:
-            dashboard_task.cancel()
-            try:
-                await dashboard_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.debug(f"Dashboard task cleanup error: {e}")
-
-        try:
-            await forecaster.close()
-        except Exception as e:
-            logger.warning(f"Forecaster close failed: {e}")
-
-        try:
-            await discovery.close()
-        except Exception as e:
-            logger.warning(f"Discovery close failed: {e}")
-
-        try:
-            await kalshi.close()
-        except Exception as e:
-            logger.warning(f"Kalshi client close failed: {e}")
-
-        if polymarket_client is not None:
-            try:
-                await polymarket_client.close()
-            except Exception as e:
-                logger.warning(f"Polymarket client close failed: {e}")
-
-        try:
-            db.close()
-        except Exception as e:
-            logger.warning(f"Database close failed: {e}")
-
+        await _shutdown(c, logger)
         _release_pid_lock()
         logger.info("PolyEdge stopped.")

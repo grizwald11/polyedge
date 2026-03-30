@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import statistics
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -45,6 +47,9 @@ class Metrics:
         # M-10: Track edges for ALL signals (generated + risk-gated)
         self._all_signal_edges: list[float] = []
         self._gated_signal_edges: list[float] = []
+        # L-5: Per-endpoint API latency tracking (bounded deques)
+        self._api_latencies: dict[str, deque[float]] = {}
+        self._max_latency_entries = 100
 
     def _check_daily_reset(self) -> None:
         """Reset daily counters at midnight UTC."""
@@ -150,6 +155,35 @@ class Metrics:
         if len(self._edge_return_log) > self._max_edge_return_entries:
             self._edge_return_log = self._edge_return_log[-self._max_edge_return_entries:]
         logger.info(json.dumps({"event": "position_closed", **entry}))
+
+    def record_api_latency(self, endpoint: str, latency_ms: float) -> None:
+        """Record an API call latency for a given endpoint (L-5)."""
+        if endpoint not in self._api_latencies:
+            self._api_latencies[endpoint] = deque(maxlen=self._max_latency_entries)
+        self._api_latencies[endpoint].append(latency_ms)
+
+    def get_api_latency_stats(self, endpoint: str) -> dict:
+        """Return p50, p99, and count for a specific endpoint.
+
+        Returns empty dict if no data recorded for the endpoint.
+        """
+        latencies = self._api_latencies.get(endpoint)
+        if not latencies:
+            return {}
+        sorted_lat = sorted(latencies)
+        count = len(sorted_lat)
+        return {
+            "p50": round(sorted_lat[count // 2], 2),
+            "p99": round(sorted_lat[min(count - 1, int(count * 0.99))], 2),
+            "count": count,
+        }
+
+    def get_all_latency_stats(self) -> dict[str, dict]:
+        """Return latency stats for all tracked endpoints."""
+        return {
+            endpoint: self.get_api_latency_stats(endpoint)
+            for endpoint in self._api_latencies
+        }
 
     def get_health_status(self) -> dict:
         """Return current health metrics for dashboard/alerts."""

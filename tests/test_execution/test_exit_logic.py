@@ -196,3 +196,57 @@ class TestGetExitCandidates:
         candidates = pm.get_exit_candidates(markets)
         assert len(candidates) == 1
         assert "edge_gone" in candidates[0][1] or "take_profit" in candidates[0][1]
+
+
+class TestStalePriceGuards:
+    """M-4: Price freshness checks prevent false exits on stale data after WebSocket fills."""
+
+    def test_take_profit_blocked_by_stale_price(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        # Position with large gain that would trigger take-profit
+        pos = _make_position(entry_price=0.20, current_price=0.95)
+        # Artificially make the price data stale (>120s)
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=300)
+        should, reason = pm.should_exit(pos)
+        # Take-profit should NOT trigger because price is stale
+        assert not (should and "take_profit" in reason), (
+            f"Take-profit should be blocked by stale price, got: {reason}"
+        )
+
+    def test_take_profit_fires_with_fresh_price(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        pos = _make_position(entry_price=0.20, current_price=0.95)
+        # Fresh price data
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=10)
+        should, reason = pm.should_exit(pos)
+        assert should is True
+        assert "take_profit" in reason
+
+    def test_edge_gone_blocked_by_stale_price(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        # Position where edge has evaporated
+        pos = _make_position(entry_price=0.34, current_price=0.995)
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=300)
+        market = _make_market(yes_price=0.995, no_price=0.005)
+        should, reason = pm.should_exit(pos, market)
+        # edge_gone and take_profit should both be blocked by stale price
+        assert not (should and "edge_gone" in reason), (
+            f"Edge-gone should be blocked by stale price, got: {reason}"
+        )
+
+    def test_edge_gone_fires_with_fresh_price(self, tmp_db):
+        pm = PositionManager(tmp_db)
+        pos = _make_position(entry_price=0.34, current_price=0.995)
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=10)
+        market = _make_market(yes_price=0.995, no_price=0.005)
+        should, reason = pm.should_exit(pos, market)
+        assert should is True
+        assert "edge_gone" in reason or "take_profit" in reason
+
+    def test_stop_loss_blocked_by_stale_price(self, tmp_db):
+        """Existing behavior: stop-loss is also blocked by stale price."""
+        pm = PositionManager(tmp_db)
+        pos = _make_position(entry_price=0.34, current_price=0.15)
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=300)
+        should, reason = pm.should_exit(pos)
+        assert not (should and "stop_loss" in reason)
