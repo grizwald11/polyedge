@@ -338,6 +338,9 @@ class KalshiClient:
                         await asyncio.sleep(wait)
                         continue
                     raise
+            # L-5: All retry attempts exhausted without raising — should not normally
+            # be reached, but return None explicitly rather than falling through.
+            logger.error(f"All {max_retries} retry attempts exhausted for {method} {path}")
             return None
 
     async def close(self):

@@ -32,8 +32,8 @@ class FedWatchClient:
     async def get_rate_probabilities(self) -> Optional[list[dict]]:
         """Fetch rate probabilities for upcoming FOMC meetings.
 
-        Returns list of dicts with 'meeting', 'cut_prob', 'hold_prob',
-        'hike_prob' keys, or None on failure.
+        Returns list of dicts with 'meeting', 'cut_prob', 'hold_prob'
+        keys, or None on failure.
         """
         cached = self._cache.get("fedwatch_probs")
         if cached is not None:
@@ -86,23 +86,20 @@ class FedWatchClient:
                 seen_meetings.add(meeting_key)
 
                 prob = float(prob_str)
-                # Don't hardcode hike_prob=0.0 — derive from remaining probability
                 hold_prob = max(0.0, 100.0 - prob)
-                hike_prob = 0.0  # Default; may be overridden by richer data sources
 
                 # Validate probabilities sum to ~100%
-                prob_sum = prob + hold_prob + hike_prob
+                prob_sum = prob + hold_prob
                 if prob_sum > 0 and abs(prob_sum - 100.0) > 5.0:
                     logger.warning(
                         f"FedWatch probabilities don't sum to 100%: "
-                        f"cut={prob}% + hold={hold_prob}% + hike={hike_prob}% = {prob_sum}%"
+                        f"cut={prob}% + hold={hold_prob}% = {prob_sum}%"
                     )
 
                 meetings.append({
                     "meeting": meeting_key,
                     "cut_prob": prob,
                     "hold_prob": hold_prob,
-                    "hike_prob": hike_prob,
                 })
 
             if not meetings:

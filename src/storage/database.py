@@ -4,6 +4,11 @@ Uses raw sqlite3 with helper methods (no heavy ORM for simplicity).
 WAL mode allows concurrent reads during writes.
 
 # NOTE: Database is unencrypted. Enable FileVault on macOS or use SQLCipher for at-rest encryption.
+#
+# H-6: Prices and monetary values are stored as REAL (float). Aggregation queries
+# use ROUND(..., 4) to mitigate cumulative float drift. A full migration to
+# INTEGER cents would eliminate this but requires changes across all callers.
+# Current approach is safe for typical trading volumes (<10K trades).
 """
 
 from __future__ import annotations
@@ -198,6 +203,7 @@ CREATE TABLE IF NOT EXISTS circuit_breaker_state (
     halted INTEGER DEFAULT 0,
     halt_reason TEXT,
     halt_time TEXT,
+    last_recorded_day TEXT,
     last_updated TEXT NOT NULL
 );
 
@@ -586,6 +592,14 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_markets_ticker_unique "
             "ON markets(ticker)"
         )
+
+        # Migration v13: add last_recorded_day to circuit_breaker_state (C-1)
+        cb_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(circuit_breaker_state)").fetchall()
+        }
+        if "last_recorded_day" not in cb_cols:
+            conn.execute("ALTER TABLE circuit_breaker_state ADD COLUMN last_recorded_day TEXT")
+            logger.info("Migration v13: added last_recorded_day to circuit_breaker_state")
 
         conn.commit()
 
@@ -1022,7 +1036,7 @@ class Database:
         next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
         conn = self._get_conn()
         rows = conn.execute(
-            "SELECT strategy, COUNT(*) as cnt, COALESCE(SUM(realized_pnl), 0) as total "
+            "SELECT strategy, COUNT(*) as cnt, ROUND(COALESCE(SUM(realized_pnl), 0), 4) as total "
             "FROM trades WHERE timestamp >= ? AND timestamp < ? GROUP BY strategy",
             (date_str, next_date_str),
         ).fetchall()
@@ -1035,7 +1049,7 @@ class Database:
         """Get portfolio-level summary stats."""
         conn = self._get_conn()
         trades = conn.execute(
-            "SELECT COUNT(*) as cnt, COALESCE(SUM(realized_pnl), 0) as total FROM trades"
+            "SELECT COUNT(*) as cnt, ROUND(COALESCE(SUM(realized_pnl), 0), 4) as total FROM trades"
         ).fetchone()
         wins = conn.execute(
             "SELECT COUNT(*) as cnt FROM trades WHERE realized_pnl > 0"
@@ -1095,9 +1109,17 @@ class Database:
         positions = []
         for row in rows:
             r = dict(row)
-            # Determine if YES or NO position from token_id
+            # Determine if YES or NO position from token_id suffix
+            # M-10: Use suffix check (-no, _no, :no) to avoid false matches
+            # on token IDs that happen to contain "no" as a substring (e.g. "innovation")
             token_id = r.get("token_id") or ""
-            is_no = "no" in token_id.lower()
+            token_lower = token_id.lower()
+            is_no = (
+                token_lower.endswith("-no")
+                or token_lower.endswith("_no")
+                or token_lower.endswith(":no")
+                or token_lower == "no"
+            )
             current_price = r["no_price"] if is_no else r["yes_price"]
             direction = "BUY_NO" if is_no else "BUY_YES"
 
@@ -1138,7 +1160,7 @@ class Database:
         next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
         conn = self._get_conn()
         row = conn.execute(
-            "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM trades "
+            "SELECT ROUND(COALESCE(SUM(realized_pnl), 0), 4) as total FROM trades "
             "WHERE timestamp >= ? AND timestamp < ?",
             (date_str, next_date_str),
         ).fetchone()
@@ -1317,6 +1339,7 @@ class Database:
         halted: bool,
         halt_reason: Optional[str] = None,
         halt_time: Optional[str] = None,
+        last_recorded_day: Optional[str] = None,
     ):
         """Persist circuit breaker state (singleton row, id=1)."""
         now = datetime.now(timezone.utc).isoformat()
@@ -1324,14 +1347,15 @@ class Database:
         conn.execute("""
             INSERT INTO circuit_breaker_state
                 (id, consecutive_losing_days, reduced_sizing, halted,
-                 halt_reason, halt_time, last_updated)
-            VALUES (1, ?, ?, ?, ?, ?, ?)
+                 halt_reason, halt_time, last_recorded_day, last_updated)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 consecutive_losing_days=excluded.consecutive_losing_days,
                 reduced_sizing=excluded.reduced_sizing,
                 halted=excluded.halted,
                 halt_reason=excluded.halt_reason,
                 halt_time=excluded.halt_time,
+                last_recorded_day=excluded.last_recorded_day,
                 last_updated=excluded.last_updated
         """, (
             consecutive_losing_days,
@@ -1339,6 +1363,7 @@ class Database:
             int(halted),
             halt_reason,
             halt_time,
+            last_recorded_day,
             now,
         ))
         conn.commit()
@@ -1490,7 +1515,7 @@ class Database:
         conn = self._get_conn()
         rows = conn.execute("""
             SELECT DATE(timestamp) as date,
-                   COALESCE(SUM(realized_pnl), 0) as pnl,
+                   ROUND(COALESCE(SUM(realized_pnl), 0), 4) as pnl,
                    COUNT(*) as trade_count
             FROM trades
             WHERE timestamp >= ?
@@ -1519,7 +1544,7 @@ class Database:
         rows = conn.execute("""
             SELECT strategy,
                    COUNT(*) as trade_count,
-                   COALESCE(SUM(realized_pnl), 0) as total_pnl,
+                   ROUND(COALESCE(SUM(realized_pnl), 0), 4) as total_pnl,
                    SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as winning,
                    SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) as losing
             FROM trades
@@ -1556,7 +1581,7 @@ class Database:
         markets = conn.execute("SELECT COUNT(*) as cnt FROM markets WHERE active=1").fetchone()
         signals = conn.execute("SELECT COUNT(*) as cnt FROM signals").fetchone()
         trades = conn.execute("SELECT COUNT(*) as cnt FROM trades").fetchone()
-        pnl = conn.execute("SELECT COALESCE(SUM(realized_pnl), 0) as total FROM trades").fetchone()
+        pnl = conn.execute("SELECT ROUND(COALESCE(SUM(realized_pnl), 0), 4) as total FROM trades").fetchone()
 
         return {
             "active_markets": markets["cnt"] if markets else 0,

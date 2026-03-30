@@ -345,8 +345,9 @@ class ClaudeForecaster:
                 ),
                 timeout=timeout,
             )
-        except anthropic.RateLimitError:
+        except anthropic.RateLimitError as orig_exc:
             # Retry up to 3 times with exponential backoff before falling back
+            last_exc: Exception = orig_exc
             for retry_attempt in range(1, 4):
                 wait = min(10, 2 ** retry_attempt)  # Cap backoff at 10s
                 logger.warning(
@@ -377,14 +378,16 @@ class ClaudeForecaster:
                         f"Claude rate limit retry {retry_attempt} succeeded"
                     )
                     return response
-                except anthropic.RateLimitError:
+                except anthropic.RateLimitError as e:
+                    last_exc = e
                     continue
                 except Exception as e:
                     logger.debug(f"Non-rate-limit error during retry: {e}")
+                    last_exc = e
                     break
 
             logger.warning("Claude API rate limit retries exhausted, returning market price as fallback")
-            raise  # Re-raise the original RateLimitError
+            raise last_exc  # Re-raise the last caught exception, not the original
 
         except anthropic.APIConnectionError as e:
             # M-11: Retryable connection error — backoff like rate limits
@@ -617,6 +620,11 @@ class ClaudeForecaster:
         if self.is_budget_exceeded():
             return None
 
+        # H-4: Check circuit breaker — don't burn API quota during bad states
+        if self._circuit_open_until and time.monotonic() < self._circuit_open_until:
+            logger.debug("assess_market_with_prompt skipped: circuit breaker open")
+            return None
+
         model = self._select_model(position_value)
         start_time = time.monotonic()
 
@@ -732,10 +740,8 @@ class ClaudeForecaster:
                 _call_at_temp(temp_high),
             )
         except Exception as e:
-            logger.warning(f"Cross-check failed, falling back to single assess: {e}")
-            return await self.assess_market(
-                market, news_context, position_value, base_rate_context
-            )
+            logger.warning(f"Cross-check dual-call failed, returning None: {e}")
+            return None
 
         disagreement = abs(low_result.probability - high_result.probability)
         avg_prob = (low_result.probability + high_result.probability) / 2.0

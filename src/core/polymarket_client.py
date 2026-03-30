@@ -37,11 +37,16 @@ class PolymarketClient:
         signature_type: int = 1,
     ):
         self.host = host
+        # SECURITY NOTE: The private key is held as a plain string in memory
+        # for the lifetime of this object.  In production, consider using a
+        # hardware security module (HSM), OS keychain, or a secrets manager
+        # so the key material is never resident in Python process memory.
         self._private_key = private_key
         self._chain_id = chain_id
         self._signature_type = signature_type
         self._client: Optional[object] = None
         self._initialized = False
+        self._init_lock = asyncio.Lock()
         self._disabled = not _PY_CLOB_AVAILABLE
         if self._disabled:
             logger.warning(
@@ -58,6 +63,14 @@ class PolymarketClient:
         """
         if self._initialized:
             return
+        async with self._init_lock:
+            # Double-check after acquiring lock
+            if self._initialized:
+                return
+            await self._do_initialize()
+
+    async def _do_initialize(self):
+        """Internal initialization logic (called under _init_lock)."""
         if self._disabled:
             logger.warning("Polymarket client disabled — skipping initialization")
             return

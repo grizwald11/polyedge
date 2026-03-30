@@ -534,5 +534,6 @@ class KalshiWebSocket:
         if not self.private_key_path:
             return None
         from src.core.key_loader import load_rsa_private_key
-        self._private_key = load_rsa_private_key(self.private_key_path)
+        # H-7: Enforce PEM file permissions (consistent with KalshiClient)
+        self._private_key = load_rsa_private_key(self.private_key_path, check_permissions=True)
         return self._private_key

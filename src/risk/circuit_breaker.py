@@ -29,6 +29,7 @@ class CircuitBreaker:
         self._halt_time: Optional[datetime] = None
         self._consecutive_losing_days = 0
         self._last_day_checked: Optional[str] = None
+        self._last_recorded_day: Optional[str] = None
         self._reduced_sizing = False
         # H-3: Peak-to-trough drawdown tracking
         self._high_water_mark: float = settings.trading.bankroll
@@ -206,6 +207,7 @@ class CircuitBreaker:
         self._reduced_sizing = bool(state["reduced_sizing"])
         self._halted = bool(state["halted"])
         self._halt_reason = state["halt_reason"]
+        self._last_recorded_day = state.get("last_recorded_day")
         if state["halt_time"]:
             self._halt_time = datetime.fromisoformat(state["halt_time"])
         if self._halted or self._consecutive_losing_days > 0 or self._reduced_sizing:
@@ -229,6 +231,7 @@ class CircuitBreaker:
             halted=self._halted,
             halt_reason=self._halt_reason,
             halt_time=self._halt_time.isoformat() if self._halt_time else None,
+            last_recorded_day=self._last_recorded_day,
         )
 
     def _update_consecutive_losses(self) -> None:
@@ -240,9 +243,7 @@ class CircuitBreaker:
         self._last_day_checked = today
         # State is maintained via record_daily_result() called at day boundary.
         # If we missed a day boundary (e.g., restart), check yesterday's P&L.
-        # Track which day we last recorded to prevent double-counting on restart (M-12).
-        if not hasattr(self, '_last_recorded_day'):
-            self._last_recorded_day = None
+        # _last_recorded_day is persisted to DB to prevent double-counting on restart (C-1).
         from datetime import timedelta
         yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
         if yesterday != self._last_recorded_day:

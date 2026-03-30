@@ -104,6 +104,7 @@ class NewsReactiveStrategy:
             question=market.question,
             resolution_criteria=market.resolution_source or "Standard resolution rules apply.",
             market_price=market.yes_price,
+            close_date=getattr(market, "close_date", None) or "Not specified",
         )
 
         try:

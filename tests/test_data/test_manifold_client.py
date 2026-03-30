@@ -92,7 +92,7 @@ class TestSearchMarkets:
         mock_response.json.return_value = sample_manifold_response
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -113,7 +113,7 @@ class TestSearchMarkets:
         mock_response.json.return_value = []
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -130,7 +130,7 @@ class TestSearchMarkets:
         mock_response.json.return_value = non_binary_response
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -144,7 +144,7 @@ class TestSearchMarkets:
 
     @pytest.mark.asyncio
     async def test_timeout_returns_empty(self, manifold_client):
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.side_effect = httpx.TimeoutException("Connection timed out")
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -157,7 +157,7 @@ class TestSearchMarkets:
 
     @pytest.mark.asyncio
     async def test_http_error_returns_empty(self, manifold_client):
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.side_effect = httpx.HTTPStatusError(
                 "Server error", request=MagicMock(), response=MagicMock(status_code=500)
@@ -176,7 +176,7 @@ class TestSearchMarkets:
         mock_response.json.return_value = sample_manifold_response
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -198,7 +198,7 @@ class TestSearchMarkets:
         mock_response.json.return_value = sample_manifold_response
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -226,7 +226,7 @@ class TestGetBestMatch:
         mock_response.json.return_value = sample_manifold_response
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -248,7 +248,7 @@ class TestGetBestMatch:
         mock_response.json.return_value = []
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -278,7 +278,7 @@ class TestGetBestMatch:
         mock_response.json.return_value = low_similarity_response
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -306,7 +306,7 @@ class TestGetContext:
         mock_response.json.return_value = sample_manifold_response
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -326,7 +326,7 @@ class TestGetContext:
         mock_response.json.return_value = []
         mock_response.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with patch("src.data.manifold_client.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)

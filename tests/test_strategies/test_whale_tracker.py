@@ -97,10 +97,10 @@ class TestWhaleTrackerStrategy:
 
     def test_timing_weight_early_entry(self, tmp_db):
         strategy = WhaleTrackerStrategy.__new__(WhaleTrackerStrategy)
-        # Entry 36 hours ago — early, should get high weight
+        # H-3: Entry 36 hours ago — past stale cutoff, gets lowest weight
         entry_time = datetime.now(timezone.utc) - timedelta(hours=36)
         weight = strategy._timing_weight(entry_time)
-        assert weight == 0.9
+        assert weight == 0.3
 
     def test_probability_estimate_uses_avg_entry(self, tmp_db):
         """Regression: probability_estimate should equal whale avg_entry, not current_price + edge."""
@@ -134,10 +134,10 @@ class TestWhaleTrackerStrategy:
 
     def test_timing_weight_recent_entry(self, tmp_db):
         strategy = WhaleTrackerStrategy.__new__(WhaleTrackerStrategy)
-        # Entry 2 hours ago — very recent, lower weight
+        # H-3: Entry 2 hours ago — very fresh, highest weight
         entry_time = datetime.now(timezone.utc) - timedelta(hours=2)
         weight = strategy._timing_weight(entry_time)
-        assert weight == 0.3
+        assert weight == 0.9
 
     def test_confidence_uses_average_not_multiplication(self, tmp_db):
         """Regression: confidence = (timing + consensus) / 2, not timing * consensus.
@@ -149,7 +149,7 @@ class TestWhaleTrackerStrategy:
             monitor._basket.append(WhaleWallet(address=f"whale-{i}"))
 
         now = datetime.now(timezone.utc)
-        # 4/5 whales agree (80% consensus), entry 18h ago (timing weight = 0.7)
+        # 4/5 whales agree (80% consensus), entry 18h ago (H-3: timing weight = 0.5)
         for i in range(4):
             monitor.update_positions(f"whale-{i}", {
                 "FED-RATE": WhalePosition(
@@ -166,10 +166,10 @@ class TestWhaleTrackerStrategy:
         signals = strategy.scan_for_opportunities(markets)
 
         assert len(signals) == 1
-        # timing_weight(18h) = 0.7, consensus = 0.8
-        # Average: (0.7 + 0.8) / 2 = 0.75
-        # Multiplication would give: 0.7 * 0.8 = 0.56
-        assert signals[0].confidence == pytest.approx(0.75, abs=0.01)
+        # H-3: timing_weight(18h) = 0.5, consensus = 0.8
+        # Average: (0.5 + 0.8) / 2 = 0.65
+        # Multiplication would give: 0.5 * 0.8 = 0.40
+        assert signals[0].confidence == pytest.approx(0.65, abs=0.01)
 
     def test_avg_entry_uses_direction_specific_prices(self, tmp_db):
         """Regression: avg_entry_price must only include whales going in the

@@ -172,19 +172,22 @@ class WhaleTrackerStrategy:
         return earliest_entry < cutoff
 
     def _timing_weight(self, earliest_entry: Optional[datetime]) -> float:
-        """Weight signal by how early whales entered.
+        """Weight signal by how recently whales entered.
 
-        Early entries (>24h before now) get higher weight.
+        H-3: Fresh entries (0-6h) get the highest weight — they represent the
+        most actionable signals. Older entries (12-24h) get lower weight since
+        the edge may already be priced in. Note that entries >24h are filtered
+        out by _is_stale() before reaching this method.
         """
         if earliest_entry is None:
             return 0.5
 
         hours_ago = (datetime.now(timezone.utc) - earliest_entry).total_seconds() / 3600
-        if hours_ago > 24:
-            return 0.9  # Early entry — high confidence
-        elif hours_ago > 12:
+        if hours_ago <= 6:
+            return 0.9  # Very fresh — most actionable
+        elif hours_ago <= 12:
             return 0.7
-        elif hours_ago > 6:
-            return 0.5
+        elif hours_ago <= 24:
+            return 0.5  # Approaching stale
         else:
-            return 0.3  # Very recent — might be too late
+            return 0.3  # Past stale cutoff (shouldn't reach here)

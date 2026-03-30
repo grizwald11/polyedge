@@ -3,6 +3,10 @@
 Identifies high-performing traders from Kalshi leaderboard data.
 Note: Kalshi doesn't expose public user positions, so whale tracking
 relies on curated baskets and leaderboard rankings.
+
+NOTE: This module currently has zero test coverage (audit finding L-8).
+When adding features or fixing bugs here, please add corresponding tests
+in tests/test_scripts/test_leaderboard.py.
 """
 
 from __future__ import annotations

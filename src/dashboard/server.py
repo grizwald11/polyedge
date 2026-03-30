@@ -117,7 +117,8 @@ def create_app(
         else:
             # M-12: No key configured — restrict to localhost only
             client_host = getattr(request.client, "host", "") if request.client else ""
-            _localhost_hosts = {"127.0.0.1", "::1", "localhost", "", "testclient"}
+            # H-9: Removed "testclient" — testing artifact that bypassed auth in production
+            _localhost_hosts = {"127.0.0.1", "::1", "localhost", ""}
             if client_host not in _localhost_hosts:
                 return Response(
                     content='{"detail": "Unauthorized — set POLYEDGE_DASHBOARD_KEY for remote access"}',
@@ -178,7 +179,7 @@ async def start_dashboard(
     calibration_analyzer=None,
     circuit_breaker=None,
     bankroll: float = 500.0,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",  # Remote access requires setting POLYEDGE_DASHBOARD_KEY
     port: int = 8080,
 ):
     """Start the dashboard web server as a background task."""

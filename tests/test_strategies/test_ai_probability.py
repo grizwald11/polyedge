@@ -39,6 +39,8 @@ def mock_forecaster(strategy_settings) -> ClaudeForecaster:
 
 @pytest.fixture
 def strategy(mock_forecaster, strategy_settings) -> AIProbabilityStrategy:
+    # Disable cross-check by default so tests don't make real API calls
+    strategy_settings.claude.cross_check_enabled = False
     return AIProbabilityStrategy(mock_forecaster, strategy_settings)
 
 

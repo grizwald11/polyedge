@@ -131,6 +131,7 @@ def integration_settings() -> Settings:
     """Settings tuned for integration testing."""
     return Settings(
         trading={"mode": "paper", "bankroll": 500.0, "min_edge_ai": 0.05},
+        claude={"cross_check_enabled": False},
     )
 
 

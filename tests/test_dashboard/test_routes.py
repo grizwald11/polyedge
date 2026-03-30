@@ -152,10 +152,19 @@ def mock_calibration_analyzer():
     return ca
 
 
+_TEST_DASHBOARD_KEY = "test-dashboard-key"
+
+
 def _make_client(mock_db, position_manager=None, calibration_tracker=None,
-                 calibration_analyzer=None, circuit_breaker=None, env_overrides=None):
-    """Helper to create a TestClient with optional env overrides."""
+                 calibration_analyzer=None, circuit_breaker=None, env_overrides=None,
+                 raw=False):
+    """Helper to create a TestClient with optional env overrides.
+
+    H-9: Sets a test dashboard key by default. Returns an _AuthedTestClient that
+    auto-appends the key unless raw=True is passed.
+    """
     env = {k: v for k, v in os.environ.items() if k != "POLYEDGE_DASHBOARD_KEY"}
+    env["POLYEDGE_DASHBOARD_KEY"] = _TEST_DASHBOARD_KEY
     if env_overrides:
         env.update(env_overrides)
     with patch.dict(os.environ, env, clear=True):
@@ -167,13 +176,28 @@ def _make_client(mock_db, position_manager=None, calibration_tracker=None,
             circuit_breaker=circuit_breaker,
         )
         assert app is not None
-        return TestClient(app, raise_server_exceptions=False)
+        client = TestClient(app, raise_server_exceptions=False)
+        if raw:
+            return client
+        return _AuthedTestClient(client)
+
+
+class _AuthedTestClient:
+    """Wrapper that auto-appends the dashboard key to all requests."""
+    _KEY = "test-dashboard-key"
+
+    def __init__(self, client):
+        self._client = client
+
+    def get(self, url, **kwargs):
+        sep = "&" if "?" in url else "?"
+        return self._client.get(f"{url}{sep}key={self._KEY}", **kwargs)
 
 
 @pytest.fixture
 def unauthenticated_client(mock_db, mock_position_manager, mock_calibration_tracker,
                            mock_calibration_analyzer, mock_circuit_breaker):
-    """Client with no POLYEDGE_DASHBOARD_KEY set (localhost-only mode)."""
+    """H-9: Client with dashboard key set and auto-appended to requests."""
     return _make_client(
         mock_db,
         position_manager=mock_position_manager,
@@ -186,7 +210,7 @@ def unauthenticated_client(mock_db, mock_position_manager, mock_calibration_trac
 @pytest.fixture
 def authenticated_client(mock_db, mock_position_manager, mock_calibration_tracker,
                          mock_calibration_analyzer, mock_circuit_breaker):
-    """Client with POLYEDGE_DASHBOARD_KEY set."""
+    """Raw client with POLYEDGE_DASHBOARD_KEY set — does NOT auto-send key."""
     return _make_client(
         mock_db,
         position_manager=mock_position_manager,
@@ -194,6 +218,7 @@ def authenticated_client(mock_db, mock_position_manager, mock_calibration_tracke
         calibration_analyzer=mock_calibration_analyzer,
         circuit_breaker=mock_circuit_breaker,
         env_overrides={"POLYEDGE_DASHBOARD_KEY": "test-api-key-42"},
+        raw=True,
     )
 
 
@@ -309,11 +334,10 @@ class TestAPIHealth:
     def test_returns_metrics_health(self, mock_db):
         metrics = MagicMock()
         metrics.get_health_status.return_value = {"status": "ok", "uptime": 3600}
-        env = {k: v for k, v in os.environ.items() if k != "POLYEDGE_DASHBOARD_KEY"}
-        with patch.dict(os.environ, env, clear=True):
+        with patch.dict(os.environ, {"POLYEDGE_DASHBOARD_KEY": _TEST_DASHBOARD_KEY}):
             app = create_app(mock_db, metrics=metrics)
             client = TestClient(app)
-            data = client.get("/api/health").json()
+            data = client.get(f"/api/health?key={_TEST_DASHBOARD_KEY}").json()
             assert data["status"] == "ok"
 
 
@@ -462,13 +486,12 @@ class TestDashboardAuth:
         assert resp.status_code == 401
 
     def test_localhost_restriction_without_key(self, mock_db):
-        """When no key is set, non-localhost clients are rejected."""
+        """H-9: When no key is set, non-localhost clients (including TestClient) are rejected."""
         env = {k: v for k, v in os.environ.items() if k != "POLYEDGE_DASHBOARD_KEY"}
         with patch.dict(os.environ, env, clear=True):
             app = create_app(mock_db)
-            # TestClient sends from "testclient" which is in the allowed list,
-            # so we verify the middleware logic by checking the allowed hosts list
-            # is used. A direct unit test of the middleware is in test_server.py.
-            client = TestClient(app)
+            # TestClient sends from "testclient" which is NOT in the allowed list,
+            # so it should be rejected when no dashboard key is configured.
+            client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/stats")
-            assert resp.status_code == 200
+            assert resp.status_code == 401

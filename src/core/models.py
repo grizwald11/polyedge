@@ -71,7 +71,12 @@ def kalshi_maker_fee(contracts: int, price_cents: int) -> int:
 
 
 def polymarket_fee(contracts: int, price: float) -> float:
-    """Polymarket event markets are fee-free for maker orders."""
+    """Polymarket event markets are fee-free for maker orders.
+
+    WARNING: This stub returns 0.0 unconditionally. It must NOT be relied on
+    for P&L calculations on fee-enabled Polymarket markets (e.g. crypto,
+    NCAAB, Serie A) where taker fees apply.
+    """
     return 0.0
 
 

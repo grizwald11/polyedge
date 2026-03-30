@@ -182,6 +182,7 @@ Source: {source}
 MARKET: {question}
 RESOLUTION CRITERIA: {resolution_criteria}
 CURRENT MARKET PRICE: {market_price:.0%} (YES)
+MARKET CLOSES: {close_date}
 
 Assess how this news changes the probability of the market resolving YES.
 Consider:

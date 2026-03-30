@@ -79,17 +79,23 @@ class CrossArbStrategy:
         return signals
 
     def _check_intra_market(self, market: Market) -> Optional[Signal]:
-        """Type A: Check if YES + NO prices sum to less than 1.0 (minus fee threshold)."""
+        """Type A: Check if YES + NO prices sum to less than 1.0 (minus fee threshold).
+
+        H-2: This emits a signal for the cheaper side only (single-leg directional
+        trade, NOT a guaranteed-profit arbitrage). The edge comes from the market
+        mispricing: if YES + NO < 1.0, the cheaper side is more likely underpriced.
+        True two-leg arb would require simultaneously buying both sides, which is
+        not implemented here.
+        """
         if market.yes_price <= 0 or market.no_price <= 0:
             return None
 
         total = market.yes_price + market.no_price
-        # If total < 0.98, buying both sides guarantees a profit
         edge = 1.0 - total
         if edge < self.min_edge:
             return None
 
-        # Buy the cheaper side
+        # Buy the cheaper side — more likely to be the underpriced one
         if market.yes_price < market.no_price:
             direction = Direction.BUY_YES
             price = market.yes_price
@@ -109,7 +115,7 @@ class CrossArbStrategy:
             probability_estimate=min(0.99, price + edge),
             market_price=price,
             confidence=0.9,  # High confidence — mathematical
-            reasoning=f"Intra-market arb: YES({market.yes_price:.2f}) + NO({market.no_price:.2f}) = {total:.2f} < 1.00",
+            reasoning=f"Intra-market mispricing: YES({market.yes_price:.2f}) + NO({market.no_price:.2f}) = {total:.2f} < 1.00, buying cheaper side",
         )
 
     def _is_mutually_exclusive(self, markets: list[Market]) -> bool:

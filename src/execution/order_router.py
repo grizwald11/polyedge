@@ -109,7 +109,7 @@ class OrderRouter:
             self._pending_orders.pop(order_id, None)
             self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
 
-    def _cleanup_stale_pending_orders(self) -> int:
+    async def _cleanup_stale_pending_orders(self) -> int:
         """M-5: Remove pending orders older than 24 hours to prevent unbounded memory growth.
 
         Returns the number of stale orders removed.
@@ -126,18 +126,19 @@ class OrderRouter:
 
         stale_ids = {row["id"] for row in rows}
         removed = 0
-        for order_id in list(self._pending_orders.keys()):
-            if order_id in stale_ids:
-                self.db.delete_pending_order(order_id)
-                del self._pending_orders[order_id]
-                removed += 1
+        async with self._pending_lock:
+            for order_id in list(self._pending_orders.keys()):
+                if order_id in stale_ids:
+                    self.db.delete_pending_order(order_id)
+                    del self._pending_orders[order_id]
+                    removed += 1
 
-        if removed:
-            self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
-            logger.info(
-                f"Cleaned up {removed} stale pending orders (>24h old), "
-                f"remaining pending cost=${self._pending_order_cost:.2f}"
-            )
+            if removed:
+                self._pending_order_cost = round(sum(self._pending_orders.values()), 4)
+                logger.info(
+                    f"Cleaned up {removed} stale pending orders (>24h old), "
+                    f"remaining pending cost=${self._pending_order_cost:.2f}"
+                )
         return removed
 
     def _log_gate_status(self):
@@ -161,7 +162,7 @@ class OrderRouter:
         Live mode: submits to Kalshi API.
         """
         # M-5: Clean up stale pending orders at the start of each routing cycle
-        self._cleanup_stale_pending_orders()
+        await self._cleanup_stale_pending_orders()
 
         # Validate sell orders don't exceed position size
         if order.side == Side.SELL and self.position_manager is not None:
@@ -654,7 +655,12 @@ class OrderRouter:
             if status in ("matched", "filled"):
                 order.status = OrderStatus.FILLED
                 order.filled_at = now
-                order.fill_price = order.price
+                # C-2: Read actual fill price from API response, fall back to order price
+                try:
+                    api_price = float(result.get("price", order.price))
+                    order.fill_price = api_price if api_price > 0 else order.price
+                except (TypeError, ValueError):
+                    order.fill_price = order.price
             elif status in ("live", "resting"):
                 order.status = OrderStatus.OPEN
                 self._log_order(order)
@@ -713,10 +719,13 @@ class OrderRouter:
             )
             for oo in open_orders:
                 price_match = abs(oo.get("yes_price", 0) / 100 - order.price) < 0.01
+                # C-3: Also check side to avoid confusing BUY YES with BUY NO
+                side_match = oo.get("side", "").lower() == (order.kalshi_side or "").lower()
                 if (
                     oo.get("ticker") == order.market_id
                     and oo.get("count") == int(order.size)
                     and price_match
+                    and side_match
                 ):
                     logger.warning(
                         f"Reconciliation found matching order on Kalshi: {oo.get('order_id')}"
@@ -778,7 +787,7 @@ class OrderRouter:
             f"{'='*60}\n"
             f"Confirm first live trade of session? [y/N] (60s timeout): "
         )
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             response = await asyncio.wait_for(
                 loop.run_in_executor(None, input, prompt),
@@ -844,12 +853,19 @@ class OrderRouter:
             result = await self.kalshi.cancel_order(exchange_id)
             if result is not None:
                 await self._remove_pending(order_id)
-                conn = self.db._get_conn()
-                conn.execute(
-                    "UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?",
-                    (datetime.now(timezone.utc).isoformat(), order_id),
-                )
-                conn.commit()
+                try:
+                    conn = self.db._get_conn()
+                    conn.execute(
+                        "UPDATE orders SET status='cancelled', cancelled_at=? WHERE id=?",
+                        (datetime.now(timezone.utc).isoformat(), order_id),
+                    )
+                    conn.commit()
+                except Exception as db_err:
+                    logger.error(
+                        f"Cancel succeeded on exchange but DB update failed — "
+                        f"will reconcile on next sync: {db_err}",
+                        exc_info=True,
+                    )
                 logger.info(f"[LIVE] Cancelled order {order_id} (exchange_id={exchange_id})")
                 return True
             else:

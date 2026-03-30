@@ -1,4 +1,4 @@
-"""Risk engine — 11-point pre-trade risk check.
+"""Risk engine — 15-point pre-trade risk check.
 
 Every trade must pass ALL checks before execution.
 """
@@ -99,7 +99,7 @@ class RiskEngine:
         proposed_cost: float,
         pending_order_cost: float = 0.0,
     ) -> RiskCheckResult:
-        """Run all 11 risk checks on a proposed trade.
+        """Run all 15 risk checks on a proposed trade.
 
         Args:
             signal: The trading signal

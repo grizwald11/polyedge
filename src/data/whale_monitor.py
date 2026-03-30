@@ -178,7 +178,12 @@ class WhaleMonitor:
         return markets
 
     def _log_whale_trade(self, wallet: str, pos: WhalePosition):
-        """Log a whale trade to the database."""
+        """Log a whale trade to the database.
+
+        L-4: TODO — This method bypasses the Database abstraction layer by
+        accessing self.db._get_conn() directly and executing raw SQL. Should
+        be refactored to use a Database.log_whale_trade() method instead.
+        """
         conn = self.db._get_conn()
         try:
             conn.execute(

@@ -169,10 +169,12 @@ class AIProbabilityStrategy:
         if not cross_check_enabled:
             signals = initial_signals
         else:
-            # Cross-check only top N signals by edge (saves API calls)
+            # H-1: Cross-check the weakest signals (lowest edge), which are most
+            # likely to be noise. Auto-pass the highest-edge signals, which are
+            # most likely real. This prioritizes validation where it matters most.
             initial_signals.sort(key=lambda s: abs(s.edge), reverse=True)
-            cross_check_candidates = initial_signals[:cross_check_top_n]
-            auto_pass = initial_signals[cross_check_top_n:]
+            auto_pass = initial_signals[:len(initial_signals) - cross_check_top_n] if len(initial_signals) > cross_check_top_n else []
+            cross_check_candidates = initial_signals[len(initial_signals) - cross_check_top_n:] if len(initial_signals) > cross_check_top_n else initial_signals
 
             for signal in cross_check_candidates:
                 market = next((m for m in markets if m.ticker == signal.market_id), None)
@@ -207,7 +209,17 @@ class AIProbabilityStrategy:
         min_edge: float,
         use_cross_check: bool = False,
     ) -> Optional[Signal]:
-        """Assess a single market and return a signal if edge is sufficient."""
+        """Assess a single market and return a signal if edge is sufficient.
+
+        L-2: This is a long method (~255 lines) with the following logical stages:
+        1. Staleness check — skip if recent prediction is still fresh
+        2. Classification — determine market category, apply accuracy gating
+        3. Forecasting — get Claude's probability estimate (with optional cross-check)
+        4. Divergence & confidence gates — reject hallucinations and wide CIs
+        5. Ensemble — combine Claude + community forecasts + calibration adjustments
+        6. Edge calculation — compute edge, check significance and minimum threshold
+        7. Signal generation — build and return Signal if edge is sufficient
+        """
         # Staleness check: skip re-assessment if recent prediction is still fresh
         if self.db:
             try:
@@ -379,12 +391,24 @@ class AIProbabilityStrategy:
             adjusted_prob = max(0.01, min(0.99, ensemble.final_probability + adjustment))
             # Recalculate edge after adjustment using the same market price
             from src.core.models import EnsembleForecast as EnsembleForecastModel
+            # Recalculate confidence: shift CI by the same adjustment amount
+            # and derive confidence from how tight the CI is around new prob
+            orig_ci_width = 0.0
+            if ensemble.individual_forecasts:
+                f0 = ensemble.individual_forecasts[0]
+                ci_low = getattr(f0, "confidence_low", None)
+                ci_high = getattr(f0, "confidence_high", None)
+                if ci_low is not None and ci_high is not None:
+                    orig_ci_width = ci_high - ci_low
+            # Confidence = 1 - CI_width (narrower CI = higher confidence),
+            # clamped to [0.1, 0.95]
+            adjusted_confidence = max(0.1, min(0.95, 1.0 - orig_ci_width)) if orig_ci_width > 0 else ensemble.confidence
             ensemble = EnsembleForecastModel(
                 final_probability=adjusted_prob,
                 individual_forecasts=ensemble.individual_forecasts,
                 market_price=ensemble.market_price,
                 edge=adjusted_prob - market.yes_price,
-                confidence=ensemble.confidence,
+                confidence=adjusted_confidence,
             )
             logger.debug(
                 f"Calibration adjustment for {category.value}: "

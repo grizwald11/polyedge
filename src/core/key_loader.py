@@ -55,6 +55,29 @@ def load_rsa_private_key(
         return key
     except RuntimeError:
         raise  # Re-raise permission/security errors
+    except TypeError as e:
+        # cryptography raises TypeError when a passphrase-protected key
+        # is loaded with password=None.
+        logger.error(
+            f"Failed to load private key from {private_key_path}: the key "
+            f"appears to be passphrase-protected. Passphrase-protected PEM "
+            f"keys are not currently supported — please provide an unencrypted "
+            f"key file or decrypt it first (e.g., openssl rsa -in key.pem "
+            f"-out key_nopass.pem). Original error: {e}"
+        )
+        return None
+    except ValueError as e:
+        # cryptography may also raise ValueError for encrypted keys in
+        # some versions / formats.
+        if "password" in str(e).lower() or "encrypt" in str(e).lower():
+            logger.error(
+                f"Failed to load private key from {private_key_path}: the key "
+                f"appears to be passphrase-protected. Please provide an "
+                f"unencrypted key file. Original error: {e}"
+            )
+        else:
+            logger.error(f"Failed to load private key from {private_key_path}: {e}", exc_info=True)
+        return None
     except Exception as e:
         logger.error(f"Failed to load private key from {private_key_path}: {e}", exc_info=True)
         return None

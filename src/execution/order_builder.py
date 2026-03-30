@@ -105,7 +105,7 @@ class OrderBuilder:
         market: Market,
         signal: Signal,
         size: int,
-    ) -> Order:
+    ) -> Optional[Order]:
         """Build a FOK market (taker) order.
 
         Uses the current best price from the market. Fills immediately or cancels.

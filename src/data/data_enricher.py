@@ -132,7 +132,7 @@ class DataEnricher:
                     return await asyncio.wait_for(coro, timeout=timeout)
                 except asyncio.TimeoutError:
                     logger.warning(f"Data source '{name}' timed out after {timeout}s")
-                    return None
+                    return (name, None)
 
             wrapped_tasks = [
                 asyncio.create_task(

@@ -136,7 +136,14 @@ class FillTracker:
                 filled_count = status.get("filled_count", 0)
                 remaining = status.get("remaining_count", 0)
                 if filled_count > 0 and order.id not in self._processed_fills:
-                    partial_trade = self._record_partial_fill(order, status)
+                    try:
+                        partial_trade = self._record_partial_fill(order, status)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to record partial fill for {order_id}: {e}",
+                            exc_info=True,
+                        )
+                        partial_trade = None
                     if partial_trade:
                         fills.append(partial_trade)
                 if remaining == 0:

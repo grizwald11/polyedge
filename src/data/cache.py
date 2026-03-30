@@ -12,7 +12,12 @@ from typing import Any, Optional
 
 
 class TTLCache:
-    """Thread-safe in-memory cache with per-key TTL expiration."""
+    """In-memory cache with per-key TTL expiration.
+
+    H-8: NOT thread-safe. Safe for single-threaded asyncio use only.
+    If thread safety is needed, wrap mutations in an asyncio.Lock or
+    threading.Lock.
+    """
 
     def __init__(self, ttl_seconds: int = 3600):
         self.ttl_seconds = ttl_seconds
