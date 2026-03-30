@@ -242,6 +242,7 @@ def _sanitize_external_text(text: str, max_length: int = 5000) -> str:
        injection techniques that bypass pattern matching.
     """
     import re
+
     # Truncate to prevent oversized injections
     original_len = len(text)
     text = text[:max_length]

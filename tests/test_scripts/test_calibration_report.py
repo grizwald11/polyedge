@@ -8,7 +8,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.analysis.calibration_analyzer import (
-    CalibrationAnalyzer, CalibrationBin, CalibrationReport, CategoryStats,
+    CalibrationAnalyzer,
+    CalibrationBin,
+    CalibrationReport,
+    CategoryStats,
 )
 from src.scripts.calibration_report import format_report
 

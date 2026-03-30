@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.core.models import (
-    Direction, Market, MarketCategory, MarketToken, Position, StrategyName,
+    Direction,
+    Market,
+    MarketCategory,
+    MarketToken,
+    Position,
+    StrategyName,
 )
 from src.execution.position_manager import PositionManager
 

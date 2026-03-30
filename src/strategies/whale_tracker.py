@@ -12,7 +12,10 @@ from typing import Optional
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, Signal, StrategyName,
+    Direction,
+    Market,
+    Signal,
+    StrategyName,
 )
 from src.data.whale_monitor import WhaleMonitor
 from src.storage.database import Database

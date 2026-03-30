@@ -522,8 +522,8 @@ class TestDBLoadConsistencyValidation:
 
     def test_oversized_sell_in_db_is_clamped_on_load(self, tmp_db):
         """A SELL that exceeds accumulated BUY at replay time is clamped, not crashed."""
-        from datetime import datetime, timezone
         import time
+        from datetime import datetime, timezone
         t1 = datetime.now(timezone.utc)
         buy = Trade(
             order_id="PE-buy-h11b",

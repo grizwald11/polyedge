@@ -1,7 +1,7 @@
 """Tests for Kalshi API client — auth signing and request handling."""
 
 import time
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -103,6 +103,7 @@ class TestKalshiRequests:
     async def test_429_exhausts_retries_raises(self):
         """Regression: 429 on all attempts should raise KalshiRateLimitError."""
         import httpx
+
         from src.core.kalshi_client import KalshiRateLimitError
         client = KalshiClient()
         mock_http = AsyncMock()
@@ -136,6 +137,7 @@ class TestRetryAfterHeader:
     async def test_429_uses_retry_after_header_when_present(self):
         """When Retry-After is present, wait that many seconds instead of backoff."""
         import httpx
+
         from src.core.kalshi_client import KalshiRateLimitError
 
         client = KalshiClient()
@@ -173,6 +175,7 @@ class TestRetryAfterHeader:
     async def test_429_falls_back_to_backoff_without_retry_after(self):
         """When Retry-After header is absent, use formula-based backoff."""
         import httpx
+
         from src.core.kalshi_client import KalshiRateLimitError
 
         client = KalshiClient()

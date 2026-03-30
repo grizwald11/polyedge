@@ -7,7 +7,6 @@ import pytest
 
 from src.data.cleveland_fed import ClevelandFedNowcast
 
-
 SAMPLE_HTML = """
 <html>
 <body>

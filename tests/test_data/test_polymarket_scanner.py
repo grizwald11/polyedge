@@ -9,7 +9,11 @@ import pytest
 
 from src.config import Settings
 from src.core.models import (
-    Market, MarketCategory, MarketToken, Platform, TokenOutcome,
+    Market,
+    MarketCategory,
+    MarketToken,
+    Platform,
+    TokenOutcome,
 )
 from src.data.polymarket_scanner import PolymarketScanner
 

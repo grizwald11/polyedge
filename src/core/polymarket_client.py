@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 # Lazy import — py-clob-client is optional (only needed when Polymarket is enabled)
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, OrderType as PolyOrderType
+    from py_clob_client.clob_types import OrderArgs
+    from py_clob_client.clob_types import OrderType as PolyOrderType
     _PY_CLOB_AVAILABLE = True
 except ImportError:
     _PY_CLOB_AVAILABLE = False

@@ -16,8 +16,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from src.storage.database import Database
 from src.metrics import Metrics
+from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +143,8 @@ def create_app(
         return "<h1>PolyEdge</h1><p>Install jinja2 for full UI.</p>"
 
     # ─── Register route modules ───────────────────
-    from src.dashboard.routes_html import register_html_routes
     from src.dashboard.routes_api import register_api_routes
+    from src.dashboard.routes_html import register_html_routes
     from src.dashboard.routes_partials import register_partial_routes
 
     register_html_routes(

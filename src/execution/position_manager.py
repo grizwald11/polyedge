@@ -10,7 +10,14 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.core.models import (
-    Direction, Market, Order, OrderStatus, Position, Side, StrategyName, Trade,
+    Direction,
+    Market,
+    Order,
+    OrderStatus,
+    Position,
+    Side,
+    StrategyName,
+    Trade,
 )
 from src.storage.database import Database
 

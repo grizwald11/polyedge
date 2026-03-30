@@ -14,7 +14,10 @@ from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.prompt_templates import NEWS_IMPACT_TEMPLATE
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, Signal, StrategyName,
+    Direction,
+    Market,
+    Signal,
+    StrategyName,
 )
 from src.data.news_ingestion import NewsIngestion, NewsItem
 from src.storage.database import Database

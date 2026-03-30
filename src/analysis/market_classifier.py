@@ -6,8 +6,8 @@ on Market model objects directly.
 
 from __future__ import annotations
 
-from src.core.models import Market, MarketCategory
 from src.core.market_discovery import classify_market_category
+from src.core.models import Market, MarketCategory
 
 
 def classify_market(market: Market) -> MarketCategory:

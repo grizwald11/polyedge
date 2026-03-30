@@ -12,8 +12,8 @@ import math
 from datetime import datetime, timezone
 
 from src.config import Settings
-from src.core.polymarket_discovery import PolymarketDiscovery, parse_polymarket_market
 from src.core.models import Market, MarketSnapshot
+from src.core.polymarket_discovery import PolymarketDiscovery, parse_polymarket_market
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)

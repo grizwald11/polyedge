@@ -15,11 +15,11 @@ from typing import Optional
 
 import anthropic
 
-from src.config import Settings
-from src.analysis.prompt_templates import SYSTEM_PROMPT, build_prompt
 from src.analysis.market_classifier import classify_market
 from src.analysis.news_researcher import NewsResearcher
-from src.core.models import Market, ForecastResult, MarketCategory
+from src.analysis.prompt_templates import SYSTEM_PROMPT, build_prompt
+from src.config import Settings
+from src.core.models import ForecastResult, Market, MarketCategory
 
 logger = logging.getLogger(__name__)
 

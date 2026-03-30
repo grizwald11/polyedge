@@ -10,9 +10,20 @@ import pytest
 
 from src.config import Settings, load_settings
 from src.core.models import (
-    Market, MarketCategory, MarketToken, Signal, StrategyName, Direction,
-    Order, Trade, Side, OrderType, OrderStatus, CalibrationRecord,
-    MarketSnapshot, ForecastResult,
+    CalibrationRecord,
+    Direction,
+    ForecastResult,
+    Market,
+    MarketCategory,
+    MarketSnapshot,
+    MarketToken,
+    Order,
+    OrderStatus,
+    OrderType,
+    Side,
+    Signal,
+    StrategyName,
+    Trade,
 )
 from src.storage.database import Database
 

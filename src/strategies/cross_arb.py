@@ -16,7 +16,10 @@ from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.prompt_templates import ARB_VALIDATION_TEMPLATE
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, Signal, StrategyName,
+    Direction,
+    Market,
+    Signal,
+    StrategyName,
 )
 from src.data.market_graph import MarketGraph
 from src.storage.database import Database

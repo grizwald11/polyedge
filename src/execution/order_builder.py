@@ -15,8 +15,18 @@ from typing import Optional
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, Order, OrderType, OrderStatus, Platform, Side, Signal,
-    StrategyName, dollars_to_cents, kalshi_maker_fee, kalshi_taker_fee,
+    Direction,
+    Market,
+    Order,
+    OrderStatus,
+    OrderType,
+    Platform,
+    Side,
+    Signal,
+    StrategyName,
+    dollars_to_cents,
+    kalshi_maker_fee,
+    kalshi_taker_fee,
     polymarket_fee,
 )
 

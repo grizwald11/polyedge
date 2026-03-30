@@ -16,7 +16,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from src.core.models import Market, MarketSnapshot, Signal, Order, Trade, CalibrationRecord
+from src.core.models import (
+    CalibrationRecord,
+    Market,
+    MarketSnapshot,
+    Order,
+    Signal,
+    Trade,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +66,9 @@ CREATE TABLE IF NOT EXISTS markets (
     last_updated TEXT NOT NULL,
     PRIMARY KEY (ticker, platform)
 );
+-- M-2: Unique index on ticker so child table FK refs to markets(ticker) are valid
+-- with PRAGMA foreign_keys=ON (composite PK alone doesn't satisfy single-column FK).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_markets_ticker_unique ON markets(ticker);
 
 -- Market price snapshots
 CREATE TABLE IF NOT EXISTS market_snapshots (
@@ -278,23 +288,11 @@ class Database:
         conn.row_factory = sqlite3.Row
         if self.wal_mode:
             conn.execute("PRAGMA journal_mode=WAL")
-        # FK enforcement disabled: v6 migration changed markets to composite PK
-        # (ticker, platform) but child tables still reference single-column ticker.
-        # Enabling FKs would break DELETE/UPDATE on signals/orders/trades because
-        # SQLite requires the parent to have a UNIQUE constraint on the referenced
-        # column(s), and composite PK (ticker, platform) doesn't satisfy FK refs
-        # to markets(ticker) alone. App logic enforces referential integrity.
-        # TODO (M-18): Re-enable FK enforcement. Migration plan:
-        #   1. Add a new schema version (v7) that alters signals, orders, trades,
-        #      calibration_records, and whale_trades to use a composite FK:
-        #      (market_id TEXT, platform TEXT, FOREIGN KEY (market_id, platform)
-        #       REFERENCES markets(ticker, platform) ON DELETE CASCADE)
-        #   2. Backfill the platform column in all child tables (default 'kalshi').
-        #   3. Replace this PRAGMA foreign_keys=OFF with PRAGMA foreign_keys=ON.
-        #   4. Add test coverage for FK cascade delete behavior.
-        #   Until then, use cleanup_orphaned_records() for application-level integrity.
-        conn.execute("PRAGMA foreign_keys=OFF")
-        logger.debug("FK enforcement off (tech debt: child tables need composite FK migration — see M-18)")
+        # M-2: FK enforcement enabled. Child tables reference markets(ticker)
+        # which has a UNIQUE index (added in migration v12) to satisfy SQLite's
+        # FK requirement that the parent column(s) have a UNIQUE constraint.
+        conn.execute("PRAGMA foreign_keys=ON")
+        logger.debug("FK enforcement enabled (unique index on markets.ticker satisfies FK refs)")
         conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
         return conn
@@ -581,6 +579,13 @@ class Database:
             conn.execute("ALTER TABLE signals ADD COLUMN risk_warnings TEXT DEFAULT ''")
             conn.execute("ALTER TABLE signals ADD COLUMN status TEXT DEFAULT 'generated'")
             logger.info("Migration v11: added risk gate columns to signals (H-1/H-5)")
+
+        # Migration v12: unique index on markets(ticker) for FK enforcement (M-2).
+        # Also added to SCHEMA_SQL for fresh databases; this handles existing DBs.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_markets_ticker_unique "
+            "ON markets(ticker)"
+        )
 
         conn.commit()
 
@@ -993,7 +998,8 @@ class Database:
         Args:
             date_str: Date in YYYY-MM-DD format. Defaults to today (UTC).
         """
-        from datetime import date as date_type, timedelta
+        from datetime import date as date_type
+        from datetime import timedelta
         if date_str is None:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
@@ -1009,7 +1015,8 @@ class Database:
 
         Returns dict of strategy_name -> {"count": int, "pnl": float}
         """
-        from datetime import date as date_type, timedelta
+        from datetime import date as date_type
+        from datetime import timedelta
         if date_str is None:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
@@ -1124,7 +1131,8 @@ class Database:
         Args:
             date_str: Date in YYYY-MM-DD format. Defaults to today (UTC).
         """
-        from datetime import date as date_type, timedelta
+        from datetime import date as date_type
+        from datetime import timedelta
         if date_str is None:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
@@ -1625,9 +1633,10 @@ class Database:
     def cleanup_orphaned_records(self) -> dict[str, int]:
         """Remove orphaned child records whose parent markets no longer exist.
 
-        Since foreign keys are disabled (see _get_conn), this method provides
-        application-level referential integrity cleanup. Call periodically
-        (e.g., daily alongside cleanup_old_snapshots).
+        Foreign keys are now enforced (PRAGMA foreign_keys=ON), so new orphans
+        cannot be created. This method cleans up any legacy orphans that
+        pre-date FK enforcement. Call periodically (e.g., daily alongside
+        cleanup_old_snapshots).
 
         Returns dict of {table_name: rows_deleted}.
         """

@@ -7,9 +7,13 @@ import logging
 import time
 
 from src.core.models import (
-    Direction, Market, MarketToken, Platform, TokenOutcome,
+    Direction,
+    Market,
+    MarketToken,
+    Platform,
+    TokenOutcome,
 )
-from src.orchestrator.startup import _sync_bankroll, _check_disk_space
+from src.orchestrator.startup import _check_disk_space, _sync_bankroll
 from src.orchestrator.trade_cycle import _execute_signals, _process_exits
 
 

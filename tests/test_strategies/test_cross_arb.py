@@ -9,7 +9,11 @@ import pytest
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, MarketCategory, MarketToken, StrategyName,
+    Direction,
+    Market,
+    MarketCategory,
+    MarketToken,
+    StrategyName,
 )
 from src.data.market_graph import MarketGraph
 from src.strategies.cross_arb import CrossArbStrategy

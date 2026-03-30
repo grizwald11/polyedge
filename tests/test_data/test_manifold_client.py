@@ -7,8 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.data.manifold_client import ManifoldClient, MIN_SIMILARITY_THRESHOLD, MIN_BETTORS
-
+from src.data.manifold_client import (
+    MIN_BETTORS,
+    MIN_SIMILARITY_THRESHOLD,
+    ManifoldClient,
+)
 
 # ──────────────────────────────────────
 # Fixtures

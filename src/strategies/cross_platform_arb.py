@@ -13,7 +13,11 @@ from typing import Optional
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, Platform, Signal, StrategyName,
+    Direction,
+    Market,
+    Platform,
+    Signal,
+    StrategyName,
 )
 from src.data.polymarket_cross_ref import PolymarketCrossRef
 from src.storage.database import Database

@@ -10,8 +10,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from src.storage.database import Database
 from src.analysis.calibration_analyzer import CalibrationAnalyzer
+from src.storage.database import Database
 
 
 def format_report(analyzer: CalibrationAnalyzer) -> str:

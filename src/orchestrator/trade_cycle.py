@@ -7,8 +7,16 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from src.core.models import (
-    Direction, Market, MarketToken, Order, OrderStatus, OrderType, Side,
-    StrategyName, TokenOutcome, Platform,
+    Direction,
+    Market,
+    MarketToken,
+    Order,
+    OrderStatus,
+    OrderType,
+    Platform,
+    Side,
+    StrategyName,
+    TokenOutcome,
 )
 
 

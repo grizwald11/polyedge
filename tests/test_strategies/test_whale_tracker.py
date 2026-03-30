@@ -9,7 +9,12 @@ import pytest
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, MarketToken, StrategyName, WhaleSignal, WhaleWallet,
+    Direction,
+    Market,
+    MarketToken,
+    StrategyName,
+    WhaleSignal,
+    WhaleWallet,
 )
 from src.data.whale_monitor import WhaleMonitor, WhalePosition
 from src.strategies.whale_tracker import WhaleTrackerStrategy

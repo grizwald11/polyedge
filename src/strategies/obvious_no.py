@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.config import Settings
-from src.core.models import Market, Signal, Direction, StrategyName
+from src.core.models import Direction, Market, Signal, StrategyName
 
 logger = logging.getLogger(__name__)
 

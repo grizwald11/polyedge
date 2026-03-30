@@ -8,7 +8,12 @@ import pytest
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, MarketCategory, MarketToken, Signal, StrategyName,
+    Direction,
+    Market,
+    MarketCategory,
+    MarketToken,
+    Signal,
+    StrategyName,
 )
 from src.execution.position_manager import PositionManager
 from src.risk.circuit_breaker import CircuitBreaker
@@ -79,6 +84,7 @@ class TestCheckAll:
 
     def test_fails_total_exposure(self, engine, signal, market, position_manager, tmp_db):
         from src.core.models import Side, Trade
+
         # Fill up exposure to near limit
         for i in range(8):
             trade = Trade(
@@ -121,6 +127,7 @@ class TestCheckAll:
     ):
         """With allow_position_additions=True (default), a hedge warns but passes."""
         from src.core.models import Direction, Side, Trade
+
         # Establish a BUY_YES position
         trade = Trade(
             order_id="PE-x", market_id="FED-RATE-CUT-MAY26",
@@ -217,6 +224,7 @@ class TestCheckAll:
 
     def test_obvious_no_exposure_limit(self, engine, market, position_manager):
         from src.core.models import Side, Trade
+
         # Fill up obvious NO exposure
         trade = Trade(
             order_id="PE-no1", market_id="OTHER-MKT",
@@ -240,6 +248,7 @@ class TestCheckAll:
     def test_fails_correlated_exposure(self, engine, signal, market, position_manager):
         """Filling AI_PROBABILITY to near 20% limit should block another AI_PROBABILITY trade."""
         from src.core.models import Side, Trade
+
         # Fill up strategy exposure to near 20% of $500 = $100
         for i in range(4):
             trade = Trade(

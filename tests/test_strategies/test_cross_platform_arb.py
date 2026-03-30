@@ -8,8 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.core.models import (
-    Direction, Market, MarketCategory, MarketToken, Platform, Signal,
-    StrategyName, TokenOutcome,
+    Direction,
+    Market,
+    MarketCategory,
+    MarketToken,
+    Platform,
+    Signal,
+    StrategyName,
+    TokenOutcome,
 )
 from src.strategies.cross_platform_arb import CrossPlatformArbStrategy
 

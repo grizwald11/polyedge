@@ -9,7 +9,11 @@ import pytest
 
 from src.core.kalshi_client import KalshiClient
 from src.core.models import (
-    Order, OrderStatus, OrderType, Side, StrategyName,
+    Order,
+    OrderStatus,
+    OrderType,
+    Side,
+    StrategyName,
 )
 from src.execution.fill_tracker import FillTracker
 
@@ -157,7 +161,7 @@ class TestFillTracker:
     async def test_fills_loaded_from_db_on_init(self, mock_kalshi, tmp_db):
         """Regression: previously filled order IDs should be loaded from DB on init,
         preventing duplicate trade recording after restart."""
-        from src.core.models import Trade, StrategyName
+        from src.core.models import StrategyName, Trade
 
         # Simulate a pre-existing trade in the DB
         trade = Trade(

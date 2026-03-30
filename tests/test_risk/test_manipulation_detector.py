@@ -9,9 +9,9 @@ import pytest
 
 from src.core.models import Market, MarketToken
 from src.risk.manipulation_detector import (
+    RAPID_MOVE_THRESHOLD,
     ManipulationDetector,
     ManipulationFlag,
-    RAPID_MOVE_THRESHOLD,
 )
 
 
@@ -177,11 +177,12 @@ class TestRiskEngineIntegration:
     """Test that manipulation detector integrates with risk engine."""
 
     def test_manipulation_flag_blocks_trade(self, settings, tmp_db):
+        from datetime import datetime, timedelta, timezone
+
         from src.core.models import Direction, Signal, StrategyName
         from src.execution.position_manager import PositionManager
         from src.risk.circuit_breaker import CircuitBreaker
         from src.risk.risk_engine import RiskEngine
-        from datetime import datetime, timedelta, timezone
 
         pm = PositionManager(tmp_db, bankroll=500.0)
         cb = CircuitBreaker(settings, tmp_db)
@@ -229,11 +230,12 @@ class TestRiskEngineIntegration:
         assert any("Manipulation flag" in c for c in result.failed_checks)
 
     def test_clean_market_passes_manipulation_check(self, settings, tmp_db):
+        from datetime import datetime, timedelta, timezone
+
         from src.core.models import Direction, Signal, StrategyName
         from src.execution.position_manager import PositionManager
         from src.risk.circuit_breaker import CircuitBreaker
         from src.risk.risk_engine import RiskEngine
-        from datetime import datetime, timedelta, timezone
 
         pm = PositionManager(tmp_db, bankroll=500.0)
         cb = CircuitBreaker(settings, tmp_db)

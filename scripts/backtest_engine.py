@@ -17,7 +17,7 @@ Remaining limitations (acknowledged in results):
   open positions at backtest end are marked-to-last-known-price. Unresolved position
   count is reported in BacktestResult.unresolved_positions.
 - Execution model: Order-miss / partial-fill simulation is heuristic, not data-driven.
-- Slippage: Maker fills assumed at limit price; taker slippage not modelled.
+- Slippage: Flat bps model (default) or depth-aware model (depth_aware_slippage=True).
 """
 
 from __future__ import annotations
@@ -307,6 +307,7 @@ class BacktestEngine:
         strategy_filter: str | None = None,
         use_taker_exit_fee: bool = True,
         slippage_bps: float = 10.0,
+        depth_aware_slippage: bool = False,
     ):
         self.db = db
         self.settings = settings
@@ -319,6 +320,11 @@ class BacktestEngine:
         # M-19: Simple slippage model in basis points. Applied to entry
         # (price worsened) and exit (price worsened) to simulate market impact.
         self.slippage_bps = slippage_bps
+        # L-8: Order-book-depth-aware slippage model. When enabled and
+        # liquidity data is available in snapshots, slippage scales with
+        # order_size / book_depth instead of using a flat basis-point rate.
+        # Falls back to flat model when liquidity data is missing or zero.
+        self.depth_aware_slippage = depth_aware_slippage
         self.kelly = KellySizer(settings)
         self.circuit_breaker = CircuitBreaker(settings, db)
 
@@ -399,6 +405,7 @@ class BacktestEngine:
             yes_price = snap["yes_price"]
             no_price = snap["no_price"]
             timestamp = snap["timestamp"]
+            liquidity = snap["liquidity"] or 0.0
 
             # C-2: keep rolling track of the most recent price for each market
             last_known_prices[market_id] = (yes_price, no_price)
@@ -489,8 +496,18 @@ class BacktestEngine:
             if contracts > 50 and random.random() < 0.25:
                 contracts = max(1, int(contracts * random.uniform(0.4, 0.8)))
 
-            # M-19: Apply slippage to entry price (worsens fill for buyer)
-            slippage = self.slippage_bps / 10000.0
+            # M-19 / L-8: Apply slippage to entry price (worsens fill for buyer).
+            # Two models:
+            #   1. Flat: constant basis-point slippage (default / fallback).
+            #   2. Depth-aware: slippage scales with order_size / book_depth
+            #      when liquidity data is available in the snapshot.
+            snap_liquidity = liquidity if liquidity else 0.0
+            if self.depth_aware_slippage and snap_liquidity > 0 and contracts > 0:
+                # Scale slippage proportionally to how much of the book we consume.
+                # Larger orders relative to available depth suffer more slippage.
+                slippage = (self.slippage_bps / 10000.0) * (contracts / snap_liquidity)
+            else:
+                slippage = self.slippage_bps / 10000.0
             if direction in (Direction.BUY_YES, Direction.BUY_NO):
                 slipped_price = min(0.99, order_price + slippage)
             else:

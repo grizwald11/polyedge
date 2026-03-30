@@ -14,7 +14,13 @@ from typing import Optional
 
 from src.config import Settings
 from src.core.market_discovery import MarketDiscovery, parse_market
-from src.core.models import Market, MarketCategory, MarketSnapshot, kalshi_taker_fee, dollars_to_cents
+from src.core.models import (
+    Market,
+    MarketCategory,
+    MarketSnapshot,
+    dollars_to_cents,
+    kalshi_taker_fee,
+)
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)

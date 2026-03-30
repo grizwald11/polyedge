@@ -9,7 +9,12 @@ import pytest
 
 from src.config import Settings
 from src.core.models import (
-    Direction, ForecastResult, Market, MarketCategory, MarketToken, StrategyName,
+    Direction,
+    ForecastResult,
+    Market,
+    MarketCategory,
+    MarketToken,
+    StrategyName,
 )
 from src.data.news_ingestion import NewsItem
 from src.strategies.news_reactive import NewsReactiveStrategy

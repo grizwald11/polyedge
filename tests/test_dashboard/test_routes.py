@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient
 
 from src.dashboard.server import create_app
 
-
 # ──────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────

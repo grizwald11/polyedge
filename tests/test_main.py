@@ -13,11 +13,19 @@ import pytest
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, MarketCategory, MarketToken, Order, OrderStatus,
-    OrderType, Side, Signal, StrategyName, Trade,
+    Direction,
+    Market,
+    MarketCategory,
+    MarketToken,
+    Order,
+    OrderStatus,
+    OrderType,
+    Side,
+    Signal,
+    StrategyName,
+    Trade,
 )
 from src.main import scan_and_trade, setup_logging
-
 
 # ──────────────────────────────────────────────
 # Fixtures — mock every component scan_and_trade needs

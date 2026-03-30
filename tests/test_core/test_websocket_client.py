@@ -9,10 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.websocket_client import (
+    MAX_CONSECUTIVE_FAILURES,
     FillUpdate,
     KalshiWebSocket,
     LifecycleUpdate,
-    MAX_CONSECUTIVE_FAILURES,
     TickerUpdate,
 )
 
@@ -286,8 +286,8 @@ class TestAuth:
 
     def test_auth_headers_with_mock_key(self, tmp_path):
         """Auth headers are generated correctly with a key."""
-        from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
 
         # Generate a test RSA key
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -322,7 +322,11 @@ class TestModuleConstants:
         assert MAX_CONSECUTIVE_FAILURES == 10
 
     def test_initial_backoff_defined(self):
-        from src.core.websocket_client import INITIAL_BACKOFF, MAX_BACKOFF, BACKOFF_MULTIPLIER
+        from src.core.websocket_client import (
+            BACKOFF_MULTIPLIER,
+            INITIAL_BACKOFF,
+            MAX_BACKOFF,
+        )
         assert INITIAL_BACKOFF == 1.0
         assert MAX_BACKOFF == 60.0
         assert BACKOFF_MULTIPLIER == 2.0

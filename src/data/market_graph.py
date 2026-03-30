@@ -196,6 +196,7 @@ class MarketGraph:
     def _tokenize(text: str) -> set[str]:
         """Tokenize text into a set of lowercase words (3+ chars), including hyphenated terms."""
         import re
+
         # Match words and hyphenated compounds (e.g., "anti-trust", "re-election")
         words = set(re.findall(r'\b[a-z]{3,}(?:-[a-z]{3,})*\b', text.lower()))
         # Remove common stop words

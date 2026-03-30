@@ -11,9 +11,8 @@ import logging
 import re
 import warnings
 from dataclasses import dataclass
-from typing import Optional
-
 from html.parser import HTMLParser
+from typing import Optional
 
 import httpx
 
@@ -755,7 +754,7 @@ def _normalize_url(url: str) -> str:
     (e.g., ?article=123 vs ?article=456) are not falsely deduplicated.
     """
     try:
-        from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+        from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
         parsed = urlparse(url)
         host = parsed.hostname or ""
         if host.startswith("www."):

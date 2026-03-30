@@ -74,6 +74,7 @@ class KalshiClient:
         )
         if self._private_key is not None:
             import os
+
             # Record the mtime at load time for freshness checking (M-6)
             self._key_load_mtime: float = os.stat(self.private_key_path).st_mtime
             logger.info("Loaded RSA private key for Kalshi auth")

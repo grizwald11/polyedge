@@ -11,7 +11,12 @@ import pytest
 from src.config import Settings
 from src.core.kalshi_client import KalshiClient, KalshiRateLimitError
 from src.core.models import (
-    Direction, Order, OrderStatus, OrderType, Side, StrategyName,
+    Direction,
+    Order,
+    OrderStatus,
+    OrderType,
+    Side,
+    StrategyName,
 )
 from src.execution.order_router import OrderRouter
 from src.storage.database import Database
@@ -195,6 +200,7 @@ class TestLiveFillFee:
         # Maker fee: ceil(0.0175 * 10 * 34 * (100-34)) / 100 cents -> dollars
         # = ceil(0.0175 * 10 * 34 * 66) / 100 = ceil(392.7) / 100 = $3.93
         import math
+
         from src.core.models import dollars_to_cents, kalshi_maker_fee
         expected_fee_cents = kalshi_maker_fee(10, dollars_to_cents(0.34))
         assert result.trade.fee == expected_fee_cents / 100.0
@@ -633,7 +639,8 @@ class TestPaperRiskRejection:
     async def test_sell_size_clamped_to_position(self, paper_settings, mock_kalshi, tmp_db):
         """SELL order size clamped to actual position size."""
         from unittest.mock import MagicMock
-        from src.core.models import Position, Direction
+
+        from src.core.models import Direction, Position
         pm = MagicMock()
         pm.get_position.return_value = Position(
             market_id="FED-RATE-CUT-MAY26",

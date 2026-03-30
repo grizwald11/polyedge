@@ -6,8 +6,15 @@ import pytest
 
 from src.config import Settings
 from src.core.models import (
-    Direction, Market, MarketCategory, MarketToken, OrderType, OrderStatus,
-    Side, Signal, StrategyName,
+    Direction,
+    Market,
+    MarketCategory,
+    MarketToken,
+    OrderStatus,
+    OrderType,
+    Side,
+    Signal,
+    StrategyName,
 )
 from src.execution.order_builder import OrderBuilder
 

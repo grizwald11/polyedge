@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 
+from src.orchestrator.lifecycle import main, run_trading_loop
+from src.orchestrator.scan_cycle import scan_and_trade
+
 # Re-export public API so existing imports (e.g. tests) continue to work.
 from src.orchestrator.startup import setup_logging
-from src.orchestrator.scan_cycle import scan_and_trade
-from src.orchestrator.lifecycle import run_trading_loop, main
 
 __all__ = [
     "setup_logging",

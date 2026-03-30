@@ -12,26 +12,33 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.config import Settings
-from src.core.models import (
-    Direction, ForecastResult, Market, MarketCategory, MarketToken,
-    Side, Signal, StrategyName, Trade,
-)
-from src.storage.database import Database
+from src.alerts.alert_manager import AlertManager, LogBackend
 from src.analysis.calibration import CalibrationTracker
 from src.analysis.calibration_analyzer import CalibrationAnalyzer
 from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.resolution_tracker import ResolutionTracker
+from src.config import Settings
+from src.core.models import (
+    Direction,
+    ForecastResult,
+    Market,
+    MarketCategory,
+    MarketToken,
+    Side,
+    Signal,
+    StrategyName,
+    Trade,
+)
 from src.data.market_scanner import MarketScanner
 from src.execution.fill_tracker import FillTracker
 from src.execution.order_builder import OrderBuilder
 from src.execution.order_router import OrderRouter
 from src.execution.position_manager import PositionManager
+from src.main import scan_and_trade
 from src.risk.circuit_breaker import CircuitBreaker
 from src.risk.kelly_sizer import KellySizer
 from src.risk.risk_engine import RiskEngine
-from src.alerts.alert_manager import AlertManager, LogBackend
-from src.main import scan_and_trade
+from src.storage.database import Database
 
 
 def _make_markets() -> list[Market]:

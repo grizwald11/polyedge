@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.strategies.obvious_no import ObviousNoStrategy
 from src.config import Settings
-from src.core.models import Market, MarketToken, MarketCategory, Direction, StrategyName
+from src.core.models import Direction, Market, MarketCategory, MarketToken, StrategyName
+from src.strategies.obvious_no import ObviousNoStrategy
 
 
 @pytest.fixture

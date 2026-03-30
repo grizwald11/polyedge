@@ -15,10 +15,14 @@ from typing import Any, Optional
 
 import httpx
 
-from src.core.models import (
-    Market, MarketToken, MarketCategory, Platform, TokenOutcome,
-)
 from src.core.market_discovery import classify_market_category
+from src.core.models import (
+    Market,
+    MarketCategory,
+    MarketToken,
+    Platform,
+    TokenOutcome,
+)
 
 logger = logging.getLogger(__name__)
 

@@ -12,8 +12,17 @@ from typing import Optional
 
 from src.core.kalshi_client import KalshiClient
 from src.core.models import (
-    Order, OrderStatus, Platform, Trade, Side, StrategyName,
-    dollars_to_cents, kalshi_maker_fee, kalshi_taker_fee, polymarket_fee, OrderType,
+    Order,
+    OrderStatus,
+    OrderType,
+    Platform,
+    Side,
+    StrategyName,
+    Trade,
+    dollars_to_cents,
+    kalshi_maker_fee,
+    kalshi_taker_fee,
+    polymarket_fee,
 )
 from src.storage.database import Database
 

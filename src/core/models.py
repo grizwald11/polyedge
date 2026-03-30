@@ -18,7 +18,6 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-
 # Time constants (L-5)
 SECONDS_PER_MINUTE = 60
 SECONDS_PER_HOUR = 3600
@@ -39,7 +38,7 @@ def dollars_to_cents(dollars: float) -> int:
 
     Uses Decimal to avoid floating-point rounding errors.
     """
-    from decimal import Decimal, ROUND_HALF_UP
+    from decimal import ROUND_HALF_UP, Decimal
     return int(Decimal(str(dollars)).quantize(Decimal("0.01")) * 100)
 
 
@@ -53,7 +52,7 @@ def kalshi_taker_fee(contracts: int, price_cents: int) -> int:
     Uses Decimal arithmetic to avoid floating-point rounding errors on large
     contract counts (C-1).
     """
-    from decimal import Decimal, ROUND_CEILING
+    from decimal import ROUND_CEILING, Decimal
     p = Decimal(price_cents) / Decimal(100)
     fee = (Decimal("0.07") * Decimal(contracts) * p * (1 - p)).to_integral_value(rounding=ROUND_CEILING)
     return int(fee)
@@ -65,7 +64,7 @@ def kalshi_maker_fee(contracts: int, price_cents: int) -> int:
     Uses Decimal arithmetic to avoid floating-point rounding errors on large
     contract counts (C-1).
     """
-    from decimal import Decimal, ROUND_CEILING
+    from decimal import ROUND_CEILING, Decimal
     p = Decimal(price_cents) / Decimal(100)
     fee = (Decimal("0.0175") * Decimal(contracts) * p * (1 - p)).to_integral_value(rounding=ROUND_CEILING)
     return int(fee)

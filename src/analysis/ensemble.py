@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from src.core.models import ForecastResult, EnsembleForecast
+from src.core.models import EnsembleForecast, ForecastResult
 
 logger = logging.getLogger(__name__)
 

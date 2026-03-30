@@ -16,13 +16,13 @@ import asyncio
 import logging
 from typing import Optional
 
-from src.config import Settings
 from src.analysis.market_classifier import classify_market
 from src.analysis.news_researcher import NewsResearcher
+from src.config import Settings
 from src.core.models import Market, MarketCategory
-from src.data.fred_client import FREDClient
 from src.data.cleveland_fed import ClevelandFedNowcast
 from src.data.fedwatch import FedWatchClient
+from src.data.fred_client import FREDClient
 from src.data.manifold_client import ManifoldClient
 from src.data.metaculus_client import MetaculusClient
 from src.data.polymarket_cross_ref import PolymarketCrossRef

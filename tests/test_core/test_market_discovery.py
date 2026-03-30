@@ -1,12 +1,16 @@
 """Tests for market discovery (Kalshi API client wrapper)."""
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.core.market_discovery import MarketDiscovery, parse_market, classify_market_category
 from src.core.kalshi_client import KalshiClient
+from src.core.market_discovery import (
+    MarketDiscovery,
+    classify_market_category,
+    parse_market,
+)
 from src.core.models import MarketCategory
 
 

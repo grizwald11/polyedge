@@ -7,7 +7,6 @@ import pytest
 
 from src.data.fedwatch import FedWatchClient
 
-
 SAMPLE_HTML = """
 <html>
 <body>

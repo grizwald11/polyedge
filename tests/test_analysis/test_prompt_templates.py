@@ -1,11 +1,17 @@
 """Tests for prompt templates."""
 
 from src.analysis.prompt_templates import (
-    get_template, build_prompt, SYSTEM_PROMPT,
-    _sanitize_external_text,
-    POLITICS_TEMPLATE, FED_MACRO_TEMPLATE, GEOPOLITICS_TEMPLATE,
-    TECH_AI_TEMPLATE, CULTURE_TEMPLATE, GENERAL_TEMPLATE,
     CATEGORY_TEMPLATES,
+    CULTURE_TEMPLATE,
+    FED_MACRO_TEMPLATE,
+    GENERAL_TEMPLATE,
+    GEOPOLITICS_TEMPLATE,
+    POLITICS_TEMPLATE,
+    SYSTEM_PROMPT,
+    TECH_AI_TEMPLATE,
+    _sanitize_external_text,
+    build_prompt,
+    get_template,
 )
 from src.core.models import MarketCategory
 

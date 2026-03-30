@@ -7,42 +7,46 @@ import logging
 import sys
 from datetime import datetime, timezone
 
+from src.alerts.alert_manager import AlertManager, LogBackend
+from src.alerts.daily_report import DailyReport
+from src.alerts.imessage_alert import IMessageBackend
+from src.analysis.calibration import CalibrationTracker
+from src.analysis.calibration_analyzer import CalibrationAnalyzer
+from src.analysis.claude_forecaster import ClaudeForecaster
+from src.analysis.resolution_tracker import ResolutionTracker
 from src.config import load_settings
 from src.core.kalshi_client import KalshiClient
 from src.core.market_discovery import MarketDiscovery
 from src.core.models import Platform
-from src.core.websocket_client import KalshiWebSocket, TickerUpdate, FillUpdate, LifecycleUpdate
-from src.data.market_scanner import MarketScanner
-from src.storage.database import Database
-from src.analysis.claude_forecaster import ClaudeForecaster
-from src.analysis.calibration import CalibrationTracker
-from src.analysis.resolution_tracker import ResolutionTracker
-from src.analysis.calibration_analyzer import CalibrationAnalyzer
-from src.strategies.ai_probability import AIProbabilityStrategy
-from src.strategies.obvious_no import ObviousNoStrategy
+from src.core.websocket_client import (
+    FillUpdate,
+    KalshiWebSocket,
+    LifecycleUpdate,
+    TickerUpdate,
+)
 from src.data.data_enricher import DataEnricher
+from src.data.market_graph import MarketGraph
+from src.data.market_scanner import MarketScanner
+from src.data.news_ingestion import NewsIngestion
+from src.data.whale_monitor import WhaleMonitor
+from src.execution.fill_tracker import FillTracker
 from src.execution.order_builder import OrderBuilder
 from src.execution.order_router import OrderRouter
 from src.execution.position_manager import PositionManager
-from src.execution.fill_tracker import FillTracker
-from src.alerts.alert_manager import AlertManager, LogBackend
-from src.alerts.imessage_alert import IMessageBackend
-from src.alerts.daily_report import DailyReport
-from src.risk.risk_engine import RiskEngine
-from src.risk.kelly_sizer import KellySizer
-from src.risk.circuit_breaker import CircuitBreaker
-from src.risk.portfolio_risk import PortfolioRisk
-from src.strategies.news_reactive import NewsReactiveStrategy
-from src.strategies.cross_arb import CrossArbStrategy
-from src.strategies.whale_tracker import WhaleTrackerStrategy
-from src.data.news_ingestion import NewsIngestion
-from src.data.market_graph import MarketGraph
-from src.data.whale_monitor import WhaleMonitor
-from src.strategies.cross_platform_arb import CrossPlatformArbStrategy
 from src.metrics import Metrics
-
-from src.orchestrator.startup import setup_logging, _acquire_pid_lock, _release_pid_lock
 from src.orchestrator.scan_cycle import scan_and_trade
+from src.orchestrator.startup import _acquire_pid_lock, _release_pid_lock, setup_logging
+from src.risk.circuit_breaker import CircuitBreaker
+from src.risk.kelly_sizer import KellySizer
+from src.risk.portfolio_risk import PortfolioRisk
+from src.risk.risk_engine import RiskEngine
+from src.storage.database import Database
+from src.strategies.ai_probability import AIProbabilityStrategy
+from src.strategies.cross_arb import CrossArbStrategy
+from src.strategies.cross_platform_arb import CrossPlatformArbStrategy
+from src.strategies.news_reactive import NewsReactiveStrategy
+from src.strategies.obvious_no import ObviousNoStrategy
+from src.strategies.whale_tracker import WhaleTrackerStrategy
 
 
 async def run_trading_loop(
@@ -290,8 +294,8 @@ async def main():
         try:
             from src.core.polymarket_client import PolymarketClient
             from src.core.polymarket_discovery import PolymarketDiscovery
-            from src.data.polymarket_scanner import PolymarketScanner
             from src.data.polymarket_cross_ref import PolymarketCrossRef
+            from src.data.polymarket_scanner import PolymarketScanner
 
             poly_discovery = PolymarketDiscovery(settings.polymarket.gamma_host)
 

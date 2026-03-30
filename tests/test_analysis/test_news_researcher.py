@@ -1,13 +1,16 @@
 """Tests for the news researcher module."""
 
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from src.analysis.news_researcher import (
-    NewsResearcher, NewsResult, _extract_source,
-    _extract_text_from_html, _truncate_at_sentence,
+    NewsResearcher,
+    NewsResult,
+    _extract_source,
+    _extract_text_from_html,
+    _truncate_at_sentence,
 )
 
 

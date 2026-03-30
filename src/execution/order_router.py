@@ -14,8 +14,16 @@ from typing import TYPE_CHECKING, Optional
 from src.config import Settings
 from src.core.kalshi_client import KalshiClient, KalshiRateLimitError
 from src.core.models import (
-    Order, OrderStatus, Platform, Side, Trade, dollars_to_cents,
-    kalshi_maker_fee, kalshi_taker_fee, polymarket_fee, OrderType,
+    Order,
+    OrderStatus,
+    OrderType,
+    Platform,
+    Side,
+    Trade,
+    dollars_to_cents,
+    kalshi_maker_fee,
+    kalshi_taker_fee,
+    polymarket_fee,
 )
 from src.storage.database import Database
 
@@ -168,6 +176,7 @@ class OrderRouter:
         Uses non-deterministic randomness for realistic variance.
         """
         import random as _random
+
         # Use non-deterministic randomness for realistic paper trading variance.
         # Previously used deterministic PRNG seeded from order attributes,
         # but this biased paper trading results by producing identical

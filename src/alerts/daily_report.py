@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.alerts.alert_manager import AlertManager
-from src.storage.database import Database
 from src.config import Settings
+from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 

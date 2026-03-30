@@ -2,8 +2,12 @@
 
 import pytest
 
-from src.analysis.ensemble import ensemble_forecast, multi_model_ensemble, _compute_model_weights
-from src.core.models import ForecastResult, EnsembleForecast
+from src.analysis.ensemble import (
+    _compute_model_weights,
+    ensemble_forecast,
+    multi_model_ensemble,
+)
+from src.core.models import EnsembleForecast, ForecastResult
 
 
 def _make_forecast(prob: float, model: str = "claude-sonnet-4-6") -> ForecastResult:

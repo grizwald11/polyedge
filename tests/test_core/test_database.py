@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 import pytest
 
 from src.core.models import (
-    Signal, StrategyName, Direction, Trade, Side, CalibrationRecord, MarketSnapshot,
+    CalibrationRecord,
+    Direction,
+    MarketSnapshot,
+    Side,
+    Signal,
+    StrategyName,
+    Trade,
 )
 from src.storage.database import Database
 
@@ -91,14 +97,14 @@ class TestSignalOperations:
 class TestTradeOperations:
     def _insert_prereqs(self, tmp_db):
         """Insert prerequisite market for FK constraints."""
-        from src.core.models import Market, MarketToken, MarketCategory
+        from src.core.models import Market, MarketCategory, MarketToken
         m = Market(ticker="MKT-001", question="Test?", category=MarketCategory.OTHER,
                    tokens=[MarketToken(token_id="MKT-001_yes", outcome="Yes", price=0.5)],
                    volume_24h=50000, active=True)
         tmp_db.upsert_market(m)
 
     def _insert_prereqs_multi(self, tmp_db):
-        from src.core.models import Market, MarketToken, MarketCategory
+        from src.core.models import Market, MarketCategory, MarketToken
         for mid in ["M1", "M2"]:
             m = Market(ticker=mid, question=f"Test {mid}?", category=MarketCategory.OTHER,
                        tokens=[MarketToken(token_id=f"{mid}_yes", outcome="Yes", price=0.5)],
@@ -155,7 +161,7 @@ class TestRecentTradeDedup:
     """Tests for has_recent_trade() dedup method."""
 
     def _insert_prereqs(self, tmp_db):
-        from src.core.models import Market, MarketToken, MarketCategory
+        from src.core.models import Market, MarketCategory, MarketToken
         m = Market(ticker="MKT-001", question="Test?", category=MarketCategory.OTHER,
                    tokens=[MarketToken(token_id="MKT-001_yes", outcome="Yes", price=0.5)],
                    volume_24h=50000, active=True)
@@ -213,7 +219,7 @@ class TestRecentTradeDedup:
 
 class TestCalibrationOperations:
     def _insert_market(self, tmp_db, mid):
-        from src.core.models import Market, MarketToken, MarketCategory
+        from src.core.models import Market, MarketCategory, MarketToken
         m = Market(ticker=mid, question=f"Test {mid}?", category=MarketCategory.OTHER,
                    tokens=[MarketToken(token_id=f"{mid}_yes", outcome="Yes", price=0.5)],
                    volume_24h=50000, active=True)
@@ -263,7 +269,7 @@ class TestStats:
         tmp_db.upsert_market(sample_market)
         tmp_db.log_signal(sample_signal)
         # Insert market for trade FK
-        from src.core.models import Market, MarketToken, MarketCategory
+        from src.core.models import Market, MarketCategory, MarketToken
         m = Market(ticker="M1", question="Test?", category=MarketCategory.OTHER,
                    tokens=[MarketToken(token_id="M1_yes", outcome="Yes", price=0.5)],
                    volume_24h=50000, active=True)

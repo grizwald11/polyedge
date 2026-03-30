@@ -1,18 +1,28 @@
 """Tests for AI probability strategy."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
-import json
 
 import pytest
 
-from src.strategies.ai_probability import AIProbabilityStrategy
+from src.analysis.calibration_analyzer import (
+    CalibrationAnalyzer,
+    CalibrationReport,
+    CategoryStats,
+)
 from src.analysis.claude_forecaster import ClaudeForecaster
-from src.analysis.calibration_analyzer import CalibrationAnalyzer, CalibrationReport, CategoryStats
 from src.config import Settings
 from src.core.models import (
-    Market, MarketToken, MarketCategory, ForecastResult, Signal, Direction, StrategyName,
+    Direction,
+    ForecastResult,
+    Market,
+    MarketCategory,
+    MarketToken,
+    Signal,
+    StrategyName,
 )
+from src.strategies.ai_probability import AIProbabilityStrategy
 
 
 @pytest.fixture

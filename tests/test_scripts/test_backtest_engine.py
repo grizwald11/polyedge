@@ -23,7 +23,6 @@ from scripts.backtest_engine import (
 from src.config import Settings
 from src.core.models import Direction, ForecastResult
 
-
 # ──────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────

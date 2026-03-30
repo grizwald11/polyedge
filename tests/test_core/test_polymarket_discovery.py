@@ -9,12 +9,11 @@ import pytest
 
 from src.core.models import Market, MarketCategory, Platform, TokenOutcome
 from src.core.polymarket_discovery import (
-    PolymarketDiscovery,
-    parse_polymarket_market,
-    _parse_outcome_prices,
     POLYMARKET_TAG_MAP,
+    PolymarketDiscovery,
+    _parse_outcome_prices,
+    parse_polymarket_market,
 )
-
 
 # --- Fixtures ---
 

@@ -1,14 +1,14 @@
 """Tests for the Claude forecaster."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
 import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.news_researcher import NewsResearcher
 from src.config import Settings
-from src.core.models import Market, MarketToken, MarketCategory, ForecastResult
+from src.core.models import ForecastResult, Market, MarketCategory, MarketToken
 
 
 @pytest.fixture
