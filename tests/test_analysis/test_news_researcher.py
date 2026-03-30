@@ -7,6 +7,7 @@ import pytest
 
 from src.analysis.news_researcher import (
     NewsResearcher, NewsResult, _extract_source,
+    _extract_text_from_html, _truncate_at_sentence,
 )
 
 
@@ -376,6 +377,139 @@ class TestExtractSource:
 
     def test_empty_url(self):
         assert _extract_source("") == ""
+
+
+class TestHtmlTextExtraction:
+    """Tests for the stdlib HTML parser replacement."""
+
+    def test_strips_script_tags(self):
+        html = "<p>Hello</p><script>var x = 1;</script><p>World</p>"
+        result = _extract_text_from_html(html)
+        assert "Hello" in result
+        assert "World" in result
+        assert "var x" not in result
+
+    def test_strips_style_tags(self):
+        html = "<style>.foo { color: red; }</style><p>Content here</p>"
+        result = _extract_text_from_html(html)
+        assert "Content here" in result
+        assert "color" not in result
+
+    def test_strips_nav_header_footer(self):
+        html = "<nav>Menu items</nav><article>The real content.</article><footer>Copyright</footer>"
+        result = _extract_text_from_html(html)
+        assert "real content" in result
+        assert "Menu items" not in result
+        assert "Copyright" not in result
+
+    def test_preserves_paragraph_text(self):
+        html = "<p>First paragraph.</p><p>Second paragraph.</p>"
+        result = _extract_text_from_html(html)
+        assert "First paragraph" in result
+        assert "Second paragraph" in result
+
+    def test_empty_html(self):
+        assert _extract_text_from_html("") == ""
+
+    def test_plain_text(self):
+        result = _extract_text_from_html("Just plain text")
+        assert "Just plain text" in result
+
+    def test_nested_skip_tags(self):
+        html = "<nav><div><a href='#'>Link</a></div></nav><p>Visible</p>"
+        result = _extract_text_from_html(html)
+        assert "Visible" in result
+        assert "Link" not in result
+
+    def test_noscript_stripped(self):
+        html = "<noscript>Enable JS</noscript><p>Content</p>"
+        result = _extract_text_from_html(html)
+        assert "Content" in result
+        assert "Enable JS" not in result
+
+
+class TestTruncateAtSentence:
+    def test_short_text_unchanged(self):
+        assert _truncate_at_sentence("Hello world.", 100) == "Hello world."
+
+    def test_truncates_at_period(self):
+        text = "First sentence. Second sentence. Third sentence is longer."
+        result = _truncate_at_sentence(text, 35)
+        assert result.endswith(".")
+        assert len(result) <= 35
+
+    def test_truncates_at_space_if_no_sentence(self):
+        text = "This is a very long text without sentence endings that goes on"
+        result = _truncate_at_sentence(text, 30)
+        assert len(result) <= 33  # +3 for "..."
+        assert result.endswith("...")
+
+    def test_exact_length_unchanged(self):
+        text = "Exact."
+        assert _truncate_at_sentence(text, 6) == "Exact."
+
+
+class TestSerperRecovery:
+    """Tests for Serper permanent disable and recovery (H-3)."""
+
+    def test_reset_serper_clears_state(self):
+        researcher = NewsResearcher(serper_api_key="test-key")
+        researcher._serper_disabled = True
+        researcher._serper_disabled_at = float("inf")
+        researcher._serper_auth_failure_count = 3
+
+        researcher.reset_serper()
+
+        assert not researcher._serper_disabled
+        assert researcher._serper_disabled_at == 0.0
+        assert researcher._serper_auth_failure_count == 0
+
+    def test_serper_permanently_disabled_property(self):
+        researcher = NewsResearcher(serper_api_key="test-key")
+        assert not researcher.serper_permanently_disabled
+
+        researcher._serper_disabled = True
+        researcher._serper_disabled_at = 100.0  # temporary disable
+        assert not researcher.serper_permanently_disabled
+
+        researcher._serper_disabled_at = float("inf")
+        assert researcher.serper_permanently_disabled
+
+    @pytest.mark.asyncio
+    async def test_three_failures_logs_critical(self):
+        """After 3 auth failures, Serper should be permanently disabled."""
+        researcher = NewsResearcher(serper_api_key="bad-key")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.json.return_value = {"message": "Invalid key"}
+
+        for _ in range(3):
+            with patch("src.analysis.news_researcher.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.post = AsyncMock(
+                    side_effect=httpx.HTTPStatusError(
+                        "401", request=MagicMock(), response=mock_response,
+                    )
+                )
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+                await researcher._search_serper("test")
+
+        assert researcher.serper_permanently_disabled
+        assert researcher._serper_auth_failure_count == 3
+
+    @pytest.mark.asyncio
+    async def test_reset_after_permanent_disable(self):
+        """reset_serper() should re-enable after permanent disable."""
+        researcher = NewsResearcher(serper_api_key="test-key")
+        researcher._serper_disabled = True
+        researcher._serper_disabled_at = float("inf")
+        researcher._serper_auth_failure_count = 3
+
+        researcher.reset_serper()
+        assert not researcher.serper_permanently_disabled
 
 
 class TestFetchArticleText:

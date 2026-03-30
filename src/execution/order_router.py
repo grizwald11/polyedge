@@ -369,10 +369,12 @@ class OrderRouter:
                     for oo in open_orders:
                         price_match = abs(oo.get("yes_price", 0) / 100 - order.price) < 0.01
                         side_match = oo.get("side", "").lower() == (order.kalshi_side or "").lower()
+                        count_match = oo.get("count", 0) == int(order.size)
                         if (
                             oo.get("ticker") == order.market_id
                             and price_match
                             and side_match
+                            and count_match
                         ):
                             recovered_id = (oo.get("order_id") or "").strip()
                             if recovered_id:

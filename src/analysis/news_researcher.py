@@ -13,9 +13,80 @@ import warnings
 from dataclasses import dataclass
 from typing import Optional
 
+from html.parser import HTMLParser
+
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+class _ArticleTextExtractor(HTMLParser):
+    """Extract visible text from HTML, skipping script/style/nav/header/footer."""
+
+    _SKIP_TAGS = frozenset({"script", "style", "nav", "header", "footer", "noscript", "svg"})
+
+    def __init__(self):
+        super().__init__()
+        self._pieces: list[str] = []
+        self._skip_depth: int = 0
+        self._in_paragraph: bool = False
+
+    def handle_starttag(self, tag: str, attrs):
+        tag_lower = tag.lower()
+        if tag_lower in self._SKIP_TAGS:
+            self._skip_depth += 1
+        if tag_lower in ("p", "div", "article", "section", "h1", "h2", "h3", "li", "blockquote"):
+            self._pieces.append("\n")
+
+    def handle_endtag(self, tag: str):
+        if tag.lower() in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+        if tag.lower() in ("p", "div", "article", "section", "li", "blockquote"):
+            self._pieces.append("\n")
+
+    def handle_data(self, data: str):
+        if self._skip_depth == 0:
+            self._pieces.append(data)
+
+    def get_text(self) -> str:
+        raw = "".join(self._pieces)
+        # Collapse runs of whitespace but preserve paragraph breaks
+        lines = raw.split("\n")
+        cleaned = []
+        for line in lines:
+            line = re.sub(r"[ \t]+", " ", line).strip()
+            if line:
+                cleaned.append(line)
+        return " ".join(cleaned)
+
+
+def _extract_text_from_html(html: str) -> str:
+    """Extract visible text from HTML using stdlib parser."""
+    parser = _ArticleTextExtractor()
+    try:
+        parser.feed(html)
+    except Exception:
+        # Fallback: strip tags with regex if parser fails on malformed HTML
+        text = re.sub(r"<[^>]+>", " ", html)
+        return re.sub(r"\s+", " ", text).strip()
+    return parser.get_text()
+
+
+def _truncate_at_sentence(text: str, max_chars: int) -> str:
+    """Truncate text at the last sentence boundary before max_chars."""
+    if len(text) <= max_chars:
+        return text
+    # Find last sentence-ending punctuation before limit
+    truncated = text[:max_chars]
+    for end_char in (".!?"):
+        last_pos = truncated.rfind(end_char)
+        if last_pos > max_chars * 0.5:  # Don't truncate too aggressively
+            return truncated[: last_pos + 1]
+    # No good sentence boundary found — cut at last space
+    last_space = truncated.rfind(" ")
+    if last_space > max_chars * 0.5:
+        return truncated[:last_space] + "..."
+    return truncated + "..."
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
 
@@ -94,6 +165,23 @@ class NewsResearcher:
         self._serper_disabled_at: float = 0.0  # Monotonic time of disable
         self._serper_cooldown_seconds: float = 3600.0  # Re-enable after 1 hour
         self._serper_auth_failure_count: int = 0  # Consecutive 4xx auth failures
+
+    def reset_serper(self) -> None:
+        """Manually re-enable Serper after permanent disable.
+
+        Call this after fixing SERPER_API_KEY or rotating the key.
+        """
+        was_disabled = self._serper_disabled
+        self._serper_disabled = False
+        self._serper_disabled_at = 0.0
+        self._serper_auth_failure_count = 0
+        if was_disabled:
+            logger.info("Serper API manually re-enabled")
+
+    @property
+    def serper_permanently_disabled(self) -> bool:
+        """True if Serper hit 3 consecutive auth failures and is permanently off."""
+        return self._serper_disabled and self._serper_disabled_at == float("inf")
 
     def generate_queries(self, market_question: str) -> list[str]:
         """Generate 2-3 targeted search queries from a market question.
@@ -254,11 +342,12 @@ class NewsResearcher:
                     if self._serper_auth_failure_count >= 3:
                         # 3 consecutive auth failures → permanently disable Serper.
                         # This prevents indefinite hourly retry storms on invalid keys.
-                        logger.error(
-                            f"Serper API permanently disabled after "
+                        logger.critical(
+                            f"Serper API PERMANENTLY DISABLED after "
                             f"{self._serper_auth_failure_count} consecutive auth failures "
                             f"({e.response.status_code}): {detail}. "
-                            f"Check SERPER_API_KEY configuration."
+                            f"News quality degraded — using DuckDuckGo only. "
+                            f"Fix: check SERPER_API_KEY, then call reset_serper() or restart."
                         )
                         self._serper_disabled = True
                         self._serper_disabled_at = float("inf")  # Never re-enable via cooldown
@@ -450,9 +539,10 @@ class NewsResearcher:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 content_type = resp.headers.get("content-type", "")
-                if "text/html" not in content_type and "application/xhtml" not in content_type:
+                if not any(ct in content_type for ct in ("text/html", "application/xhtml", "application/json")):
                     return ""
-                html = resp.text
+                raw_text = resp.text
+                content_type_lower = content_type.lower()
         except (httpx.HTTPError, httpx.TimeoutException, OSError) as e:
             logger.debug(f"Article fetch failed for {url}: {e}", exc_info=True)
             return ""
@@ -460,24 +550,37 @@ class NewsResearcher:
             logger.warning(f"Unexpected error fetching article {url}: {e}", exc_info=True)
             return ""
 
-        # Extract text: strip script/style tags, then HTML tags
-        html = re.sub(r"<(script|style|nav|header|footer)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", html)
-        # Collapse whitespace
-        text = re.sub(r"\s+", " ", text).strip()
+        # Try JSON-LD articleBody extraction first (AMP / structured data)
+        if "application/json" in content_type_lower:
+            try:
+                import json
+                data = json.loads(raw_text)
+                article_body = data.get("articleBody", "")
+                if article_body:
+                    return _truncate_at_sentence(article_body, MAX_ARTICLE_CHARS)
+            except (json.JSONDecodeError, AttributeError):
+                pass
+            return ""
 
-        # Extract the meatiest paragraph-like block (heuristic: longest run of sentences)
-        # Split into chunks by double-space or period sequences
+        html = raw_text
+
+        # Extract text using stdlib HTML parser (robust, not regex)
+        text = _extract_text_from_html(html)
+        if not text:
+            return ""
+
+        # Extract sentences (>40 chars) for quality content
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.strip()) > 40]
         if not sentences:
             return ""
 
-        # Include first 2 sentences (headline/lede) + largest paragraph block
+        # Include first 2 sentences (headline/lede) + body
         first_part = " ".join(sentences[:2])
         start = min(3, len(sentences) // 4)
         middle_part = " ".join(sentences[start:])
         combined = first_part + " " + middle_part
-        return combined[:MAX_ARTICLE_CHARS]
+        # Truncate at sentence boundary rather than mid-sentence
+        return _truncate_at_sentence(combined, MAX_ARTICLE_CHARS)
 
     async def _enrich_with_article_text(self, results: list[NewsResult]) -> list[NewsResult]:
         """Fetch full article text for top results and append to snippets."""

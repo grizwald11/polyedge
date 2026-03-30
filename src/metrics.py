@@ -32,8 +32,9 @@ class Metrics:
         self.signals_generated: int = 0
         self.signals_risk_gated: int = 0
         self.signals_executed: int = 0
-        # M-21: Edge vs return correlation
+        # M-21: Edge vs return correlation (bounded to last 1000 entries)
         self._edge_return_log: list[dict] = []
+        self._max_edge_return_entries = 1000
 
     def _check_daily_reset(self):
         """Reset daily counters at midnight UTC."""
@@ -121,6 +122,9 @@ class Metrics:
             "days_held": round(days_held, 1),
         }
         self._edge_return_log.append(entry)
+        # Trim to bounded size
+        if len(self._edge_return_log) > self._max_edge_return_entries:
+            self._edge_return_log = self._edge_return_log[-self._max_edge_return_entries:]
         logger.info(json.dumps({"event": "position_closed", **entry}))
 
     def get_health_status(self) -> dict:

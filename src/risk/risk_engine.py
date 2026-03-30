@@ -1,4 +1,4 @@
-"""Risk engine — 10-point pre-trade risk check.
+"""Risk engine — 11-point pre-trade risk check.
 
 Every trade must pass ALL checks before execution.
 """
@@ -13,6 +13,7 @@ from src.config import Settings
 from src.core.models import Market, RiskCheckResult, Signal, StrategyName
 from src.execution.position_manager import PositionManager
 from src.risk.circuit_breaker import CircuitBreaker
+from src.risk.manipulation_detector import ManipulationDetector
 from src.risk.portfolio_risk import PortfolioRisk
 from src.storage.database import Database
 
@@ -29,12 +30,14 @@ class RiskEngine:
         circuit_breaker: CircuitBreaker,
         db: Database | None = None,
         portfolio_risk: PortfolioRisk | None = None,
+        manipulation_detector: ManipulationDetector | None = None,
     ):
         self.settings = settings
         self.positions = position_manager
         self.circuit_breaker = circuit_breaker
         self.db = db
         self.portfolio_risk = portfolio_risk
+        self.manipulation_detector = manipulation_detector or ManipulationDetector()
         self._bankroll_override: float | None = None  # Live-synced bankroll
         # Cooldown after exiting a position: longer for losses to avoid
         # re-entering bad positions, shorter for profitable exits.
@@ -260,6 +263,11 @@ class RiskEngine:
                 self._cooldown_durations.pop(signal.market_id, None)
                 if self.db is not None:
                     self.db.delete_cooldown(signal.market_id)
+
+        # 11. Manipulation detection — flag markets with suspicious activity
+        manip_flag = self.manipulation_detector.check_market(market)
+        if manip_flag is not None:
+            failed.append(f"Manipulation flag: {manip_flag.reason}")
 
         # Obvious NO specific: max 10% bankroll in obvious-no positions
         if signal.strategy == StrategyName.OBVIOUS_NO:

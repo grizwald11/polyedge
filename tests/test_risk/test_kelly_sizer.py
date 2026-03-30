@@ -210,20 +210,26 @@ class TestCalibrationMultiplier:
         sizer.update_calibration_multiplier(0.25)
         assert sizer.calibration_multiplier == 0.25
 
-    def test_terrible_brier_reduces_to_10(self, sizer):
+    def test_terrible_brier_halts_sizing(self, sizer):
         sizer.update_calibration_multiplier(0.50)
-        assert sizer.calibration_multiplier == 0.10
+        assert sizer.calibration_multiplier == 0.0
+
+    def test_terrible_brier_returns_zero_contracts(self, sizer):
+        """Brier > 0.28 (worse than random) should produce 0 contracts."""
+        sizer.update_calibration_multiplier(0.35)
+        contracts = sizer.calculate_position_size(0.10, 0.60, 500.0)
+        assert contracts == 0
 
     def test_none_brier_resets_to_full(self, sizer):
         sizer.update_calibration_multiplier(0.50)
-        assert sizer.calibration_multiplier == 0.10
+        assert sizer.calibration_multiplier == 0.0
         sizer.update_calibration_multiplier(None)
         assert sizer.calibration_multiplier == 1.0
 
     def test_multiplier_reduces_contracts(self, sizer):
         """Poor calibration should produce fewer contracts."""
         full = sizer.calculate_position_size(0.10, 0.60, 500.0)
-        sizer.update_calibration_multiplier(0.35)  # 50% multiplier
+        sizer.update_calibration_multiplier(0.22)  # 50% multiplier (FAIR range)
         reduced = sizer.calculate_position_size(0.10, 0.60, 500.0)
         assert reduced <= full
         assert reduced >= 1  # Still at least 1

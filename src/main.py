@@ -57,7 +57,7 @@ from src.strategies.whale_tracker import WhaleTrackerStrategy
 from src.data.news_ingestion import NewsIngestion
 from src.data.market_graph import MarketGraph
 from src.data.whale_monitor import WhaleMonitor
-from src.core.websocket_client import KalshiWebSocket, TickerUpdate, FillUpdate
+from src.core.websocket_client import KalshiWebSocket, TickerUpdate, FillUpdate, LifecycleUpdate
 from src.core.models import Platform
 from src.strategies.cross_platform_arb import CrossPlatformArbStrategy
 from src.metrics import Metrics
@@ -221,7 +221,7 @@ async def _update_position_prices(
 async def _process_exits(
     position_manager, market_lookup, scanner, settings, kalshi,
     poly_scanner, order_builder, order_router, circuit_breaker,
-    fill_tracker, risk_engine, alert_manager, logger,
+    fill_tracker, risk_engine, alert_manager, metrics, logger,
 ):
     """Process exit candidates — close positions that hit stop-loss, time limit, or lost edge."""
     all_pos = position_manager.get_all_positions()
@@ -306,6 +306,21 @@ async def _process_exits(
             position_manager.clear_pending_exit(position.market_id)
             position_manager.update_from_trade(result.trade)
             risk_engine.record_exit(position.market_id)
+            # Record edge-vs-return for M-2 metrics tracking
+            if metrics is not None and result.trade:
+                cost_basis = position.avg_entry_price * position.size
+                realized_return = (
+                    result.trade.realized_pnl / cost_basis if cost_basis > 0 else 0.0
+                )
+                days_held = (
+                    (datetime.now(timezone.utc) - position.opened_at).total_seconds() / 86400
+                )
+                metrics.record_closed_position(
+                    market_id=position.market_id,
+                    predicted_edge=0.0,  # Edge stored in signals table, not position
+                    realized_return=realized_return,
+                    days_held=days_held,
+                )
             logger.info(f"[EXIT] {position.market_id} — {exit_reason}")
             try:
                 scanner.db.log_exit_reason(
@@ -668,7 +683,7 @@ async def scan_and_trade(
     await _process_exits(
         position_manager, market_lookup, scanner, settings, kalshi,
         poly_scanner, order_builder, order_router, circuit_breaker,
-        fill_tracker, risk_engine, alert_manager, logger,
+        fill_tracker, risk_engine, alert_manager, metrics, logger,
     )
 
     # Index markets in graph
@@ -758,6 +773,14 @@ async def scan_and_trade(
                 logger.info("Calibration: no resolved predictions yet")
         except Exception as e:
             logger.error(f"Calibration report failed: {e}", exc_info=True)
+
+    # Key rotation check every 10 cycles (~50 min) — detect rotated credentials
+    if cycle_count > 0 and cycle_count % 10 == 0:
+        try:
+            if not kalshi.check_key_freshness():
+                logger.warning("Kalshi private key was rotated — reloaded automatically")
+        except Exception as e:
+            logger.debug(f"Key freshness check failed: {e}")
 
     # Position sync with Kalshi every cycle in live mode to prevent desync.
     # Previously every 10 cycles (50 min gap) — too long, risks naked shorts
@@ -1220,8 +1243,18 @@ async def main():
                 except Exception as e:
                     logger.warning(f"Reconnect market status sync failed: {e}")
 
+            async def _on_lifecycle(update: LifecycleUpdate):
+                if update.status in ("closed", "determined", "finalized"):
+                    if position_manager.has_position(update.market_ticker):
+                        logger.warning(
+                            f"Market {update.market_ticker} settled via WebSocket "
+                            f"(status={update.status}) — marking for exit"
+                        )
+                        position_manager.mark_pending_exit(update.market_ticker)
+
             ws_client.on_price_update(_on_price)
             ws_client.on_fill(_on_fill)
+            ws_client.on_lifecycle(_on_lifecycle)
             ws_client.register_reconnect_sync(_on_ws_reconnect)
             ws_task = asyncio.create_task(ws_client.connect())
             logger.info(f"WebSocket client starting: {ws_host}")

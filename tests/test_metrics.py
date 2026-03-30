@@ -97,3 +97,28 @@ class TestMetrics:
         m = Metrics()
         status = m.get_health_status()
         assert status["uptime_seconds"] >= 0
+
+    def test_edge_return_log_bounded(self):
+        """Edge-return log should be trimmed to max entries (M-3)."""
+        m = Metrics()
+        m._max_edge_return_entries = 5
+        for i in range(20):
+            m.record_closed_position(
+                market_id=f"MKT-{i}",
+                predicted_edge=0.05,
+                realized_return=0.03,
+                days_held=1.0,
+            )
+        assert len(m._edge_return_log) == 5
+        # Should keep the most recent entries
+        assert m._edge_return_log[-1]["market"] == "MKT-19"
+
+    def test_record_closed_position(self):
+        m = Metrics()
+        m.record_closed_position("TEST", 0.08, 0.05, 3.5)
+        assert len(m._edge_return_log) == 1
+        entry = m._edge_return_log[0]
+        assert entry["market"] == "TEST"
+        assert entry["predicted_edge"] == 0.08
+        assert entry["realized_return"] == 0.05
+        assert entry["days_held"] == 3.5

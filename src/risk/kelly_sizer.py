@@ -20,7 +20,7 @@ BRIER_EXCELLENT = 0.10  # Full sizing
 BRIER_GOOD = 0.18       # Full sizing
 BRIER_FAIR = 0.22       # Reduce to 50%
 BRIER_POOR = 0.28       # Reduce to 25%
-# Above 0.28 → reduce to 10%
+# Above 0.28 → halt trading (0% sizing)
 
 
 class KellySizer:
@@ -208,11 +208,13 @@ class KellySizer:
                 contracts = 1
 
         # Apply calibration-based multiplier — reduce sizing when forecasting is poor.
+        # Zero multiplier = halt all trading (Brier worse than random).
         # For multi-contract positions, scale down but floor at 1 contract.
-        # Only skip entirely when calibration is very poor (≤25%) AND the
-        # original Kelly sizing was already just 1 contract (minimal conviction).
         effective_multiplier = self._calibration_multiplier * self._circuit_breaker_multiplier
         if effective_multiplier < 1.0 and contracts > 0:
+            if effective_multiplier <= 0:
+                # Calibration or circuit breaker says halt all trading
+                return 0
             if effective_multiplier <= 0.25 and contracts == 1:
                 # Very poor calibration on a minimal-conviction trade — don't trade
                 return 0
@@ -250,7 +252,7 @@ class KellySizer:
         elif brier_score <= BRIER_POOR:
             mult = 0.25
         else:
-            mult = 0.10
+            mult = 0.0  # Worse than random — halt all sizing until calibration improves
 
         if mult != self._calibration_multiplier:
             logger.info(
