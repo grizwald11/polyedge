@@ -355,17 +355,17 @@ class TestStalenessDetection:
 
     @pytest.mark.asyncio
     async def test_skips_small_relative_price_move(self, strategy, sample_market, tmp_db):
-        """Should skip re-assessment when relative price move is small (<10%)."""
+        """Should skip re-assessment when relative price move is small (<2%)."""
         strategy.db = tmp_db
         strategy.forecaster.assess_market = AsyncMock(
             return_value=_make_forecast(0.55)
         )
-        # Relative move: |0.34 - 0.33| / 0.33 = ~3% — below 10% threshold
+        # Relative move: |0.34 - 0.3395| / 0.3395 = ~0.15% — below 2% threshold
         tmp_db.store_prediction(
             market_ticker=sample_market.ticker,
             predicted_probability=0.40,
             predicted_side="BUY_YES",
-            market_price=0.33,  # ~3% relative move from current 0.34
+            market_price=0.3395,  # ~0.15% relative move from current 0.34
         )
 
         signals = await strategy.scan_for_opportunities([sample_market])

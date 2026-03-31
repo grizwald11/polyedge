@@ -266,8 +266,8 @@ class AIProbabilityStrategy:
                     predicted_at = datetime.fromisoformat(latest["predicted_at"])
                     age = datetime.now(timezone.utc) - predicted_at
                     price_move = abs(market.yes_price - latest["market_price_at_prediction"])
-                    staleness_hours = getattr(self.settings.claude, 'reassessment_interval_hours', 24)
-                    staleness_price_move = getattr(self.settings.claude, 'reassessment_price_move', 0.10)
+                    staleness_hours = self.settings.claude.reassessment_interval_hours
+                    staleness_price_move = self.settings.claude.reassessment_price_move
                     # Use relative price move to be context-sensitive across all price ranges
                     cached_price = latest["market_price_at_prediction"]
                     relative_move = price_move / max(cached_price, 0.01) if cached_price > 0 else price_move
