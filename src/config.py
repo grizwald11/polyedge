@@ -134,6 +134,7 @@ class ClaudeConfig(BaseModel):
     cross_check_temp_low: float = 0.2
     cross_check_temp_high: float = 0.5
     cross_check_disagreement_threshold: float = 0.22
+    decomposition_enabled: bool = True  # Enable multi-step decomposition for compound questions
     max_divergence_from_market: float = 0.40  # Reject if |claude - market| > this
     api_timeout_seconds: int = 60  # Hard timeout on Claude API calls
     daily_token_budget: int = 500_000  # Soft daily token budget warning threshold

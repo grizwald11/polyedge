@@ -295,6 +295,18 @@ async def scan_and_trade(
                 logger.error(f"Failed to send circuit breaker alert: {e}", exc_info=True)
         return
 
+    # 3b. Regime detection — adaptive thresholds based on market volatility
+    try:
+        from src.analysis.regime_detector import RegimeDetector
+        _regime_detector = RegimeDetector()
+        regime_analysis = _regime_detector.detect_regime(scanner.db)
+        # Apply regime multiplier to Kelly sizer
+        kelly_sizer.set_regime_multiplier(regime_analysis.multipliers.kelly_multiplier)
+        # Pass regime edge multiplier to AI strategy
+        ai_strategy.set_regime_edge_multiplier(regime_analysis.multipliers.edge_multiplier)
+    except Exception as e:
+        logger.debug(f"Regime detection skipped: {e}")
+
     # 4. Scan markets
     markets, poly_markets = await _scan_markets(scanner, poly_scanner, metrics, logger)
     if markets is None:
@@ -305,6 +317,32 @@ async def scan_and_trade(
 
     # 5. Update position prices
     await _update_position_prices(markets, position_manager, kalshi, poly_scanner, logger)
+
+    # 5b. Bayesian belief updates on open positions
+    try:
+        from src.analysis.bayesian_updater import BayesianUpdater, BeliefState
+        _bayesian_updater = BayesianUpdater()
+        for pos in position_manager.get_all_positions():
+            # Only update if we have a stored belief (from a previous assessment)
+            belief = getattr(pos, '_belief_state', None)
+            if belief is None:
+                continue
+            old_price = belief.probability  # Use belief as proxy for last known price
+            result = _bayesian_updater.update_from_price_movement(
+                belief, pos.current_price, old_price,
+            )
+            if result.should_exit:
+                logger.info(
+                    f"Bayesian exit signal for {pos.market_id}: {result.exit_reason} "
+                    f"(prior={result.prior:.2f}, posterior={result.posterior:.2f})"
+                )
+            elif result.should_reassess:
+                logger.info(
+                    f"Bayesian reassess signal for {pos.market_id}: "
+                    f"shift={result.shift:+.3f} exceeds threshold"
+                )
+    except Exception as e:
+        logger.debug(f"Bayesian update step skipped: {e}")
 
     # Build market lookup
     market_lookup = {m.ticker: m for m in markets}

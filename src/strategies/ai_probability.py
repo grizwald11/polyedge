@@ -12,10 +12,13 @@ from typing import Optional
 
 from src.analysis.calibration_analyzer import CalibrationAnalyzer
 from src.analysis.claude_forecaster import ClaudeForecaster
+from src.analysis.decomposer import QuestionDecomposer, is_compound_question
 from src.analysis.ensemble import ensemble_forecast, multi_model_ensemble
 from src.analysis.market_classifier import classify_market
+from src.analysis.temporal_analyzer import TemporalAnalyzer
 from src.config import Settings
 from src.core.models import Direction, ForecastResult, Market, Signal, StrategyName
+from src.data.consensus_aggregator import ConsensusAggregator
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -44,9 +47,28 @@ class AIProbabilityStrategy:
         self.db = db
         self.calibration_analyzer = calibration_analyzer
         self.data_enricher = data_enricher
+        self.decomposer = QuestionDecomposer(forecaster)
+        self.temporal_analyzer = TemporalAnalyzer()
+        self.consensus_aggregator: Optional[ConsensusAggregator] = None
+        # Initialize consensus aggregator if data enricher has the required clients
+        if data_enricher:
+            self.consensus_aggregator = ConsensusAggregator(
+                manifold_client=getattr(data_enricher, 'manifold', None),
+                metaculus_client=getattr(data_enricher, 'metaculus', None),
+                polymarket_cross_ref=getattr(data_enricher, 'polymarket_cross_ref', None),
+            )
         self._category_adjustments: dict[str, float] = {}
+        self._regime_edge_multiplier: float = 1.0
         self._category_base_rates: dict[str, dict] = {}
         self._category_brier_scores: dict[str, float] = {}
+
+    def set_regime_edge_multiplier(self, multiplier: float) -> None:
+        """Set the regime-based edge multiplier.
+
+        Called each cycle by regime detector. In high-volatility regimes,
+        increases the effective min_edge to avoid false signals.
+        """
+        self._regime_edge_multiplier = max(0.5, min(multiplier, 3.0))
 
     def refresh_calibration_adjustments(self) -> None:
         """Reload per-category bias corrections from calibration data."""
@@ -149,7 +171,7 @@ class AIProbabilityStrategy:
 
         signals = []
         max_assessments = self.settings.claude.max_assessments_per_cycle
-        min_edge = self.settings.trading.min_edge_ai
+        min_edge = self.settings.trading.min_edge_ai * self._regime_edge_multiplier
 
         cross_check_enabled = self.settings.claude.cross_check_enabled
         cross_check_top_n = self.settings.claude.cross_check_top_n
@@ -275,8 +297,36 @@ class AIProbabilityStrategy:
             except Exception as e:
                 logger.warning(f"Data enricher failed for {market.ticker}, using news_context: {e}")
 
-        # Get Claude's forecast (cross-check or regular)
-        if use_cross_check:
+        # Try decomposition for compound questions (multi-step reasoning)
+        decomposition_enabled = getattr(self.settings.claude, 'decomposition_enabled', True)
+        if decomposition_enabled and is_compound_question(market.question):
+            try:
+                decomposed = await self.decomposer.decompose_and_assess(
+                    market=market,
+                    news_context=news_context,
+                    base_rate_context=base_rate_context,
+                )
+                if decomposed is not None:
+                    logger.info(
+                        f"Decomposition succeeded for {market.ticker}: "
+                        f"{decomposed.probability:.0%} ({decomposed.reasoning[:80]}...)"
+                    )
+                    forecast = decomposed
+                    # Skip the regular Claude call — jump to divergence gate
+                    # by setting a flag; the forecast variable is already set
+                    _used_decomposition = True
+                else:
+                    _used_decomposition = False
+            except Exception as e:
+                logger.warning(f"Decomposition failed for {market.ticker}: {e}")
+                _used_decomposition = False
+        else:
+            _used_decomposition = False
+
+        # Get Claude's forecast (cross-check or regular) — skip if decomposition succeeded
+        if _used_decomposition:
+            pass  # forecast already set by decomposer
+        elif use_cross_check:
             try:
                 forecast = await self.forecaster.cross_check_assess(
                     market=market,
@@ -365,13 +415,24 @@ class AIProbabilityStrategy:
             )
             return None
 
-        # Try to get community forecast (Manifold or Metaculus) as a second model
-        community_forecast = await self._get_community_forecast(market)
+        # Collect cross-platform consensus forecasts (Polymarket, Manifold, Metaculus)
+        consensus_forecasts: list[ForecastResult] = []
+        if self.consensus_aggregator:
+            try:
+                consensus_forecasts = await self.consensus_aggregator.get_all_forecasts(market)
+            except Exception as e:
+                logger.info(f"Consensus aggregation failed for {market.ticker}: {e}")
 
-        if community_forecast is not None:
-            # Multi-model ensemble: Claude + community forecast + market price
+        if not consensus_forecasts:
+            # Fall back to legacy single community forecast
+            community_forecast = await self._get_community_forecast(market)
+            if community_forecast is not None:
+                consensus_forecasts = [community_forecast]
+
+        if consensus_forecasts:
+            # Multi-model ensemble: Claude + all consensus sources + market price
             ensemble = multi_model_ensemble(
-                forecasts=[forecast, community_forecast],
+                forecasts=[forecast] + consensus_forecasts,
                 market_price=market.yes_price,
                 market_weight=1.0 - self.settings.claude.ensemble_weight,
             )
@@ -417,6 +478,28 @@ class AIProbabilityStrategy:
 
         # Calculate edge
         edge = ensemble.edge  # positive = YES underpriced, negative = NO underpriced
+
+        # Temporal analysis: discount edge if price has "already priced in" the move
+        if self.db:
+            try:
+                temporal = self.temporal_analyzer.analyze(
+                    market_id=market.ticker,
+                    current_price=market.yes_price,
+                    claude_estimate=ensemble.final_probability,
+                    db=self.db,
+                )
+                if temporal.has_sufficient_data:
+                    discount = self.temporal_analyzer.compute_edge_discount(temporal)
+                    if discount < 1.0:
+                        original_edge = edge
+                        edge = edge * discount
+                        logger.info(
+                            f"Temporal discount for {market.ticker}: edge "
+                            f"{original_edge:+.3f} → {edge:+.3f} "
+                            f"(discount={discount:.2f}, priced_in={temporal.already_priced_in_pct:.0%})"
+                        )
+            except Exception as e:
+                logger.debug(f"Temporal analysis failed for {market.ticker}: {e}")
 
         # M-7: Edge significance check — reject when edge is smaller than
         # the confidence interval half-width. If CI is 40-70% and edge is 5%,

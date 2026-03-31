@@ -38,6 +38,7 @@ class KellySizer:
         self._fee_rate_if_enabled = 0.0175 if settings.trading.prefer_maker else 0.07
         self._calibration_multiplier: float = 1.0
         self._circuit_breaker_multiplier: float = 1.0
+        self._regime_multiplier: float = 1.0
 
     def calculate_position_size(
         self,
@@ -221,7 +222,7 @@ class KellySizer:
         # Apply calibration-based multiplier — reduce sizing when forecasting is poor.
         # Zero multiplier = halt all trading (Brier worse than random).
         # For multi-contract positions, scale down but floor at 1 contract.
-        effective_multiplier = self._calibration_multiplier * self._circuit_breaker_multiplier
+        effective_multiplier = self._calibration_multiplier * self._circuit_breaker_multiplier * self._regime_multiplier
         if effective_multiplier < 1.0 and contracts > 0:
             if effective_multiplier <= 0:
                 # Calibration or circuit breaker says halt all trading
@@ -285,6 +286,19 @@ class KellySizer:
                 f"Kelly: circuit breaker multiplier {self._circuit_breaker_multiplier:.2f} → {multiplier:.2f}"
             )
             self._circuit_breaker_multiplier = multiplier
+
+    def set_regime_multiplier(self, multiplier: float) -> None:
+        """Apply market regime multiplier to Kelly sizing.
+
+        Called each cycle by regime detector. In high-volatility regimes,
+        reduces position sizes; in calm markets, allows modest increase.
+        """
+        multiplier = max(0.0, min(multiplier, 2.0))  # Clamp to reasonable range
+        if multiplier != self._regime_multiplier:
+            logger.info(
+                f"Kelly: regime multiplier {self._regime_multiplier:.2f} → {multiplier:.2f}"
+            )
+        self._regime_multiplier = multiplier
 
     @property
     def calibration_multiplier(self) -> float:

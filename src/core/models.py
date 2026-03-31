@@ -413,6 +413,7 @@ class CalibrationRecord(BaseModel):
     actual_outcome: Optional[bool] = None  # None = unresolved
     predicted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     resolved_at: Optional[datetime] = None
+    prompt_variant: str = ""  # A/B testing: which prompt variant produced this prediction
 
     @property
     def is_resolved(self) -> bool:
@@ -446,6 +447,7 @@ class ForecastResult(BaseModel):
     raw_response: str = ""
     parse_failed: bool = False
     high_divergence: bool = False  # Set when Claude diverges > max_divergence from market
+    prompt_variant: str = ""  # A/B testing: which prompt variant was used
 
     @field_validator("probability")
     @classmethod

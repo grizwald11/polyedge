@@ -57,6 +57,8 @@ class DataEnricher:
         self.metaculus = MetaculusClient(api_token=settings.metaculus_api_token)
         self.manifold = ManifoldClient()
         self.polymarket = PolymarketCrossRef()
+        from src.data.event_calendar import EventCalendar
+        self.event_calendar = EventCalendar()
 
     async def get_context(self, market: Market) -> str:
         """Fetch and assemble enriched context from all relevant data sources.
@@ -193,6 +195,14 @@ class DataEnricher:
             sections.append(results["cleveland_fed"])
         if results.get("fedwatch"):
             sections.append(results["fedwatch"])
+
+        # 2b. Event calendar (synchronous — no API call needed)
+        try:
+            event_context = self.event_calendar.get_context_string(market)
+            if event_context:
+                sections.append(event_context)
+        except Exception as e:
+            logger.debug(f"Event calendar context failed: {e}")
 
         # 3. Community forecasts
         if results.get("manifold"):

@@ -17,7 +17,8 @@ import anthropic
 
 from src.analysis.market_classifier import classify_market
 from src.analysis.news_researcher import NewsResearcher
-from src.analysis.prompt_templates import SYSTEM_PROMPT, build_prompt
+from src.analysis.prompt_ab_testing import PromptVariantManager
+from src.analysis.prompt_templates import SYSTEM_PROMPT, build_prompt, get_template
 from src.config import Settings
 from src.core.models import ForecastResult, Market, MarketCategory
 
@@ -54,6 +55,9 @@ class ClaudeForecaster:
         # Override from settings if configured
         if hasattr(settings.claude, 'model_pricing') and settings.claude.model_pricing:
             self._cost_per_million.update(settings.claude.model_pricing)
+        # Prompt A/B testing: Thompson sampling for prompt variant selection
+        ab_enabled = getattr(settings.claude, 'ab_testing_enabled', True)
+        self.variant_manager = PromptVariantManager(enabled=ab_enabled)
         # Forecast cache: avoids duplicate Claude calls for same market in a cycle
         from src.data.cache import TTLCache
         self._forecast_cache = TTLCache(ttl_seconds=self._CACHE_TTL_SECONDS)
@@ -314,6 +318,10 @@ class ClaudeForecaster:
             news_context=news_context or "No additional context available.",
             base_rate_context=base_rate_context,
         )
+
+        # Apply A/B testing variant modifier to the prompt
+        variant_name, prompt = self.variant_manager.select_variant(category, prompt)
+        self._last_variant_name = variant_name  # Store for downstream tracking
 
         return prompt, model, category, temperature
 

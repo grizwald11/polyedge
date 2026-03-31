@@ -194,6 +194,52 @@ Consider:
 Provide your probability estimate as JSON."""
 
 
+DECOMPOSITION_TEMPLATE = """QUESTION DECOMPOSITION
+
+Analyze this prediction market question and determine if it involves compound events that can be decomposed into independent sub-questions.
+
+MARKET QUESTION: {question}
+RESOLUTION CRITERIA: {resolution_criteria}
+
+CONTEXT:
+{news_context}
+
+Instructions:
+1. If this question involves multiple conditions, sequential steps, or conditional outcomes, decompose it into 2-4 independent sub-questions.
+2. Identify the logical relationship: AND (all must happen), OR (at least one), or CONDITIONAL (B depends on A).
+3. If the question is simple/atomic and cannot be meaningfully decomposed, set decomposition_type to "ATOMIC".
+
+CRITICAL: Respond ONLY with valid JSON. No explanation, no markdown.
+
+Required JSON schema:
+{{"decomposition_type": "AND"|"OR"|"CONDITIONAL"|"ATOMIC", "sub_questions": [{{"question": "<sub-question text>", "base_rate_hint": "<brief hint about historical frequency>"}}], "reasoning": "<brief explanation of why this decomposition is appropriate>"}}"""
+
+
+SUB_QUESTION_TEMPLATE = """PROBABILITY ESTIMATION FOR SUB-QUESTION
+
+You are estimating the probability of one component of a larger prediction market question.
+
+PARENT QUESTION: {parent_question}
+RESOLUTION CRITERIA: {resolution_criteria}
+
+SUB-QUESTION TO ASSESS: {sub_question}
+BASE RATE HINT: {base_rate_hint}
+
+CONTEXT:
+{news_context}
+{base_rate_context}
+
+Instructions:
+1. FIRST, estimate the base rate: how often do events like this sub-question historically occur?
+2. THEN, adjust from the base rate using the specific evidence in the context.
+3. State your base rate anchor and how much you adjusted.
+
+CRITICAL: Respond ONLY with valid JSON. No explanation, no markdown.
+
+Required JSON schema:
+{{"probability": <float 0.01-0.99>, "confidence_low": <float>, "confidence_high": <float>, "key_factors_for": ["<string>"], "key_factors_against": ["<string>"], "uncertainties": ["<string>"], "reasoning": "<base rate anchor + evidence adjustment>"}}"""
+
+
 ARB_VALIDATION_TEMPLATE = """ARBITRAGE RELATIONSHIP VALIDATION
 
 Determine if these two prediction markets have a logical relationship.
