@@ -6,6 +6,7 @@ when detected edge exceeds the minimum threshold.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -17,7 +18,7 @@ from src.analysis.contrarian_tracker import ContrarianTracker
 from src.analysis.resolution_analyzer import ResolutionAnalyzer
 from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.decomposer import QuestionDecomposer, is_compound_question
-from src.analysis.ensemble import ensemble_forecast, multi_model_ensemble
+from src.analysis.ensemble import compute_market_efficiency, ensemble_forecast, multi_model_ensemble
 from src.analysis.market_classifier import classify_market
 from src.analysis.temporal_analyzer import TemporalAnalyzer
 from src.config import Settings
@@ -184,17 +185,24 @@ class AIProbabilityStrategy:
         cross_check_enabled = self.settings.claude.cross_check_enabled
         cross_check_top_n = self.settings.claude.cross_check_top_n
 
-        # First pass: assess all markets without cross-check
-        initial_signals: list[Signal] = []
-        for market in markets[:max_assessments]:
-            try:
-                signal = await self._assess_single_market(
-                    market, news_context, min_edge, use_cross_check=False
-                )
-                if signal:
-                    initial_signals.append(signal)
-            except Exception as e:
-                logger.error(f"Failed to assess {market.ticker}: {e}", exc_info=True)
+        # First pass: assess all markets concurrently with semaphore
+        concurrency = getattr(self.settings.claude, 'max_concurrent_assessments', 5)
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _assess_with_semaphore(market: Market) -> Optional[Signal]:
+            async with sem:
+                try:
+                    return await self._assess_single_market(
+                        market, news_context, min_edge, use_cross_check=False
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to assess {market.ticker}: {e}", exc_info=True)
+                    return None
+
+        results = await asyncio.gather(
+            *[_assess_with_semaphore(m) for m in markets[:max_assessments]]
+        )
+        initial_signals: list[Signal] = [s for s in results if s is not None]
 
         if not cross_check_enabled:
             signals = initial_signals
@@ -520,12 +528,28 @@ class AIProbabilityStrategy:
             if community_forecast is not None:
                 consensus_forecasts = [community_forecast]
 
+        # Compute market efficiency from real data (volume, liquidity, time)
+        market_eff = compute_market_efficiency(
+            volume_24h=market.volume_24h or 0,
+            liquidity=market.liquidity or 0,
+            days_to_resolution=market.days_to_resolution,
+        )
+
+        # Build Brier score data for ensemble weighting
+        cat_brier = self._category_brier_scores.get(category.value)
+        cat_brier_dict = None
+        if cat_brier is not None and forecast.model_used:
+            cat_brier_dict = {category.value: {forecast.model_used: cat_brier}}
+
         if consensus_forecasts:
             # Multi-model ensemble: Claude + all consensus sources + market price
             ensemble = multi_model_ensemble(
                 forecasts=[forecast] + consensus_forecasts,
                 market_price=market.yes_price,
                 market_weight=1.0 - self.settings.claude.ensemble_weight,
+                market_efficiency=market_eff,
+                category=category.value,
+                category_brier_scores=cat_brier_dict,
             )
         else:
             # Single-model fallback: Claude + market price
@@ -533,6 +557,7 @@ class AIProbabilityStrategy:
                 claude_forecast=forecast,
                 market_price=market.yes_price,
                 claude_weight=self.settings.claude.ensemble_weight,
+                market_efficiency=market_eff,
             )
 
         # Apply calibration adjustment to the ensemble final probability so that
@@ -667,8 +692,40 @@ class AIProbabilityStrategy:
                             f"sonnet={sonnet_prob:.0%}, opus={opus_prob:.0%}, "
                             f"disagreement={disagreement:.0%}"
                         )
-                        # Use opus estimate if it confirmed the signal
+                        # Re-run ensemble with opus forecast so edge/probability
+                        # reflect the high-stakes model's estimate (not sonnet's).
                         forecast = opus_forecast
+                        if consensus_forecasts:
+                            ensemble = multi_model_ensemble(
+                                forecasts=[opus_forecast] + consensus_forecasts,
+                                market_price=market.yes_price,
+                                market_weight=1.0 - self.settings.claude.ensemble_weight,
+                                market_efficiency=market_eff,
+                                category=category.value,
+                                category_brier_scores=cat_brier_dict,
+                            )
+                        else:
+                            ensemble = ensemble_forecast(
+                                claude_forecast=opus_forecast,
+                                market_price=market.yes_price,
+                                claude_weight=self.settings.claude.ensemble_weight,
+                                market_efficiency=market_eff,
+                            )
+                        # Recalculate edge from new ensemble
+                        edge = ensemble.edge
+                        if edge > 0:
+                            direction = Direction.BUY_YES
+                            probability_estimate = ensemble.final_probability
+                            market_price = market.yes_price
+                        else:
+                            direction = Direction.BUY_NO
+                            probability_estimate = 1.0 - ensemble.final_probability
+                            market_price = market.no_price
+                            edge = abs(edge)
+                        logger.info(
+                            f"Opus re-ensemble for {market.ticker}: "
+                            f"edge={edge:.1%}, prob={ensemble.final_probability:.0%}"
+                        )
             except Exception as e:
                 logger.warning(f"Opus escalation failed for {market.ticker}: {e}")
                 # Continue with sonnet signal on escalation failure

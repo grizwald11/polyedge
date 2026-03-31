@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.config import Settings
-from src.core.models import Direction, Market, Signal, StrategyName
+from src.core.models import Direction, Market, MarketCategory, Signal, StrategyName
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class ObviousNoStrategy:
         # Only apply fees for fee-enabled categories (crypto, sports).
         fee_per_contract = 0.0
         category = getattr(market, "category", None)
-        fee_categories = {"Crypto Prices", "Sports", "NCAAB", "Serie A"}
+        fee_categories = {MarketCategory.CRYPTO.value, MarketCategory.SPORTS.value}
         if category and str(category) in fee_categories:
             fee_per_contract = 0.0175 * no_price * (1.0 - no_price)
 

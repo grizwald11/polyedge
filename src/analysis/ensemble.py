@@ -119,9 +119,10 @@ def ensemble_forecast(
         # here is usually wrong. Reduce Claude weight with floor at 25% (M-1).
         effective_claude_weight = max(0.25, effective_claude_weight - divergence * 0.5)
     elif divergence > 0.20:
-        # Strong divergence: boost Claude more when market is inefficient
-        boost = 0.07 * (1.5 - eff)  # 0.07 at eff=0.7, 0.105 at eff=0.3
-        effective_claude_weight = min(0.95, effective_claude_weight + boost)
+        # High divergence: hold steady. Large disagreements are ambiguous —
+        # could be genuine edge OR hallucination. Don't amplify either way.
+        # The divergence gate in ai_probability.py handles extreme cases.
+        pass
     elif divergence < 0.05:
         # Marginal call: trust market more when it's efficient
         reduction = 0.10 * (0.5 + eff)  # 0.12 at eff=0.7, 0.08 at eff=0.3
@@ -159,12 +160,13 @@ def multi_model_ensemble(
     brier_scores: Optional[dict[str, float]] = None,
     category: str = "",
     category_brier_scores: Optional[dict[str, dict[str, float]]] = None,
+    market_efficiency: Optional[float] = None,
 ) -> EnsembleForecast:
     """Combine multiple model forecasts using Brier-score-weighted averaging.
 
     When Brier scores are available, models with better historical accuracy
     get higher weights. The market price is included as an additional source
-    with a fixed weight.
+    with a fixed weight, scaled by market efficiency.
 
     Args:
         forecasts: List of ForecastResult from different models/approaches
@@ -173,6 +175,7 @@ def multi_model_ensemble(
         brier_scores: Optional {model_name: brier_score} for global weighting
         category: Market category for category-specific weighting
         category_brier_scores: Optional {category: {model_name: brier_score}}
+        market_efficiency: Market efficiency score (0.3-0.95); higher = trust market more
 
     Returns:
         EnsembleForecast with Brier-weighted combined probability
@@ -188,6 +191,12 @@ def multi_model_ensemble(
             edge=0.0,
             confidence=0.01,
         )
+
+    # Adjust market_weight based on efficiency: efficient markets deserve more weight
+    if market_efficiency is not None:
+        # Scale market_weight by efficiency: at eff=0.95 → 1.2x, at eff=0.3 → 0.6x
+        eff_scale = 0.4 + market_efficiency
+        market_weight = max(0.10, min(0.70, market_weight * eff_scale))
 
     # Build model weights
     model_weights = _compute_model_weights(

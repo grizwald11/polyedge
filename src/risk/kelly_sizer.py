@@ -50,6 +50,7 @@ class KellySizer:
         order_price: float | None = None,
         market_liquidity: float | None = None,
         fee_rate: float = 0.0,
+        confidence: float | None = None,
     ) -> int:
         """Calculate optimal number of contracts to buy.
 
@@ -155,6 +156,12 @@ class KellySizer:
 
         # Dollar amount to risk
         kelly_dollars = half_kelly * bankroll
+
+        # Confidence adjustment: uncertain predictions get smaller positions.
+        # confidence=0.9 (narrow CI) → 0.92x, confidence=0.5 (wide CI) → 0.60x
+        if confidence is not None and 0.0 < confidence <= 1.0:
+            confidence_mult = max(0.2, 0.2 + 0.8 * confidence)
+            kelly_dollars *= confidence_mult
 
         # Use the higher of market_price and order_price for contract conversion.
         # This ensures: (a) Kelly math is consistent with its own odds calculation,
@@ -310,7 +317,7 @@ class KellySizer:
         Called each cycle by regime detector. In high-volatility regimes,
         reduces position sizes; in calm markets, allows modest increase.
         """
-        multiplier = max(0.0, min(multiplier, 2.0))  # Clamp to reasonable range
+        multiplier = max(0.0, min(multiplier, 1.2))  # Clamp to reasonable range
         if multiplier != self._regime_multiplier:
             logger.info(
                 f"Kelly: regime multiplier {self._regime_multiplier:.2f} → {multiplier:.2f}"
@@ -325,7 +332,7 @@ class KellySizer:
         average 5%, the multiplier is 0.5 — Kelly will use half the
         predicted edge for sizing.
         """
-        multiplier = max(0.3, min(multiplier, 1.5))
+        multiplier = max(0.3, min(multiplier, 1.0))
         if multiplier != self._edge_multiplier:
             logger.info(
                 f"Kelly: edge multiplier {self._edge_multiplier:.2f} → {multiplier:.2f}"

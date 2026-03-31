@@ -681,7 +681,7 @@ class OrderRouter:
                 platform=Platform.POLYMARKET,
                 token_id=order.token_id,
                 side=order.side,
-                price=order.price,
+                price=order.fill_price if order.fill_price is not None else order.price,
                 size=order.size,
                 fee=0.0,  # Event markets are fee-free
                 realized_pnl=0.0,

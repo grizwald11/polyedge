@@ -596,3 +596,57 @@ class TestResolutionDateBoundaries:
         result = engine.check_all(signal, market, proposed_size=10, proposed_cost=3.40)
         assert not any("<4 hours" in c for c in result.failed_checks)
         assert not any("<1 day" in w for w in result.warnings)
+
+
+class TestSpreadVsEdge:
+    """Reject trades where bid-ask spread eats >50% of edge."""
+
+    def test_wide_spread_rejected(self, engine, signal):
+        """Spread=4% with edge=5% → 80% consumed → reject."""
+        signal.edge = 0.05
+        market = Market(
+            ticker="WIDE-SPREAD",
+            question="Wide spread market",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.50),
+                MarketToken(token_id="no", outcome="No", price=0.46),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=7),
+            liquidity=50000,
+            spread=0.04,
+        )
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=5.00)
+        assert result.passed is False
+        assert any("Spread too wide" in c for c in result.failed_checks)
+
+    def test_tight_spread_passes(self, engine, signal):
+        """Spread=1% with edge=5% → 20% consumed → OK."""
+        signal.edge = 0.05
+        market = Market(
+            ticker="TIGHT-SPREAD",
+            question="Tight spread market",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.50),
+                MarketToken(token_id="no", outcome="No", price=0.49),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=7),
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=5.00)
+        assert not any("Spread too wide" in c for c in result.failed_checks)
+
+    def test_zero_spread_passes(self, engine, signal):
+        """Zero spread should pass."""
+        signal.edge = 0.05
+        market = Market(
+            ticker="ZERO-SPREAD",
+            question="Zero spread market",
+            tokens=[
+                MarketToken(token_id="yes", outcome="Yes", price=0.50),
+                MarketToken(token_id="no", outcome="No", price=0.50),
+            ],
+            end_date=datetime.now(timezone.utc) + timedelta(days=7),
+            liquidity=50000,
+        )
+        result = engine.check_all(signal, market, proposed_size=10, proposed_cost=5.00)
+        assert not any("Spread too wide" in c for c in result.failed_checks)

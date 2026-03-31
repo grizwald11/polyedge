@@ -24,10 +24,10 @@ from src.storage.database import Database
 
 # Exit thresholds — all configurable via PositionManager constructor kwargs.
 # Rationale for each default is documented inline.
-DEFAULT_STOP_LOSS_PCT = 0.30
-# 30%: Binary markets can recover from drawdowns, but a 30% loss on cost basis
-# indicates the thesis is likely wrong. Prevents runaway losses while allowing
-# normal price volatility.
+DEFAULT_STOP_LOSS_PCT = 0.20
+# 20%: Tightened from 30%. Binary markets are rarely worth holding through
+# a 20% drawdown — the thesis is likely wrong. Preserves more capital than
+# the original 30% threshold while still allowing normal volatility.
 
 DEFAULT_MAX_HOLD_DAYS = 21
 # 21 days: Frees capital faster than holding to near-expiry. Most of the edge
@@ -42,9 +42,10 @@ DEFAULT_TRAILING_STOP_ACTIVATE = 0.12
 # 12%: Activate trailing stop only after locking in at least a 12% gain.
 # Below this threshold, normal price noise would trigger too many premature exits.
 
-DEFAULT_TRAILING_STOP_DISTANCE = 0.50
-# 50%: Trail 50% of peak gain (e.g., peak +30% → exit at +15%). Captures most
-# of the upside while protecting against sharp reversals near market resolution.
+DEFAULT_TRAILING_STOP_DISTANCE = 0.35
+# 35%: Tightened from 50%. Trail 35% of peak gain (e.g., peak +30% → exit at
+# +19.5%). Locks in more profit than the original 50% distance while still
+# allowing room for natural price oscillation.
 
 DEFAULT_TAKE_PROFIT_PCT = 0.80
 # 80%: Take profit when 80% of the maximum theoretical gain is realized

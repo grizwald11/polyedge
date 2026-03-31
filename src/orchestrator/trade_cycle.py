@@ -256,6 +256,7 @@ async def _execute_signals(
             bankroll=bankroll,
             current_exposure=current_exposure,
             order_price=signal.market_price,
+            confidence=signal.confidence,
         )
 
         # NOTE: Circuit breaker multiplier is already applied inside

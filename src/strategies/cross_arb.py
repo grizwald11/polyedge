@@ -79,44 +79,66 @@ class CrossArbStrategy:
         return signals
 
     def _check_intra_market(self, market: Market) -> Optional[Signal]:
-        """Type A: Check if YES + NO prices sum to less than 1.0 (minus fee threshold).
+        """Type A: Check if YES + NO prices deviate from 1.0 (minus fee threshold).
 
-        H-2: This emits a signal for the cheaper side only (single-leg directional
+        H-2: This emits a signal for one side only (single-leg directional
         trade, NOT a guaranteed-profit arbitrage). The edge comes from the market
-        mispricing: if YES + NO < 1.0, the cheaper side is more likely underpriced.
-        True two-leg arb would require simultaneously buying both sides, which is
-        not implemented here.
+        mispricing: if YES + NO < 1.0, the cheaper side is underpriced;
+        if YES + NO > 1.0, the more expensive side is overpriced.
         """
         if market.yes_price <= 0 or market.no_price <= 0:
             return None
 
         total = market.yes_price + market.no_price
-        edge = 1.0 - total
-        if edge < self.min_edge:
-            return None
 
-        # Buy the cheaper side — more likely to be the underpriced one
-        if market.yes_price < market.no_price:
-            direction = Direction.BUY_YES
-            price = market.yes_price
-        else:
-            direction = Direction.BUY_NO
-            price = market.no_price
+        # Case 1: Underpriced — YES + NO < 1.0, buy the cheaper side
+        underpriced_edge = 1.0 - total
+        if underpriced_edge >= self.min_edge:
+            if market.yes_price < market.no_price:
+                direction = Direction.BUY_YES
+                price = market.yes_price
+            else:
+                direction = Direction.BUY_NO
+                price = market.no_price
 
-        return Signal(
-            strategy=StrategyName.CROSS_ARB,
-            market_id=market.ticker,
-            market_question=market.question,
-            direction=direction,
-            edge=edge,
-            # For arb, "true probability" is irrelevant — we're exploiting math,
-            # not prediction. Set probability = price + edge so Kelly derives
-            # the correct market_price (probability - edge = price).
-            probability_estimate=min(0.99, price + edge),
-            market_price=price,
-            confidence=0.9,  # High confidence — mathematical
-            reasoning=f"Intra-market mispricing: YES({market.yes_price:.2f}) + NO({market.no_price:.2f}) = {total:.2f} < 1.00, buying cheaper side",
-        )
+            return Signal(
+                strategy=StrategyName.CROSS_ARB,
+                market_id=market.ticker,
+                market_question=market.question,
+                direction=direction,
+                edge=underpriced_edge,
+                probability_estimate=min(0.99, price + underpriced_edge),
+                market_price=price,
+                confidence=0.9,
+                reasoning=f"Intra-market underpricing: YES({market.yes_price:.2f}) + NO({market.no_price:.2f}) = {total:.2f} < 1.00, buying cheaper side",
+            )
+
+        # Case 2: Overpriced — YES + NO > 1.0, buy the complement of the expensive side
+        overpriced_edge = total - 1.0
+        if overpriced_edge >= self.min_edge:
+            # The more expensive side is overpriced; buy its complement
+            if market.yes_price > market.no_price:
+                # YES is overpriced → buy NO (betting YES will come down)
+                direction = Direction.BUY_NO
+                price = market.no_price
+            else:
+                # NO is overpriced → buy YES (betting NO will come down)
+                direction = Direction.BUY_YES
+                price = market.yes_price
+
+            return Signal(
+                strategy=StrategyName.CROSS_ARB,
+                market_id=market.ticker,
+                market_question=market.question,
+                direction=direction,
+                edge=overpriced_edge,
+                probability_estimate=min(0.99, price + overpriced_edge),
+                market_price=price,
+                confidence=0.9,
+                reasoning=f"Intra-market overpricing: YES({market.yes_price:.2f}) + NO({market.no_price:.2f}) = {total:.2f} > 1.00, buying complement of expensive side",
+            )
+
+        return None
 
     def _is_mutually_exclusive(self, markets: list[Market]) -> bool:
         """Determine if an event's outcomes are mutually exclusive.

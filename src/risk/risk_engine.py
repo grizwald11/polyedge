@@ -130,6 +130,7 @@ class RiskEngine:
         self._check_manipulation(market, failed)
         self._check_obvious_no_limit(signal, bankroll, proposed_cost, failed)
         self._check_max_concurrent_positions(signal, failed)
+        self._check_spread_vs_edge(signal, market, failed)
 
         passed = len(failed) == 0
         result = RiskCheckResult(
@@ -468,6 +469,25 @@ class RiskEngine:
         if current_count >= max_positions:
             failed.append(
                 f"Max concurrent positions reached: {current_count} >= {max_positions}"
+            )
+
+    def _check_spread_vs_edge(
+        self, signal: Signal, market: Market, failed: list[str],
+    ) -> None:
+        """16. Spread check — reject if the bid-ask spread eats >50% of the edge.
+
+        A wide spread means we pay a large implicit cost to enter, eroding the
+        expected profit. When spread/edge > 0.50, more than half the expected
+        edge is consumed by crossing the spread.
+        """
+        spread = getattr(market, 'spread', None)
+        if spread is None or spread <= 0 or signal.edge <= 0:
+            return
+        spread_ratio = spread / signal.edge
+        if spread_ratio > 0.50:
+            failed.append(
+                f"Spread too wide: {spread:.1%} spread / {signal.edge:.1%} edge = "
+                f"{spread_ratio:.0%} (>50% of edge consumed by spread)"
             )
 
     def _get_min_edge(self, strategy: StrategyName) -> float:

@@ -316,6 +316,11 @@ class ClaudeForecaster:
 
         resolution_criteria = self._validate_resolution_criteria(market.description)
 
+        # Compute temporal context
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        days_str = str(int(market.days_to_resolution)) if market.days_to_resolution is not None else "Unknown"
+
         prompt = build_prompt(
             question=market.question,
             resolution_criteria=resolution_criteria,
@@ -325,6 +330,8 @@ class ClaudeForecaster:
             news_context=news_context or "No additional context available.",
             base_rate_context=base_rate_context,
             accuracy_context=accuracy_context,
+            current_date=today,
+            days_to_resolution=days_str,
         )
 
         # Apply A/B testing variant modifier to the prompt

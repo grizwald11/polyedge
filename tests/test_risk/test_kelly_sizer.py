@@ -478,3 +478,65 @@ class TestKellyBankrollBoundaries:
         # At $0.98/contract, very few should be bought
         if contracts > 0:
             assert contracts * 0.98 <= 25.0  # 5% of 500
+
+
+class TestConfidenceAdjustment:
+    """Tests for confidence-adjusted Kelly sizing."""
+
+    def test_high_confidence_minimal_reduction(self, sizer):
+        """Confidence=0.9 should barely reduce position size."""
+        base = sizer.calculate_position_size(
+            edge=0.10, probability=0.50, bankroll=500.0,
+        )
+        adjusted = sizer.calculate_position_size(
+            edge=0.10, probability=0.50, bankroll=500.0, confidence=0.9,
+        )
+        # 0.2 + 0.8*0.9 = 0.92x — should be close to base
+        assert adjusted > 0
+        assert adjusted <= base
+
+    def test_low_confidence_significant_reduction(self, sizer):
+        """Confidence=0.5 should meaningfully reduce position size."""
+        # Use smaller edge so position isn't capped
+        base = sizer.calculate_position_size(
+            edge=0.06, probability=0.50, bankroll=500.0,
+        )
+        adjusted = sizer.calculate_position_size(
+            edge=0.06, probability=0.50, bankroll=500.0, confidence=0.5,
+        )
+        # 0.2 + 0.8*0.5 = 0.60x — should be noticeably smaller
+        assert adjusted > 0
+        assert adjusted < base
+
+    def test_very_low_confidence_heavy_reduction(self, sizer):
+        """Confidence=0.1 should heavily reduce position size."""
+        base = sizer.calculate_position_size(
+            edge=0.10, probability=0.50, bankroll=500.0,
+        )
+        adjusted = sizer.calculate_position_size(
+            edge=0.10, probability=0.50, bankroll=500.0, confidence=0.1,
+        )
+        # 0.2 + 0.8*0.1 = 0.28x — much smaller
+        assert adjusted < base
+
+    def test_none_confidence_no_adjustment(self, sizer):
+        """confidence=None should behave identically to no confidence."""
+        base = sizer.calculate_position_size(
+            edge=0.10, probability=0.50, bankroll=500.0,
+        )
+        with_none = sizer.calculate_position_size(
+            edge=0.10, probability=0.50, bankroll=500.0, confidence=None,
+        )
+        assert with_none == base
+
+    def test_confidence_ordering(self, sizer):
+        """Higher confidence should always produce >= position size."""
+        sizes = []
+        for conf in [0.2, 0.5, 0.7, 0.9]:
+            s = sizer.calculate_position_size(
+                edge=0.10, probability=0.50, bankroll=500.0, confidence=conf,
+            )
+            sizes.append(s)
+        # Monotonically non-decreasing
+        for i in range(len(sizes) - 1):
+            assert sizes[i] <= sizes[i + 1]

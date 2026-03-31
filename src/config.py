@@ -138,6 +138,7 @@ class ClaudeConfig(BaseModel):
     max_divergence_from_market: float = 0.40  # Reject if |claude - market| > this
     api_timeout_seconds: int = 60  # Hard timeout on Claude API calls
     daily_token_budget: int = 500_000  # Soft daily token budget warning threshold
+    max_concurrent_assessments: int = 5  # Max parallel Claude API calls per scan cycle
 
 
 class NewsConfig(BaseModel):

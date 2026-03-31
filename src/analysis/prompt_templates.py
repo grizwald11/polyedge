@@ -27,9 +27,10 @@ CALIBRATION RULES:
 - Express genuine uncertainty. Avoid false precision.
 - Use the provided news context to inform your assessment. If the news contradicts your prior beliefs, update accordingly.
 - When structured data is provided (economic indicators, community forecasts, cross-platform prices), treat these as real-time factual inputs. They are current as of today.
-- Avoid overconfidence: probabilities above 95% or below 5% are rarely justified unless the outcome is nearly certain (e.g., settled law, already-occurred event). Most "obvious" outcomes still have 5-15% residual uncertainty.
+- Probabilities above 95% or below 5% require explicit justification but ARE appropriate for near-certain outcomes (e.g., events that have already occurred, mathematical certainties, settled law). Not everything is uncertain — calibration means being extreme when the evidence warrants it.
 - Avoid underconfidence: if the evidence strongly favors one outcome, do not hedge to 50-60% out of false modesty.
-- Your confidence interval should reflect genuine uncertainty, not a formulaic spread around the point estimate.
+- Your confidence_low and confidence_high should represent a 90% credible interval — you believe there is a 90% chance the true probability falls within this range.
+- Consider how much can change between now and the resolution date. Near-term markets (resolving in days) should have narrower confidence intervals than far-future markets (resolving in months). Weight recent news more heavily than older context — recent developments may not yet be priced in.
 
 DECOMPOSITION METHOD:
 When the question involves compound events (A AND B, sequential steps, conditional outcomes), decompose it:
@@ -51,6 +52,8 @@ MARKET: {question}
 RESOLUTION CRITERIA: {resolution_criteria}
 CURRENT MARKET PRICE: {market_price:.0%} (YES)
 MARKET CLOSES: {close_date}
+TODAY'S DATE: {current_date}
+DAYS UNTIL RESOLUTION: {days_to_resolution}
 
 CONTEXT:
 {news_context}
@@ -73,6 +76,8 @@ MARKET: {question}
 RESOLUTION CRITERIA: {resolution_criteria}
 CURRENT MARKET PRICE: {market_price:.0%} (YES)
 MARKET CLOSES: {close_date}
+TODAY'S DATE: {current_date}
+DAYS UNTIL RESOLUTION: {days_to_resolution}
 
 CONTEXT:
 {news_context}
@@ -95,6 +100,8 @@ MARKET: {question}
 RESOLUTION CRITERIA: {resolution_criteria}
 CURRENT MARKET PRICE: {market_price:.0%} (YES)
 MARKET CLOSES: {close_date}
+TODAY'S DATE: {current_date}
+DAYS UNTIL RESOLUTION: {days_to_resolution}
 
 CONTEXT:
 {news_context}
@@ -117,6 +124,8 @@ MARKET: {question}
 RESOLUTION CRITERIA: {resolution_criteria}
 CURRENT MARKET PRICE: {market_price:.0%} (YES)
 MARKET CLOSES: {close_date}
+TODAY'S DATE: {current_date}
+DAYS UNTIL RESOLUTION: {days_to_resolution}
 
 CONTEXT:
 {news_context}
@@ -139,6 +148,8 @@ MARKET: {question}
 RESOLUTION CRITERIA: {resolution_criteria}
 CURRENT MARKET PRICE: {market_price:.0%} (YES)
 MARKET CLOSES: {close_date}
+TODAY'S DATE: {current_date}
+DAYS UNTIL RESOLUTION: {days_to_resolution}
 
 CONTEXT:
 {news_context}
@@ -160,6 +171,8 @@ MARKET: {question}
 RESOLUTION CRITERIA: {resolution_criteria}
 CURRENT MARKET PRICE: {market_price:.0%} (YES)
 MARKET CLOSES: {close_date}
+TODAY'S DATE: {current_date}
+DAYS UNTIL RESOLUTION: {days_to_resolution}
 
 CONTEXT:
 {news_context}
@@ -377,6 +390,8 @@ def build_prompt(
     news_context: str = "No additional context available.",
     base_rate_context: str = "",
     accuracy_context: str = "",
+    current_date: str = "",
+    days_to_resolution: str = "",
 ) -> str:  # M-6: explicit return type
     """Build a complete prompt for Claude from market data and context.
 
@@ -391,6 +406,8 @@ def build_prompt(
         ),
         market_price=market_price,
         close_date=close_date or "Not specified",
+        current_date=current_date or "Not specified",
+        days_to_resolution=days_to_resolution or "Unknown",
         news_context=_sanitize_external_text(
             news_context or "No additional context available.", 5000
         ),

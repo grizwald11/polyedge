@@ -77,12 +77,12 @@ class TestStopLoss:
 
     def test_custom_stop_loss_threshold(self, tmp_db):
         pm = PositionManager(tmp_db)
-        pos = _make_position(entry_price=0.34, current_price=0.25)
-        # Default 50% threshold — not triggered
+        # 15% loss — below the default 20% stop (accounting for slippage buffer)
+        pos = _make_position(entry_price=0.50, current_price=0.43)
         should, _ = pm.should_exit(pos)
         assert should is False
-        # Tighter 20% threshold — triggered (loss = 26%)
-        should, reason = pm.should_exit(pos, stop_loss_pct=0.20)
+        # Tighter 10% threshold — triggered (loss = 14%)
+        should, reason = pm.should_exit(pos, stop_loss_pct=0.10)
         assert should is True
         assert "stop_loss" in reason
 
