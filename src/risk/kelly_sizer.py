@@ -39,6 +39,7 @@ class KellySizer:
         self._calibration_multiplier: float = 1.0
         self._circuit_breaker_multiplier: float = 1.0
         self._regime_multiplier: float = 1.0
+        self._edge_multiplier: float = 1.0
 
     def calculate_position_size(
         self,
@@ -88,6 +89,14 @@ class KellySizer:
             )
             return 0
         if edge <= 0 or probability <= 0 or probability >= 1 or bankroll <= 0:
+            return 0
+
+        # Apply edge decay multiplier — corrects for systematic overestimation
+        # of edges (common due to vig, adverse selection, information asymmetry).
+        if self._edge_multiplier != 1.0:
+            edge = edge * self._edge_multiplier
+
+        if edge <= 0:
             return 0
 
         # Kelly fraction: f = (p * b - q) / b
@@ -299,6 +308,21 @@ class KellySizer:
                 f"Kelly: regime multiplier {self._regime_multiplier:.2f} → {multiplier:.2f}"
             )
         self._regime_multiplier = multiplier
+
+    def set_edge_multiplier(self, multiplier: float) -> None:
+        """Apply edge decay multiplier from the EdgeTracker.
+
+        Corrects for systematic overestimation of predicted edges.
+        For example, if predicted edges average 10% but realized edges
+        average 5%, the multiplier is 0.5 — Kelly will use half the
+        predicted edge for sizing.
+        """
+        multiplier = max(0.3, min(multiplier, 1.5))
+        if multiplier != self._edge_multiplier:
+            logger.info(
+                f"Kelly: edge multiplier {self._edge_multiplier:.2f} → {multiplier:.2f}"
+            )
+        self._edge_multiplier = multiplier
 
     @property
     def calibration_multiplier(self) -> float:

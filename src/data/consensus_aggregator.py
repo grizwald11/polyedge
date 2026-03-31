@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Optional
 
 from src.core.models import ForecastResult, Market, Platform
@@ -23,6 +24,38 @@ logger = logging.getLogger(__name__)
 # because real money is at stake.
 DEFAULT_BRIER_PREDICTION_MARKET = 0.15
 DEFAULT_BRIER_COMMUNITY_FORECAST = 0.20
+
+
+def _bettor_ci_half(n_bettors: int, volume: float = 0) -> float:
+    """CI half-width that narrows with sqrt(bettors).
+
+    Statistical intuition: variance of sample mean decreases as 1/sqrt(n).
+    Scale factor 0.25 makes CI ≈ ±25% at n=1, ±2.5% at n=100.
+
+    Args:
+        n_bettors: Number of unique bettors/forecasters
+        volume: Trading volume in dollars (optional tightening)
+
+    Returns:
+        CI half-width, clamped to [0.03, 0.25]
+    """
+    if n_bettors <= 0:
+        return 0.25
+    ci_half = 0.25 / math.sqrt(n_bettors)
+    if volume > 100_000:
+        ci_half *= 0.8  # Deep markets are more informative
+    return max(0.03, min(0.25, ci_half))
+
+
+def _source_strength(n_bettors: int) -> float:
+    """Source quality score based on bettor count.
+
+    sqrt(n)/10 gives: 1 bettor → 0.1, 25 bettors → 0.5, 100 → 1.0.
+    Used by the ensemble to weight low-participation sources lower.
+    """
+    if n_bettors <= 0:
+        return 0.1
+    return min(1.0, math.sqrt(n_bettors) / 10.0)
 
 
 class ConsensusAggregator:
@@ -107,16 +140,10 @@ class ConsensusAggregator:
             volume = match.get("volume", 0)
             similarity = match.get("similarity", 0)
 
-            # Confidence interval narrows with volume (proxy for market depth)
-            # High volume = tight CI, low volume = wide CI
-            if volume >= 1_000_000:
-                ci_half = 0.05
-            elif volume >= 100_000:
-                ci_half = 0.08
-            elif volume >= 10_000:
-                ci_half = 0.12
-            else:
-                ci_half = 0.18
+            # Estimate bettor count from volume (rough: avg $100/bet)
+            est_bettors = max(1, int(volume / 100))
+            ci_half = _bettor_ci_half(est_bettors, volume=volume)
+            strength = min(1.0, math.sqrt(volume) / 1000.0)  # Volume-based for markets
 
             return ForecastResult(
                 probability=price,
@@ -124,6 +151,7 @@ class ConsensusAggregator:
                 confidence_high=min(0.99, price + ci_half),
                 reasoning=f"Polymarket price: {price:.0%} (vol=${volume:,.0f}, sim={similarity:.2f})",
                 model_used="polymarket_price",
+                source_strength=strength,
             )
         except Exception as e:
             logger.info(f"Polymarket cross-ref failed: {e}")
@@ -139,8 +167,8 @@ class ConsensusAggregator:
             prob = match["community_prediction"]
             bettors = match.get("forecasters_count", 0)
 
-            # CI narrows with bettor count
-            ci_half = max(0.05, 0.20 - min(bettors, 100) * 0.001)
+            ci_half = _bettor_ci_half(bettors)
+            strength = _source_strength(bettors)
 
             return ForecastResult(
                 probability=prob,
@@ -148,6 +176,7 @@ class ConsensusAggregator:
                 confidence_high=min(0.99, prob + ci_half),
                 reasoning=f"Manifold Markets: {prob:.0%} ({bettors} bettors)",
                 model_used="manifold_community",
+                source_strength=strength,
             )
         except Exception as e:
             logger.info(f"Manifold forecast failed: {e}")
@@ -163,8 +192,8 @@ class ConsensusAggregator:
             prob = match["community_prediction"]
             forecasters = match.get("forecasters_count", 0)
 
-            # CI narrows with forecaster count
-            ci_half = max(0.05, 0.20 - min(forecasters, 100) * 0.001)
+            ci_half = _bettor_ci_half(forecasters)
+            strength = _source_strength(forecasters)
 
             return ForecastResult(
                 probability=prob,
@@ -172,6 +201,7 @@ class ConsensusAggregator:
                 confidence_high=min(0.99, prob + ci_half),
                 reasoning=f"Metaculus: {prob:.0%} ({forecasters} forecasters)",
                 model_used="metaculus_community",
+                source_strength=strength,
             )
         except Exception as e:
             logger.info(f"Metaculus forecast failed: {e}")

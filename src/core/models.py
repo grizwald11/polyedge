@@ -448,6 +448,7 @@ class ForecastResult(BaseModel):
     parse_failed: bool = False
     high_divergence: bool = False  # Set when Claude diverges > max_divergence from market
     prompt_variant: str = ""  # A/B testing: which prompt variant was used
+    source_strength: float = 1.0  # Consensus source quality (0.0-1.0), used for ensemble weighting
 
     @field_validator("probability")
     @classmethod

@@ -383,3 +383,157 @@ class TestStalenessDetection:
         signals = await strategy.scan_for_opportunities([sample_market])
 
         assert len(signals) == 1
+
+
+class TestOpusEscalation:
+    """Tests for smart model escalation — re-verify high-edge signals with opus."""
+
+    @pytest.mark.asyncio
+    async def test_high_edge_triggers_opus_verification(self, strategy, sample_market):
+        """Edge > 15% with sonnet should trigger opus re-verification."""
+        sonnet_forecast = ForecastResult(
+            probability=0.60,
+            confidence_low=0.50,
+            confidence_high=0.70,
+            reasoning="Sonnet analysis",
+            model_used="claude-sonnet-4-6",
+            tokens_used=500,
+            latency_ms=1000,
+        )
+        opus_forecast = ForecastResult(
+            probability=0.58,  # Agrees within 10%
+            confidence_low=0.48,
+            confidence_high=0.68,
+            reasoning="Opus analysis",
+            model_used="claude-opus-4-6",
+            tokens_used=800,
+            latency_ms=2000,
+        )
+        call_count = 0
+
+        async def mock_assess(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if kwargs.get("force_model"):
+                return opus_forecast
+            return sonnet_forecast
+
+        strategy.forecaster.assess_market = mock_assess
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        # Should have called assess_market twice (sonnet + opus escalation)
+        assert call_count == 2
+        assert len(signals) == 1
+
+    @pytest.mark.asyncio
+    async def test_opus_disagreement_rejects_signal(self, strategy, sample_market):
+        """If opus disagrees >10% with sonnet, signal should be rejected."""
+        sonnet_forecast = ForecastResult(
+            probability=0.60,
+            confidence_low=0.50,
+            confidence_high=0.70,
+            reasoning="Sonnet analysis",
+            model_used="claude-sonnet-4-6",
+            tokens_used=500,
+            latency_ms=1000,
+        )
+        opus_forecast = ForecastResult(
+            probability=0.42,  # Disagrees by 18%
+            confidence_low=0.32,
+            confidence_high=0.52,
+            reasoning="Opus disagrees",
+            model_used="claude-opus-4-6",
+            tokens_used=800,
+            latency_ms=2000,
+        )
+
+        async def mock_assess(*args, **kwargs):
+            if kwargs.get("force_model"):
+                return opus_forecast
+            return sonnet_forecast
+
+        strategy.forecaster.assess_market = mock_assess
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        assert len(signals) == 0  # Rejected due to opus disagreement
+
+    @pytest.mark.asyncio
+    async def test_low_edge_skips_escalation(self, strategy, sample_market):
+        """Edge <= 15% should not trigger opus verification."""
+        # Claude says 0.44 vs market 0.34 — edge ~10% after ensemble, below 15%
+        forecast = ForecastResult(
+            probability=0.44,
+            confidence_low=0.38,
+            confidence_high=0.50,
+            reasoning="Modest edge",
+            model_used="claude-sonnet-4-6",
+            tokens_used=500,
+            latency_ms=1000,
+        )
+        call_count = 0
+
+        async def mock_assess(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return forecast
+
+        strategy.forecaster.assess_market = mock_assess
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        # Only one call — no escalation
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_opus_already_used_skips_escalation(self, strategy, sample_market):
+        """If initial forecast already used opus, don't re-verify."""
+        forecast = ForecastResult(
+            probability=0.60,
+            confidence_low=0.50,
+            confidence_high=0.70,
+            reasoning="Opus initial",
+            model_used="claude-opus-4-6",  # Already opus
+            tokens_used=800,
+            latency_ms=2000,
+        )
+        call_count = 0
+
+        async def mock_assess(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return forecast
+
+        strategy.forecaster.assess_market = mock_assess
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        # Only one call — no escalation since already opus
+        assert call_count == 1
+        assert len(signals) == 1
+
+    @pytest.mark.asyncio
+    async def test_escalation_failure_keeps_sonnet_signal(self, strategy, sample_market):
+        """If opus call fails, should keep the sonnet signal."""
+        sonnet_forecast = ForecastResult(
+            probability=0.60,
+            confidence_low=0.50,
+            confidence_high=0.70,
+            reasoning="Sonnet analysis",
+            model_used="claude-sonnet-4-6",
+            tokens_used=500,
+            latency_ms=1000,
+        )
+
+        async def mock_assess(*args, **kwargs):
+            if kwargs.get("force_model"):
+                raise Exception("Opus API error")
+            return sonnet_forecast
+
+        strategy.forecaster.assess_market = mock_assess
+
+        signals = await strategy.scan_for_opportunities([sample_market])
+
+        # Should keep sonnet signal on escalation failure
+        assert len(signals) == 1

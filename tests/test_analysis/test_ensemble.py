@@ -206,9 +206,118 @@ class TestComputeModelWeights:
         weights = _compute_model_weights(forecasts, brier, "", None)
         # With 1 scored model: known gets full Brier weight (1.0),
         # unknown gets average of scored weights (also 1.0).
-        # Both end up equal because there's only one scored model.
-        assert abs(weights[0].weight - 1.0) < 0.01
-        assert abs(weights[1].weight - 1.0) < 0.01
+        # After confidence/source_strength normalization, both end up ~0.5.
+        assert abs(weights[0].weight - 0.5) < 0.01
+        assert abs(weights[1].weight - 0.5) < 0.01
+
+
+class TestDynamicMarketEfficiency:
+    """Tests for compute_market_efficiency and its integration."""
+
+    def test_zero_volume_low_efficiency(self):
+        from src.analysis.ensemble import compute_market_efficiency
+        eff = compute_market_efficiency(volume_24h=0, liquidity=0)
+        assert eff == pytest.approx(0.3, abs=0.05)  # Floor
+
+    def test_high_volume_high_efficiency(self):
+        from src.analysis.ensemble import compute_market_efficiency
+        eff = compute_market_efficiency(volume_24h=1_000_000, liquidity=100_000)
+        assert eff > 0.7
+
+    def test_near_expiry_boosts_efficiency(self):
+        from src.analysis.ensemble import compute_market_efficiency
+        eff_far = compute_market_efficiency(volume_24h=10_000, liquidity=5_000, days_to_resolution=60)
+        eff_near = compute_market_efficiency(volume_24h=10_000, liquidity=5_000, days_to_resolution=2)
+        assert eff_near > eff_far
+
+    def test_efficiency_clamped(self):
+        from src.analysis.ensemble import compute_market_efficiency
+        eff = compute_market_efficiency(volume_24h=100_000_000, liquidity=100_000_000, days_to_resolution=0.5)
+        assert eff <= 0.95
+        eff_low = compute_market_efficiency(volume_24h=0, liquidity=0, days_to_resolution=365)
+        assert eff_low >= 0.3
+
+    def test_high_efficiency_trusts_market_more(self):
+        """With high efficiency, ensemble should pull more toward market price."""
+        f = _make_forecast(0.70)
+        # Default efficiency (~0.7)
+        r_default = ensemble_forecast(f, market_price=0.50)
+        # High efficiency → market trusted more
+        r_efficient = ensemble_forecast(f, market_price=0.50, market_efficiency=0.9)
+        # More efficient market → result closer to 0.50
+        assert abs(r_efficient.final_probability - 0.50) <= abs(r_default.final_probability - 0.50) + 0.02
+
+    def test_low_efficiency_trusts_claude_more(self):
+        """With low efficiency, ensemble should trust Claude more."""
+        f = _make_forecast(0.70)
+        # Low efficiency → Claude trusted more
+        r_inefficient = ensemble_forecast(f, market_price=0.50, market_efficiency=0.3)
+        # High efficiency → market trusted more
+        r_efficient = ensemble_forecast(f, market_price=0.50, market_efficiency=0.9)
+        # Low efficiency → result further from 0.50 (closer to Claude's 0.70)
+        assert r_inefficient.final_probability >= r_efficient.final_probability - 0.02
+
+
+class TestConfidenceWeighting:
+    """Tests for confidence-weighted and source-strength-weighted ensemble."""
+
+    def test_narrow_ci_gets_higher_weight_than_wide(self):
+        """Forecast with narrow CI should get more weight than wide CI."""
+        f_narrow = ForecastResult(
+            probability=0.70, confidence_low=0.65, confidence_high=0.75,  # CI=0.10
+            reasoning="test", model_used="narrow",
+        )
+        f_wide = ForecastResult(
+            probability=0.30, confidence_low=0.10, confidence_high=0.50,  # CI=0.40
+            reasoning="test", model_used="wide",
+        )
+        weights = _compute_model_weights([f_narrow, f_wide], None, "", None)
+        # Narrow CI (0.10) → factor 0.95, Wide CI (0.40) → factor 0.80
+        assert weights[0].weight > weights[1].weight
+
+    def test_source_strength_affects_weight(self):
+        """Low source_strength should reduce weight."""
+        f_strong = ForecastResult(
+            probability=0.70, confidence_low=0.60, confidence_high=0.80,
+            reasoning="test", model_used="strong", source_strength=1.0,
+        )
+        f_weak = ForecastResult(
+            probability=0.30, confidence_low=0.20, confidence_high=0.40,
+            reasoning="test", model_used="weak", source_strength=0.2,
+        )
+        weights = _compute_model_weights([f_strong, f_weak], None, "", None)
+        # Same CI width, but weak has 0.2 source_strength
+        assert weights[0].weight > weights[1].weight
+
+    def test_ensemble_pulls_toward_high_strength_source(self):
+        """Multi-model ensemble should favor high-strength sources."""
+        f_strong = ForecastResult(
+            probability=0.80, confidence_low=0.75, confidence_high=0.85,
+            reasoning="test", model_used="strong", source_strength=1.0,
+        )
+        f_weak = ForecastResult(
+            probability=0.20, confidence_low=0.15, confidence_high=0.25,
+            reasoning="test", model_used="weak", source_strength=0.1,
+        )
+        result = multi_model_ensemble(
+            [f_strong, f_weak], market_price=0.50, market_weight=0.0,
+        )
+        # Should be pulled strongly toward 0.80 (strong source)
+        assert result.final_probability > 0.60
+
+    def test_weights_still_normalized(self):
+        """After all adjustments, weights should sum to approximately 1.0."""
+        f1 = ForecastResult(
+            probability=0.50, confidence_low=0.40, confidence_high=0.60,
+            reasoning="test", model_used="a", source_strength=0.5,
+        )
+        f2 = ForecastResult(
+            probability=0.60, confidence_low=0.30, confidence_high=0.90,
+            reasoning="test", model_used="b", source_strength=1.0,
+        )
+        weights = _compute_model_weights([f1, f2], None, "", None)
+        total = sum(w.weight for w in weights)
+        assert abs(total - 1.0) < 0.01
 
 
 class TestCIPenaltyScaling:

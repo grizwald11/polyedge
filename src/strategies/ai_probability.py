@@ -544,6 +544,43 @@ class AIProbabilityStrategy:
             market_price = market.no_price
             edge = abs(edge)
 
+        # Smart Model Escalation: if edge > 15% and initial model was sonnet,
+        # re-verify with opus. Opus catches ~10-20% more nuances in resolution
+        # criteria and temporal reasoning. If opus disagrees > 10%, reject.
+        model_used = getattr(forecast, "model_used", "") or ""
+        is_sonnet = "sonnet" in model_used.lower()
+        if edge > 0.15 and is_sonnet:
+            try:
+                opus_model = self.settings.claude.model_highstakes
+                opus_forecast = await self.forecaster.assess_market(
+                    market=market,
+                    news_context=news_context,
+                    base_rate_context=base_rate_context,
+                    force_model=opus_model,
+                )
+                if not getattr(opus_forecast, "parse_failed", False):
+                    opus_prob = opus_forecast.probability
+                    sonnet_prob = forecast.probability
+                    disagreement = abs(opus_prob - sonnet_prob)
+                    if disagreement > 0.10:
+                        logger.warning(
+                            f"Opus escalation REJECTED {market.ticker}: "
+                            f"sonnet={sonnet_prob:.0%}, opus={opus_prob:.0%}, "
+                            f"disagreement={disagreement:.0%} > 10% threshold"
+                        )
+                        return None
+                    else:
+                        logger.info(
+                            f"Opus escalation CONFIRMED {market.ticker}: "
+                            f"sonnet={sonnet_prob:.0%}, opus={opus_prob:.0%}, "
+                            f"disagreement={disagreement:.0%}"
+                        )
+                        # Use opus estimate if it confirmed the signal
+                        forecast = opus_forecast
+            except Exception as e:
+                logger.warning(f"Opus escalation failed for {market.ticker}: {e}")
+                # Continue with sonnet signal on escalation failure
+
         signal = Signal(
             strategy=StrategyName.AI_PROBABILITY,
             market_id=market.ticker,

@@ -95,16 +95,27 @@ class CalibrationAnalyzer:
     def get_category_adjustments(self) -> dict[str, float]:
         """Get per-category adjustment factors to correct Claude's estimates.
 
+        Uses James-Stein shrinkage to blend category-specific bias toward the
+        global bias, weighted by sample size. This allows categories with as
+        few as 3 samples to receive partial corrections (heavily shrunk toward
+        global), while categories with 30+ samples are mostly self-determined.
+
         Returns a dict of {category: adjustment_factor} where:
         - Positive adjustment means Claude underestimates (add to prediction)
         - Negative adjustment means Claude overestimates (subtract from prediction)
-        - Magnitude indicates how much to adjust
 
         The ensemble can apply: adjusted_prob = claude_prob + adjustment
         """
+        import math
+
         resolved = self._get_resolved_with_category()
         if not resolved:
             return {}
+
+        # Compute global bias as the shrinkage prior
+        global_avg_predicted = sum(r["predicted_probability"] for r in resolved) / len(resolved)
+        global_avg_actual = sum(float(r["actual_outcome"]) for r in resolved) / len(resolved)
+        global_bias = global_avg_actual - global_avg_predicted
 
         # Group by category
         by_category: dict[str, list[dict]] = {}
@@ -114,36 +125,51 @@ class CalibrationAnalyzer:
 
         adjustments = {}
         for cat, records in by_category.items():
-            if len(records) < 15:  # Need minimum sample size
+            n = len(records)
+            if n < 3:  # Absolute minimum for any signal
                 continue
 
-            # Bias = avg(actual) - avg(predicted)
-            # Positive: Claude underestimates → should increase predictions
-            # Negative: Claude overestimates → should decrease predictions
-            avg_predicted = sum(r["predicted_probability"] for r in records) / len(records)
-            avg_actual = sum(float(r["actual_outcome"]) for r in records) / len(records)
-            bias = avg_actual - avg_predicted
+            # Category-specific bias
+            avg_predicted = sum(r["predicted_probability"] for r in records) / n
+            avg_actual = sum(float(r["actual_outcome"]) for r in records) / n
+            cat_bias = avg_actual - avg_predicted
 
-            # Use sample-size-aware threshold: smaller samples need larger bias
-            # to be statistically meaningful. Approximate 95% CI width for a
-            # proportion: ~1.96 * sqrt(p*(1-p)/n). Use 0.5 as worst-case p.
-            n = len(records)
-            import math
+            # James-Stein shrinkage: blend category bias toward global bias.
+            # shrinkage_weight = n / (n + k), where k controls shrinkage strength.
+            # k=15 means at 15 samples we're 50/50 category vs global;
+            # at 3 samples we're 17% category / 83% global;
+            # at 50 samples we're 77% category / 23% global.
+            k = 15.0
+            shrinkage_weight = n / (n + k)
+            blended_bias = shrinkage_weight * cat_bias + (1 - shrinkage_weight) * global_bias
+
+            # Still require meaningful bias magnitude
             threshold = max(0.03, 1.96 * math.sqrt(0.25 / n))
-            if abs(bias) > threshold:
-                adjustments[cat] = round(bias, 3)
+            # For small samples, use a softer threshold since shrinkage
+            # already dampens the estimate toward the global prior
+            if n < 15:
+                threshold = max(0.03, threshold * 0.6)
+
+            if abs(blended_bias) > threshold:
+                adjustments[cat] = round(blended_bias, 3)
 
         return adjustments
 
     def get_category_base_rates(self) -> dict[str, dict]:
         """Get historical YES resolution rates by category.
 
+        Uses shrinkage toward the global base rate for small-sample categories.
         Returns dict like {"Politics": {"total": 25, "yes_rate": 0.44}}.
-        Only includes categories with at least 5 resolved predictions.
+        Includes categories with as few as 3 resolved predictions (shrunk
+        toward global rate).
         """
         resolved = self._get_resolved_with_category()
         if not resolved:
             return {}
+
+        # Global base rate as shrinkage prior
+        global_yes = sum(1 for r in resolved if bool(r["actual_outcome"]))
+        global_rate = global_yes / len(resolved)
 
         by_category: dict[str, list[dict]] = {}
         for r in resolved:
@@ -152,14 +178,20 @@ class CalibrationAnalyzer:
 
         base_rates = {}
         for cat, records in by_category.items():
-            # Require minimum 15 resolved markets for statistical significance
-            # (95% CI width ~±25% vs ±45% at n=4).
-            if len(records) < 15:
+            n = len(records)
+            if n < 3:
                 continue
             yes_count = sum(1 for r in records if bool(r["actual_outcome"]))
+            cat_rate = yes_count / n
+
+            # Shrinkage: blend toward global rate for small samples
+            k = 15.0
+            shrinkage_weight = n / (n + k)
+            blended_rate = shrinkage_weight * cat_rate + (1 - shrinkage_weight) * global_rate
+
             base_rates[cat] = {
-                "total": len(records),
-                "yes_rate": yes_count / len(records),
+                "total": n,
+                "yes_rate": round(blended_rate, 3),
             }
 
         return base_rates

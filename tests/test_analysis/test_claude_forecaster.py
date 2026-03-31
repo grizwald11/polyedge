@@ -288,6 +288,39 @@ class TestClaudeForecaster:
         assert mock_client.messages.create.await_count == 2  # New call made
 
 
+class TestModelEscalation:
+    """Tests for smart model escalation (_select_model with edge parameter)."""
+
+    def test_select_model_low_edge_uses_sonnet(self, forecaster):
+        assert forecaster._select_model(10.0, edge=0.05) == "claude-sonnet-4-6"
+
+    def test_select_model_high_edge_uses_opus(self, forecaster):
+        assert forecaster._select_model(10.0, edge=0.20) == "claude-opus-4-6"
+
+    def test_select_model_negative_high_edge_uses_opus(self, forecaster):
+        """Negative edge (BUY_NO) with large absolute value should escalate."""
+        assert forecaster._select_model(10.0, edge=-0.18) == "claude-opus-4-6"
+
+    def test_select_model_position_value_takes_precedence(self, forecaster):
+        """High position value should use opus even with low edge."""
+        assert forecaster._select_model(100.0, edge=0.03) == "claude-opus-4-6"
+
+    @pytest.mark.asyncio
+    async def test_force_model_overrides_selection(self, forecaster, sample_market):
+        """force_model parameter should override normal model selection."""
+        mock_response = _mock_claude_response(0.42)
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        forecaster._client = mock_client
+        forecaster.news_researcher.get_context = AsyncMock(return_value="")
+
+        result = await forecaster.assess_market(
+            sample_market, force_model="claude-opus-4-6"
+        )
+
+        assert result.model_used == "claude-opus-4-6"
+
+
 class TestCrossCheckCIValidation:
     """Tests for CI bound validation after cross-check widening (H-15)."""
 

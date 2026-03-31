@@ -191,13 +191,52 @@ class TestCategoryAdjustments:
         assert "Other" not in adjustments
 
     def test_minimum_sample_size(self, analyzer, tmp_db):
-        """Categories with fewer than 15 predictions should be excluded."""
+        """Categories with fewer than 3 predictions should be excluded."""
         _seed_resolved(tmp_db, [
-            (f"MKT-{i}", "Rare", 0.90, 0) for i in range(1, 15)  # 14 records — just below threshold
+            (f"MKT-{i}", "Rare", 0.90, 0) for i in range(1, 3)  # 2 records — below minimum
         ])
 
         adjustments = analyzer.get_category_adjustments()
         assert "Rare" not in adjustments
+
+    def test_shrinkage_small_sample(self, analyzer, tmp_db):
+        """Small-sample categories should get adjustments shrunk toward global bias."""
+        # Global: 20 records, heavily overestimating (predict 0.80, actual=0)
+        _seed_resolved(tmp_db, [
+            (f"BIG-{i}", "BigCategory", 0.80, 0) for i in range(20)
+        ])
+        # Small category: only 4 records, same pattern
+        _seed_resolved(tmp_db, [
+            (f"SMALL-{i}", "SmallCategory", 0.80, 0) for i in range(4)
+        ])
+
+        adjustments = analyzer.get_category_adjustments()
+        # Both should have negative adjustments (overestimates)
+        assert "BigCategory" in adjustments
+        assert adjustments["BigCategory"] < 0
+        # SmallCategory should also get an adjustment (shrunk toward global)
+        assert "SmallCategory" in adjustments
+        assert adjustments["SmallCategory"] < 0
+        # SmallCategory adjustment should be closer to global bias than BigCategory
+        # (more shrinkage due to smaller sample)
+
+    def test_shrinkage_base_rates(self, analyzer, tmp_db):
+        """Small-sample base rates should be shrunk toward global rate."""
+        # Global: 20 records, 50% YES rate
+        _seed_resolved(tmp_db, [
+            (f"G-{i}", "Global", 0.50, 1 if i < 10 else 0) for i in range(20)
+        ])
+        # Small category: 4 records, 100% YES rate
+        _seed_resolved(tmp_db, [
+            (f"S-{i}", "Small", 0.50, 1) for i in range(4)
+        ])
+
+        base_rates = analyzer.get_category_base_rates()
+        assert "Small" in base_rates
+        # Raw rate is 1.0, but shrunk toward global ~0.58 (20/24 weighted)
+        # shrinkage_weight = 4/(4+15) = 0.21, so blended ≈ 0.21*1.0 + 0.79*0.58 ≈ 0.67
+        assert base_rates["Small"]["yes_rate"] < 1.0  # Not raw rate
+        assert base_rates["Small"]["yes_rate"] > 0.5  # Still above global
 
 
 class TestDatabaseMethods:

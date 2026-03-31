@@ -443,6 +443,25 @@ async def scan_and_trade(
         except Exception as e:
             logger.error(f"Calibration report failed: {e}", exc_info=True)
 
+    # Edge tracker: update Kelly edge multiplier based on realized vs predicted edge
+    if cycle_count > 0 and cycle_count % 10 == 0:
+        try:
+            from src.analysis.edge_tracker import EdgeTracker
+            edge_tracker = EdgeTracker(scanner.db)
+            shrinkage = edge_tracker.compute_edge_shrinkage()
+            kelly_sizer.set_edge_multiplier(shrinkage)
+            summary = edge_tracker.get_summary()
+            if summary["count"] > 0:
+                logger.info(
+                    f"Edge tracker: {summary['count']} resolved, "
+                    f"avg_predicted={summary['avg_predicted']:.3f}, "
+                    f"avg_realized={summary['avg_realized']:.3f}, "
+                    f"shrinkage={summary['shrinkage']:.2f}, "
+                    f"win_rate={summary['win_rate']:.1%}"
+                )
+        except Exception as e:
+            logger.debug(f"Edge tracker update skipped: {e}")
+
     # Key rotation check every 10 cycles (~50 min) — detect rotated credentials
     if cycle_count > 0 and cycle_count % 10 == 0:
         try:

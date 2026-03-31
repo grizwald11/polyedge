@@ -79,9 +79,15 @@ class ClaudeForecaster:
             self._client = anthropic.AsyncAnthropic(api_key=api_key)
         return self._client
 
-    def _select_model(self, position_value: float = 0.0) -> str:
-        """Select model based on position value."""
+    def _select_model(self, position_value: float = 0.0, edge: float = 0.0) -> str:
+        """Select model based on position value or edge size.
+
+        Uses opus for high-stakes positions or large detected edges (>15%),
+        since opus catches more nuances in resolution criteria and temporal reasoning.
+        """
         if position_value > self.settings.claude.highstakes_threshold:
+            return self.settings.claude.model_highstakes
+        if abs(edge) > 0.15:
             return self.settings.claude.model_highstakes
         return self.settings.claude.model_primary
 
@@ -512,6 +518,7 @@ class ClaudeForecaster:
         news_context: str = "",
         position_value: float = 0.0,
         base_rate_context: str = "",
+        force_model: Optional[str] = None,
     ) -> ForecastResult:
         """Assess a market's true probability using Claude.
 
@@ -520,19 +527,28 @@ class ClaudeForecaster:
             news_context: Additional news/context to include
             position_value: Expected position size (determines model selection)
             base_rate_context: Historical base rate string for the category
+            force_model: Override model selection (e.g., force opus for escalation)
 
         Returns:
             ForecastResult with probability estimate and reasoning
         """
         # Stage 1: Precondition checks (circuit breaker, budget, cache)
-        early_result = self._check_preconditions(market)
-        if early_result is not None:
-            return early_result
+        # Skip cache when force_model is set (escalation re-verification)
+        if force_model:
+            early_result = self._check_preconditions(market)
+            if early_result is not None and early_result.parse_failed:
+                return early_result  # Respect circuit breaker/budget, but skip cache
+        else:
+            early_result = self._check_preconditions(market)
+            if early_result is not None:
+                return early_result
 
         # Stage 2: Build prompt with news enrichment
         prompt, model, category, temperature = await self._build_prompt(
             market, news_context, base_rate_context, position_value,
         )
+        if force_model:
+            model = force_model
 
         # Stage 3: Call Claude API with retry logic
         start_time = time.monotonic()

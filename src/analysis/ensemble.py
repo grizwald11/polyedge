@@ -12,6 +12,7 @@ always included as an additional "forecast" with configurable weight.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -30,10 +31,50 @@ class ModelWeight:
     brier_score: Optional[float] = None  # Historical performance (lower = better)
 
 
+def compute_market_efficiency(
+    volume_24h: float = 0,
+    liquidity: float = 0,
+    days_to_resolution: Optional[float] = None,
+) -> float:
+    """Estimate market efficiency from observable liquidity proxies.
+
+    Higher efficiency means the market price is more informative and should
+    get more weight in the ensemble. Used by ensemble_forecast and
+    BayesianUpdater to dynamically adjust trust in market price.
+
+    Args:
+        volume_24h: 24-hour trading volume in dollars
+        liquidity: Current order book depth in dollars
+        days_to_resolution: Days until market resolves (near-expiry = more efficient)
+
+    Returns:
+        Efficiency score from 0.3 (thin/inefficient) to 0.95 (deep/efficient)
+    """
+    # Volume score: log-scaled, saturates around $1M
+    vol_score = min(1.0, math.log1p(max(0, volume_24h)) / math.log1p(1_000_000))
+
+    # Liquidity score: order book depth, saturates at $100K
+    liq_score = min(1.0, math.log1p(max(0, liquidity)) / math.log1p(100_000))
+
+    # Time-to-resolution: markets near expiry are heavily arbitraged
+    time_score = 0.5
+    if days_to_resolution is not None:
+        if days_to_resolution < 3:
+            time_score = 0.9
+        elif days_to_resolution < 14:
+            time_score = 0.7
+        else:
+            time_score = 0.5
+
+    efficiency = 0.4 * vol_score + 0.3 * liq_score + 0.3 * time_score
+    return max(0.3, min(0.95, efficiency))
+
+
 def ensemble_forecast(
     claude_forecast: ForecastResult,
     market_price: float,
     claude_weight: float = 0.85,
+    market_efficiency: Optional[float] = None,
 ) -> EnsembleForecast:
     """Combine Claude forecast with market price using adaptive weights.
 
@@ -66,19 +107,25 @@ def ensemble_forecast(
     # mid-rare opportunities like FDA approvals at 10-15%.
     divergence = abs(claude_forecast.probability - market_price)
     extreme_price = market_price < 0.05 or market_price > 0.95
+
+    # Dynamic efficiency adjustment: when market is highly efficient (>0.7),
+    # trust market price more on divergence; when inefficient (<0.5),
+    # trust Claude more. Falls back to original hardcoded behavior when
+    # efficiency is not provided.
+    eff = market_efficiency if market_efficiency is not None else 0.7
+
     if extreme_price:
         # On extreme-price markets, trust the market more — Claude divergence
-        # here is usually wrong. Reduce Claude weight with floor at 25% (M-1),
-        # so the market dominates on extreme-price contracts where Claude's
-        # divergence is most likely a hallucination. Halve the divergence
-        # penalty (was 1.0, now 0.5).
+        # here is usually wrong. Reduce Claude weight with floor at 25% (M-1).
         effective_claude_weight = max(0.25, effective_claude_weight - divergence * 0.5)
     elif divergence > 0.20:
-        # Strong divergence on mid-price markets: boost Claude weight
-        effective_claude_weight = min(0.95, effective_claude_weight + 0.07)
+        # Strong divergence: boost Claude more when market is inefficient
+        boost = 0.07 * (1.5 - eff)  # 0.07 at eff=0.7, 0.105 at eff=0.3
+        effective_claude_weight = min(0.95, effective_claude_weight + boost)
     elif divergence < 0.05:
-        # Marginal call: reduce Claude weight, trust market more
-        effective_claude_weight = max(0.50, effective_claude_weight - 0.10)
+        # Marginal call: trust market more when it's efficient
+        reduction = 0.10 * (0.5 + eff)  # 0.12 at eff=0.7, 0.08 at eff=0.3
+        effective_claude_weight = max(0.50, effective_claude_weight - reduction)
 
     market_weight = 1.0 - effective_claude_weight
 
@@ -261,5 +308,23 @@ def _compute_model_weights(
         equal = 1.0 / len(weights) if weights else 1.0
         for w in weights:
             w.weight = equal
+
+    # Apply confidence weighting: narrow CI → higher weight.
+    # Multiplier ranges from 0.3 (very wide CI) to 1.0 (very narrow CI).
+    for w in weights:
+        ci_width = abs(w.forecast.confidence_high - w.forecast.confidence_low)
+        confidence_factor = max(0.3, 1.0 - ci_width * 0.5)
+        w.weight *= confidence_factor
+
+    # Apply source strength weighting: high-participation sources → higher weight.
+    # source_strength defaults to 1.0 for Claude forecasts, <1.0 for thin consensus.
+    for w in weights:
+        w.weight *= getattr(w.forecast, 'source_strength', 1.0)
+
+    # Re-normalize weights
+    total_weight = sum(w.weight for w in weights)
+    if total_weight > 0:
+        for w in weights:
+            w.weight /= total_weight
 
     return weights
