@@ -117,16 +117,15 @@ class OrderRouter:
         from datetime import timedelta
 
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        conn = self.db._get_conn()
-        # Find orders that are still marked 'open' but older than 24 hours
-        rows = conn.execute(
-            "SELECT id FROM orders WHERE status='open' AND created_at < ?",
-            (cutoff,),
-        ).fetchall()
-
-        stale_ids = {row["id"] for row in rows}
         removed = 0
+        # M-N3: Acquire lock before querying DB to prevent race with concurrent fill updates
         async with self._pending_lock:
+            conn = self.db._get_conn()
+            rows = conn.execute(
+                "SELECT id FROM orders WHERE status='open' AND created_at < ?",
+                (cutoff,),
+            ).fetchall()
+            stale_ids = {row["id"] for row in rows}
             for order_id in list(self._pending_orders.keys()):
                 if order_id in stale_ids:
                     self.db.delete_pending_order(order_id)
@@ -707,7 +706,12 @@ class OrderRouter:
                 try:
                     api_price = float(result.get("price", order.price))
                     order.fill_price = api_price if api_price > 0 else order.price
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    logger.warning(
+                        "M-N1: Polymarket fill price parse failed for %s: %s — "
+                        "using order price $%.2f as fallback",
+                        order.id, e, order.price,
+                    )
                     order.fill_price = order.price
             elif status in ("live", "resting"):
                 order.status = OrderStatus.OPEN

@@ -753,10 +753,16 @@ class NewsResearcher:
         logger.info(
             f"News research: {len(all_results)} results for '{market_question[:50]}...'"
         )
-        # M-6: Cache successful context for fallback
+        # M-6: Cache successful context for fallback (M-N4: capped at 1000 entries)
         cache_key = market_question.strip().lower()
         self._last_successful_context[cache_key] = context
         self._last_successful_time[cache_key] = time.monotonic()
+        # Evict oldest entries if cache exceeds limit
+        _MAX_CONTEXT_CACHE = 1000
+        if len(self._last_successful_context) > _MAX_CONTEXT_CACHE:
+            oldest_key = min(self._last_successful_time, key=self._last_successful_time.get)  # type: ignore[arg-type]
+            del self._last_successful_context[oldest_key]
+            del self._last_successful_time[oldest_key]
         return context
 
     def _format_context(self, results: list[NewsResult]) -> str:
