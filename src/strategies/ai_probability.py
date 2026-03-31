@@ -10,7 +10,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from src.analysis.adversarial_analyzer import AdversarialAnalyzer
+from src.analysis.analogue_finder import AnalogueFinder
 from src.analysis.calibration_analyzer import CalibrationAnalyzer
+from src.analysis.contrarian_tracker import ContrarianTracker
+from src.analysis.resolution_analyzer import ResolutionAnalyzer
 from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.decomposer import QuestionDecomposer, is_compound_question
 from src.analysis.ensemble import ensemble_forecast, multi_model_ensemble
@@ -49,6 +53,10 @@ class AIProbabilityStrategy:
         self.data_enricher = data_enricher
         self.decomposer = QuestionDecomposer(forecaster)
         self.temporal_analyzer = TemporalAnalyzer()
+        self.analogue_finder: AnalogueFinder | None = AnalogueFinder(db) if db else None
+        self.contrarian_tracker: ContrarianTracker | None = ContrarianTracker(db) if db else None
+        self.resolution_analyzer = ResolutionAnalyzer(forecaster)
+        self.adversarial_analyzer = AdversarialAnalyzer(forecaster)
         self.consensus_aggregator: Optional[ConsensusAggregator] = None
         # Initialize consensus aggregator if data enricher has the required clients
         if data_enricher:
@@ -290,6 +298,44 @@ class AIProbabilityStrategy:
 
         base_rate_context = self._build_base_rate_context(category.value)
 
+        # Build historical accuracy context for this category
+        accuracy_context = ""
+        if self.calibration_analyzer:
+            try:
+                accuracy_context = self.calibration_analyzer.get_accuracy_context(category.value)
+            except Exception as e:
+                logger.debug(f"Accuracy context failed for {category.value}: {e}")
+
+        # Analyze resolution criteria for ambiguities (cached per market)
+        resolution_context = ""
+        try:
+            resolution_analysis = await self.resolution_analyzer.analyze(market)
+            if resolution_analysis.is_high_risk:
+                logger.info(
+                    f"Skipping {market.ticker}: resolution criteria too ambiguous "
+                    f"(risk={resolution_analysis.risk_score:.0%})"
+                )
+                return None
+            resolution_context = resolution_analysis.format_for_prompt()
+        except Exception as e:
+            logger.debug(f"Resolution analysis failed for {market.ticker}: {e}")
+
+        # Find similar resolved markets as reference points
+        if self.analogue_finder:
+            try:
+                analogues = self.analogue_finder.find_analogues(
+                    market.question, category=category.value,
+                )
+                analogue_context = self.analogue_finder.format_for_prompt(analogues)
+                if analogue_context:
+                    accuracy_context = f"{accuracy_context}\n\n{analogue_context}" if accuracy_context else analogue_context
+            except Exception as e:
+                logger.debug(f"Analogue finder failed for {market.ticker}: {e}")
+
+        # Append resolution analysis to accuracy context
+        if resolution_context:
+            accuracy_context = f"{accuracy_context}\n\n{resolution_context}" if accuracy_context else resolution_context
+
         # Use data enricher for context if available, otherwise fall back to news_context
         if self.data_enricher:
             try:
@@ -332,6 +378,7 @@ class AIProbabilityStrategy:
                     market=market,
                     news_context=news_context,
                     base_rate_context=base_rate_context,
+                    accuracy_context=accuracy_context,
                 )
             except Exception as e:
                 logger.warning(
@@ -347,12 +394,37 @@ class AIProbabilityStrategy:
                 market=market,
                 news_context=news_context,
                 base_rate_context=base_rate_context,
+                accuracy_context=accuracy_context,
             )
 
         # Skip if Claude failed to parse the response (fallback 0.5 is unreliable)
         if getattr(forecast, "parse_failed", False):
             logger.warning(f"Skipping {market.ticker}: Claude response parse failed")
             return None
+
+        # Record Claude-vs-market divergence for contrarian accuracy tracking
+        if self.contrarian_tracker:
+            try:
+                self.contrarian_tracker.record_divergence(
+                    market_id=market.ticker,
+                    category=category.value,
+                    claude_estimate=forecast.probability,
+                    market_price=market.yes_price,
+                )
+            except Exception as e:
+                logger.debug(f"Contrarian tracking failed for {market.ticker}: {e}")
+
+        # Pre-mortem adversarial analysis: force counterargument reasoning
+        # Only run when edge is significant and CI is tight (avoid wasting API calls)
+        preliminary_edge = abs(forecast.probability - market.yes_price)
+        ci_width_pre = forecast.confidence_high - forecast.confidence_low
+        if self.adversarial_analyzer.should_run(preliminary_edge, ci_width_pre):
+            try:
+                adversarial = await self.adversarial_analyzer.run_premortem(market, forecast)
+                if adversarial.plausibility > 0.5:
+                    forecast = self.adversarial_analyzer.apply_adjustment(forecast, adversarial)
+            except Exception as e:
+                logger.debug(f"Adversarial analysis failed for {market.ticker}: {e}")
 
         # Divergence gate: reject extreme disagreement with the market.
         # When Claude diverges by >40% from the market price, it's far more
@@ -365,17 +437,36 @@ class AIProbabilityStrategy:
         # likely hallucinations. Uncertain categories (Culture, World) can
         # legitimately diverge more.
         base_max_div = self.settings.claude.max_divergence_from_market
-        category_div_overrides = {
-            "Politics": self.MAX_DIVERGENCE_DATA_RICH,
-            "Elections": self.MAX_DIVERGENCE_DATA_RICH,
-            "Fed": self.MAX_DIVERGENCE_DATA_RICH,
-            "Economics": self.MAX_DIVERGENCE_DATA_RICH,
-            "Financials": self.MAX_DIVERGENCE_DATA_RICH,
-            "World": self.MAX_DIVERGENCE_UNCERTAIN,
-            "Geopolitics": self.MAX_DIVERGENCE_UNCERTAIN,
-            "Entertainment": self.MAX_DIVERGENCE_SPECULATIVE,
-            "Culture": self.MAX_DIVERGENCE_SPECULATIVE,
-        }
+        # Use data-driven thresholds from contrarian tracker when available,
+        # otherwise fall back to hardcoded defaults.
+        if self.contrarian_tracker:
+            try:
+                dynamic_thresholds = self.contrarian_tracker.get_dynamic_thresholds()
+                category_div_overrides = dynamic_thresholds
+            except Exception:
+                category_div_overrides = {
+                    "Politics": self.MAX_DIVERGENCE_DATA_RICH,
+                    "Elections": self.MAX_DIVERGENCE_DATA_RICH,
+                    "Fed": self.MAX_DIVERGENCE_DATA_RICH,
+                    "Economics": self.MAX_DIVERGENCE_DATA_RICH,
+                    "Financials": self.MAX_DIVERGENCE_DATA_RICH,
+                    "World": self.MAX_DIVERGENCE_UNCERTAIN,
+                    "Geopolitics": self.MAX_DIVERGENCE_UNCERTAIN,
+                    "Entertainment": self.MAX_DIVERGENCE_SPECULATIVE,
+                    "Culture": self.MAX_DIVERGENCE_SPECULATIVE,
+                }
+        else:
+            category_div_overrides = {
+                "Politics": self.MAX_DIVERGENCE_DATA_RICH,
+                "Elections": self.MAX_DIVERGENCE_DATA_RICH,
+                "Fed": self.MAX_DIVERGENCE_DATA_RICH,
+                "Economics": self.MAX_DIVERGENCE_DATA_RICH,
+                "Financials": self.MAX_DIVERGENCE_DATA_RICH,
+                "World": self.MAX_DIVERGENCE_UNCERTAIN,
+                "Geopolitics": self.MAX_DIVERGENCE_UNCERTAIN,
+                "Entertainment": self.MAX_DIVERGENCE_SPECULATIVE,
+                "Culture": self.MAX_DIVERGENCE_SPECULATIVE,
+            }
         max_div = category_div_overrides.get(category.value, base_max_div)
         divergence = abs(forecast.probability - market.yes_price)
         if market.yes_price < 0.15 or market.yes_price > 0.85:
@@ -557,6 +648,7 @@ class AIProbabilityStrategy:
                     news_context=news_context,
                     base_rate_context=base_rate_context,
                     force_model=opus_model,
+                    accuracy_context=accuracy_context,
                 )
                 if not getattr(opus_forecast, "parse_failed", False):
                     opus_prob = opus_forecast.probability

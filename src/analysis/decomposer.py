@@ -110,9 +110,10 @@ class QuestionDecomposer:
             )
             return None
 
-        # Step 2: Assess each sub-question in parallel
+        # Step 2: Assess sub-questions (sequential+conditional for AND/CONDITIONAL, parallel for OR)
         sub_results = await self._assess_sub_questions(
             sub_questions, market, news_context, base_rate_context,
+            decomp_type=decomp_type,
         )
 
         if not sub_results:
@@ -148,7 +149,11 @@ class QuestionDecomposer:
             confidence_high=min(0.99, combined_prob + ci_half),
             key_factors_for=[r.get("key_factor", "") for r in sub_results if r.get("key_factor")],
             key_factors_against=[],
-            uncertainties=[f"Decomposition assumes {decomp_type} independence"],
+            uncertainties=[
+                f"Decomposition uses conditional chaining for {decomp_type}"
+                if decomp_type in ("AND", "CONDITIONAL")
+                else f"Decomposition assumes {decomp_type} independence"
+            ],
             reasoning=reasoning,
             model_used=self.forecaster._select_model(),
             tokens_used=total_tokens,
@@ -247,29 +252,60 @@ class QuestionDecomposer:
         market: Market,
         news_context: str,
         base_rate_context: str,
+        decomp_type: str = "OR",
     ) -> list[dict]:
-        """Assess each sub-question's probability in parallel.
+        """Assess each sub-question's probability.
+
+        For OR types: assesses in parallel (independence is reasonable).
+        For AND/CONDITIONAL types: assesses sequentially, conditioning each
+        sub-question on prior sub-questions being TRUE. This fixes the
+        independence assumption bug where P(A)*P(B) underestimates when
+        A and B are positively correlated (e.g., "Will X run AND win?").
 
         Returns list of dicts with 'question', 'probability', 'key_factor', 'tokens_used'.
         """
-        from src.analysis.prompt_templates import SUB_QUESTION_TEMPLATE, SYSTEM_PROMPT, _sanitize_external_text
+        from src.analysis.prompt_templates import (
+            SUB_QUESTION_TEMPLATE,
+            CONDITIONAL_SUB_QUESTION_TEMPLATE,
+            _sanitize_external_text,
+        )
 
-        async def _assess_one(sq: dict) -> Optional[dict]:
+        async def _assess_one(sq: dict, assumed_true_questions: list[str] | None = None) -> Optional[dict]:
             question = sq.get("question", "")
             base_rate_hint = sq.get("base_rate_hint", "")
 
-            prompt = SUB_QUESTION_TEMPLATE.format(
-                sub_question=_sanitize_external_text(question, 500),
-                parent_question=_sanitize_external_text(market.question, 300),
-                resolution_criteria=_sanitize_external_text(
-                    market.description or "Standard resolution rules apply.", 1000
-                ),
-                base_rate_hint=_sanitize_external_text(base_rate_hint, 500),
-                news_context=_sanitize_external_text(
-                    news_context or "No additional context.", 2000
-                ),
-                base_rate_context=_sanitize_external_text(base_rate_context, 500),
-            )
+            if assumed_true_questions:
+                # Conditional assessment: tell Claude to assume prior sub-questions are TRUE
+                assumed_text = "\n".join(
+                    f"  {i+1}. {q}" for i, q in enumerate(assumed_true_questions)
+                )
+                prompt = CONDITIONAL_SUB_QUESTION_TEMPLATE.format(
+                    sub_question=_sanitize_external_text(question, 500),
+                    parent_question=_sanitize_external_text(market.question, 300),
+                    resolution_criteria=_sanitize_external_text(
+                        market.description or "Standard resolution rules apply.", 1000
+                    ),
+                    assumed_true=assumed_text,
+                    base_rate_hint=_sanitize_external_text(base_rate_hint, 500),
+                    news_context=_sanitize_external_text(
+                        news_context or "No additional context.", 2000
+                    ),
+                    base_rate_context=_sanitize_external_text(base_rate_context, 500),
+                )
+            else:
+                # Unconditional assessment (first sub-question, or OR type)
+                prompt = SUB_QUESTION_TEMPLATE.format(
+                    sub_question=_sanitize_external_text(question, 500),
+                    parent_question=_sanitize_external_text(market.question, 300),
+                    resolution_criteria=_sanitize_external_text(
+                        market.description or "Standard resolution rules apply.", 1000
+                    ),
+                    base_rate_hint=_sanitize_external_text(base_rate_hint, 500),
+                    news_context=_sanitize_external_text(
+                        news_context or "No additional context.", 2000
+                    ),
+                    base_rate_context=_sanitize_external_text(base_rate_context, 500),
+                )
 
             try:
                 model = self.forecaster._select_model()
@@ -300,18 +336,40 @@ class QuestionDecomposer:
                 logger.warning(f"Sub-question assessment failed: {question[:50]}... — {e}")
                 return None
 
-        # Run sub-question assessments in parallel (cap at 5 to avoid rate limits)
-        tasks = [_assess_one(sq) for sq in sub_questions[:5]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        capped = sub_questions[:5]
 
-        valid_results = []
-        for r in results:
-            if isinstance(r, dict) and r is not None:
-                valid_results.append(r)
-            elif isinstance(r, Exception):
-                logger.warning(f"Sub-question assessment error: {r}")
+        if decomp_type in ("AND", "CONDITIONAL"):
+            # Sequential assessment with conditioning context
+            # First sub-question is unconditional, subsequent ones condition on prior = TRUE
+            valid_results = []
+            assumed_true: list[str] = []
 
-        return valid_results
+            for sq in capped:
+                result = await _assess_one(sq, assumed_true if assumed_true else None)
+                if result is not None:
+                    valid_results.append(result)
+                    assumed_true.append(sq.get("question", ""))
+                else:
+                    # If any sub-question fails, we can't chain conditionals reliably
+                    logger.warning(
+                        f"Conditional chain broken at: {sq.get('question', '')[:50]}..."
+                    )
+                    break
+
+            return valid_results
+        else:
+            # OR type: parallel assessment (independence is reasonable)
+            tasks = [_assess_one(sq) for sq in capped]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            valid_results = []
+            for r in results:
+                if isinstance(r, dict) and r is not None:
+                    valid_results.append(r)
+                elif isinstance(r, Exception):
+                    logger.warning(f"Sub-question assessment error: {r}")
+
+            return valid_results
 
     @staticmethod
     def _recombine(
@@ -340,7 +398,8 @@ class QuestionDecomposer:
             return probs[0]
 
         if decomp_type == "AND":
-            # P(A and B and C) = P(A) * P(B) * P(C) — assumes independence
+            # P(A ∧ B ∧ C) = P(A) × P(B|A) × P(C|A∧B)
+            # Sub-questions are assessed conditionally, so multiplication is correct
             combined = 1.0
             for p in probs:
                 combined *= p

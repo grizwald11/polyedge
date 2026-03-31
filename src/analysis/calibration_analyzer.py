@@ -196,6 +196,74 @@ class CalibrationAnalyzer:
 
         return base_rates
 
+    def get_accuracy_context(self, category: str) -> str:
+        """Build a prompt-injectable accuracy context string for Claude.
+
+        Shows Claude its own historical accuracy for this category so it
+        can self-correct systematic biases. Includes per-probability-bin
+        actual rates, systematic bias, and recent wrong predictions.
+
+        Returns empty string if insufficient data (<10 resolved markets).
+        """
+        resolved = self._get_resolved_with_category()
+        cat_records = [r for r in resolved if r.get("category", "Other") == category]
+
+        if len(cat_records) < 10:
+            return ""
+
+        # Overall Brier for this category
+        cat_brier = self._compute_brier(cat_records)
+        avg_predicted = sum(r["predicted_probability"] for r in cat_records) / len(cat_records)
+        avg_actual = sum(float(r["actual_outcome"]) for r in cat_records) / len(cat_records)
+        bias = avg_actual - avg_predicted  # positive = underestimates
+
+        # Per-probability-bin actual rates (5 bins)
+        bin_lines = []
+        bin_edges = [(0.0, 0.20), (0.20, 0.40), (0.40, 0.60), (0.60, 0.80), (0.80, 1.01)]
+        for lo, hi in bin_edges:
+            in_bin = [
+                r for r in cat_records
+                if lo <= r["predicted_probability"] < hi
+            ]
+            if len(in_bin) >= 3:
+                bin_actual = sum(float(r["actual_outcome"]) for r in in_bin) / len(in_bin)
+                bin_pred = sum(r["predicted_probability"] for r in in_bin) / len(in_bin)
+                bin_lines.append(
+                    f"  - When you estimated {lo:.0%}-{hi:.0%}: actual YES rate was {bin_actual:.0%} (N={len(in_bin)}, avg estimate {bin_pred:.0%})"
+                )
+
+        # Recent wrong predictions (predicted >60% and NO, or <40% and YES)
+        wrong = []
+        for r in cat_records[:50]:  # Already sorted by resolved_at DESC
+            pred = r["predicted_probability"]
+            actual = bool(r["actual_outcome"])
+            if (pred > 0.60 and not actual) or (pred < 0.40 and actual):
+                q = r.get("market_question", r.get("market_id", "unknown"))
+                outcome_str = "YES" if actual else "NO"
+                wrong.append(f"  - \"{q[:80]}\" (predicted {pred:.0%}, resolved {outcome_str})")
+                if len(wrong) >= 3:
+                    break
+
+        # Build the context string
+        lines = [f"YOUR HISTORICAL ACCURACY ({category}, N={len(cat_records)} resolved):"]
+        lines.append(f"- Brier score: {cat_brier:.3f} (0=perfect, 0.25=random)")
+        if bias > 0.02:
+            lines.append(f"- Systematic bias: you UNDERESTIMATE by ~{abs(bias):.0%} in this category (actual outcomes are higher than your estimates)")
+        elif bias < -0.02:
+            lines.append(f"- Systematic bias: you OVERESTIMATE by ~{abs(bias):.0%} in this category (actual outcomes are lower than your estimates)")
+        else:
+            lines.append(f"- No significant systematic bias detected")
+
+        if bin_lines:
+            lines.append("- Calibration by probability range:")
+            lines.extend(bin_lines)
+
+        if wrong:
+            lines.append("- Recent incorrect predictions in this category:")
+            lines.extend(wrong)
+
+        return "\n".join(lines)
+
     def _get_resolved_with_category(self) -> list[dict]:
         """Get all resolved predictions joined with market category."""
         conn = self.db._get_conn()

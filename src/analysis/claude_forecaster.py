@@ -288,6 +288,7 @@ class ClaudeForecaster:
         news_context: str,
         base_rate_context: str,
         position_value: float,
+        accuracy_context: str = "",
     ) -> tuple[str, str, MarketCategory, float]:
         """Build the Claude prompt with news enrichment and context.
 
@@ -323,6 +324,7 @@ class ClaudeForecaster:
             category=category,
             news_context=news_context or "No additional context available.",
             base_rate_context=base_rate_context,
+            accuracy_context=accuracy_context,
         )
 
         # Apply A/B testing variant modifier to the prompt
@@ -519,6 +521,7 @@ class ClaudeForecaster:
         position_value: float = 0.0,
         base_rate_context: str = "",
         force_model: Optional[str] = None,
+        accuracy_context: str = "",
     ) -> ForecastResult:
         """Assess a market's true probability using Claude.
 
@@ -546,6 +549,7 @@ class ClaudeForecaster:
         # Stage 2: Build prompt with news enrichment
         prompt, model, category, temperature = await self._build_prompt(
             market, news_context, base_rate_context, position_value,
+            accuracy_context=accuracy_context,
         )
         if force_model:
             model = force_model
@@ -697,6 +701,7 @@ class ClaudeForecaster:
         news_context: str = "",
         position_value: float = 0.0,
         base_rate_context: str = "",
+        accuracy_context: str = "",
     ) -> Optional[ForecastResult]:
         """Run dual-temperature cross-check on a market.
 
@@ -723,6 +728,7 @@ class ClaudeForecaster:
         # Build prompt (also handles news enrichment and model selection)
         prompt, model, category, _temperature = await self._build_prompt(
             market, news_context, base_rate_context, position_value,
+            accuracy_context=accuracy_context,
         )
 
         temp_low = self.settings.claude.cross_check_temp_low

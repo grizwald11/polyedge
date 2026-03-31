@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS calibration_records (
     resolved_at TEXT,
     brier_score REAL,        -- (predicted - actual)^2
     profit_loss REAL,        -- realized P&L for this prediction
+    prompt_variant TEXT DEFAULT '',  -- A/B test variant used for this prediction
     FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_market ON calibration_records(market_id);
@@ -253,6 +254,36 @@ CREATE TABLE IF NOT EXISTS cross_platform_pairs (
 CREATE TABLE IF NOT EXISTS pending_orders (
     order_id TEXT PRIMARY KEY,
     cost REAL NOT NULL
+);
+
+-- Divergence records — tracks Claude-vs-market disagreements and who was right
+CREATE TABLE IF NOT EXISTS divergence_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    category TEXT DEFAULT '',
+    claude_estimate REAL NOT NULL,
+    market_price REAL NOT NULL,
+    divergence REAL NOT NULL,
+    abs_divergence REAL NOT NULL,
+    predicted_at TEXT NOT NULL,
+    actual_outcome INTEGER,
+    claude_was_right INTEGER,
+    resolved_at TEXT,
+    FOREIGN KEY (market_id) REFERENCES markets(ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_divergence_market ON divergence_records(market_id);
+CREATE INDEX IF NOT EXISTS idx_divergence_category ON divergence_records(category);
+
+-- Prompt variant Thompson sampling state (Feature 7)
+CREATE TABLE IF NOT EXISTS prompt_variant_stats (
+    category TEXT NOT NULL,
+    variant_name TEXT NOT NULL,
+    alpha REAL DEFAULT 1.0,
+    beta REAL DEFAULT 1.0,
+    total_predictions INTEGER DEFAULT 0,
+    sum_brier REAL DEFAULT 0.0,
+    updated_at TEXT,
+    PRIMARY KEY (category, variant_name)
 );
 
 -- Schema version tracking
@@ -600,6 +631,28 @@ class Database:
         if "last_recorded_day" not in cb_cols:
             conn.execute("ALTER TABLE circuit_breaker_state ADD COLUMN last_recorded_day TEXT")
             logger.info("Migration v13: added last_recorded_day to circuit_breaker_state")
+
+        # Migration v14: prompt_variant column on calibration_records + prompt_variant_stats table
+        cal_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(calibration_records)").fetchall()
+        }
+        if "prompt_variant" not in cal_cols:
+            conn.execute("ALTER TABLE calibration_records ADD COLUMN prompt_variant TEXT DEFAULT ''")
+            logger.info("Migration v14: added prompt_variant column to calibration_records")
+        if "prompt_variant_stats" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS prompt_variant_stats (
+                    category TEXT NOT NULL,
+                    variant_name TEXT NOT NULL,
+                    alpha REAL DEFAULT 1.0,
+                    beta REAL DEFAULT 1.0,
+                    total_predictions INTEGER DEFAULT 0,
+                    sum_brier REAL DEFAULT 0.0,
+                    updated_at TEXT,
+                    PRIMARY KEY (category, variant_name)
+                )
+            """)
+            logger.info("Migration v14: created prompt_variant_stats table")
 
         conn.commit()
 
@@ -1218,6 +1271,7 @@ class Database:
         confidence_low: float = 0.0,
         confidence_high: float = 1.0,
         market_question: str = "",
+        prompt_variant: str = "",
     ) -> int:
         """Store a prediction when Claude makes an assessment.
 
@@ -1230,6 +1284,7 @@ class Database:
             confidence_low: Lower bound of confidence interval.
             confidence_high: Upper bound of confidence interval.
             market_question: Human-readable question.
+            prompt_variant: A/B test variant name used for this prediction.
 
         Returns:
             Database row ID.
@@ -1240,8 +1295,8 @@ class Database:
             INSERT INTO calibration_records (
                 market_id, market_question, strategy,
                 predicted_probability, market_price_at_prediction,
-                predicted_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                predicted_at, prompt_variant
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             market_ticker,
             market_question,
@@ -1249,6 +1304,7 @@ class Database:
             predicted_probability,
             market_price,
             now,
+            prompt_variant,
         ))
         conn.commit()
         return cursor.lastrowid

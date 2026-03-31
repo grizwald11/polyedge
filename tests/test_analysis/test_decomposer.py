@@ -326,3 +326,228 @@ async def test_decomposition_failure_returns_none():
 
     result = await decomposer.decompose_and_assess(market)
     assert result is None
+
+
+# ─── Correlation-aware decomposition tests ───
+
+
+class TestConditionalAssessment:
+    """Tests for correlation-aware (conditional) sub-question assessment."""
+
+    @pytest.mark.asyncio
+    async def test_and_type_uses_sequential_conditional(self):
+        """AND type should assess sub-questions sequentially with conditioning."""
+        decomp_json = json.dumps({
+            "decomposition_type": "AND",
+            "sub_questions": [
+                {"question": "Will X run for office?", "base_rate_hint": ""},
+                {"question": "Will X win the election?", "base_rate_hint": ""},
+            ],
+        })
+        sub1_json = json.dumps({
+            "probability": 0.60,
+            "confidence_low": 0.50, "confidence_high": 0.70,
+            "key_factors_for": ["Announced interest"],
+            "key_factors_against": [], "uncertainties": [],
+            "reasoning": "Likely to run",
+        })
+        # P(win | running) should be higher than P(win) unconditionally
+        sub2_json = json.dumps({
+            "probability": 0.70,
+            "confidence_low": 0.60, "confidence_high": 0.80,
+            "key_factors_for": ["Strong polls"],
+            "key_factors_against": [], "uncertainties": [],
+            "reasoning": "Conditional on running, strong chance of winning",
+        })
+
+        call_prompts = []
+        forecaster = _mock_forecaster(decomp_json, [sub1_json, sub2_json])
+        original_call = forecaster._call_claude
+
+        async def tracking_call(prompt, model, temperature, timeout):
+            call_prompts.append(prompt)
+            return await original_call(prompt, model, temperature, timeout)
+
+        forecaster._call_claude = tracking_call
+
+        decomposer = QuestionDecomposer(forecaster)
+        market = _make_market("Will X run for office and win the election?")
+
+        result = await decomposer.decompose_and_assess(market)
+        assert result is not None
+        # P(run) * P(win|run) = 0.60 * 0.70 = 0.42
+        assert result.probability == pytest.approx(0.42, abs=0.01)
+
+        # The second sub-question prompt should contain conditioning language
+        # Prompt 0 = decomposition, prompt 1 = first sub-q (unconditional), prompt 2 = second sub-q (conditional)
+        assert len(call_prompts) == 3
+        assert "ASSUME THE FOLLOWING ARE TRUE" in call_prompts[2]
+        assert "Will X run for office?" in call_prompts[2]
+
+    @pytest.mark.asyncio
+    async def test_or_type_uses_parallel(self):
+        """OR type should assess sub-questions in parallel (no conditioning)."""
+        decomp_json = json.dumps({
+            "decomposition_type": "OR",
+            "sub_questions": [
+                {"question": "Path A?", "base_rate_hint": ""},
+                {"question": "Path B?", "base_rate_hint": ""},
+            ],
+        })
+        sub1_json = json.dumps({
+            "probability": 0.40,
+            "confidence_low": 0.30, "confidence_high": 0.50,
+            "key_factors_for": [], "key_factors_against": [],
+            "uncertainties": [], "reasoning": "40%",
+        })
+        sub2_json = json.dumps({
+            "probability": 0.50,
+            "confidence_low": 0.40, "confidence_high": 0.60,
+            "key_factors_for": [], "key_factors_against": [],
+            "uncertainties": [], "reasoning": "50%",
+        })
+
+        call_prompts = []
+        forecaster = _mock_forecaster(decomp_json, [sub1_json, sub2_json])
+        original_call = forecaster._call_claude
+
+        async def tracking_call(prompt, model, temperature, timeout):
+            call_prompts.append(prompt)
+            return await original_call(prompt, model, temperature, timeout)
+
+        forecaster._call_claude = tracking_call
+
+        decomposer = QuestionDecomposer(forecaster)
+        market = _make_market("Will either path A or path B work?")
+
+        result = await decomposer.decompose_and_assess(market)
+        assert result is not None
+
+        # Neither sub-question prompt should have conditional language
+        sub_prompts = call_prompts[1:]  # Skip decomposition prompt
+        for p in sub_prompts:
+            assert "ASSUME THE FOLLOWING ARE TRUE" not in p
+
+    @pytest.mark.asyncio
+    async def test_conditional_three_step_chain(self):
+        """Three-step AND chain: each step conditions on all prior steps."""
+        decomp_json = json.dumps({
+            "decomposition_type": "AND",
+            "sub_questions": [
+                {"question": "Will bill pass committee?"},
+                {"question": "Will bill pass full chamber?"},
+                {"question": "Will president sign?"},
+            ],
+        })
+        sub_jsons = [
+            json.dumps({
+                "probability": 0.80,
+                "confidence_low": 0.70, "confidence_high": 0.90,
+                "key_factors_for": ["Support"], "key_factors_against": [],
+                "uncertainties": [], "reasoning": "Likely",
+            }),
+            json.dumps({
+                "probability": 0.60,
+                "confidence_low": 0.50, "confidence_high": 0.70,
+                "key_factors_for": ["Momentum"], "key_factors_against": [],
+                "uncertainties": [], "reasoning": "Conditional on committee passage",
+            }),
+            json.dumps({
+                "probability": 0.90,
+                "confidence_low": 0.80, "confidence_high": 0.95,
+                "key_factors_for": ["Party alignment"], "key_factors_against": [],
+                "uncertainties": [], "reasoning": "Conditional on both chambers",
+            }),
+        ]
+
+        call_prompts = []
+        forecaster = _mock_forecaster(decomp_json, sub_jsons)
+        original_call = forecaster._call_claude
+
+        async def tracking_call(prompt, model, temperature, timeout):
+            call_prompts.append(prompt)
+            return await original_call(prompt, model, temperature, timeout)
+
+        forecaster._call_claude = tracking_call
+
+        decomposer = QuestionDecomposer(forecaster)
+        market = _make_market("Will Congress pass the bill and the president sign it into law?")
+
+        result = await decomposer.decompose_and_assess(market)
+        assert result is not None
+        # 0.80 * 0.60 * 0.90 = 0.432
+        assert result.probability == pytest.approx(0.432, abs=0.01)
+
+        # Third sub-question should condition on BOTH prior questions
+        assert "Will bill pass committee?" in call_prompts[3]
+        assert "Will bill pass full chamber?" in call_prompts[3]
+
+    @pytest.mark.asyncio
+    async def test_conditional_chain_broken_on_failure(self):
+        """If a sub-question in an AND chain fails, the chain stops."""
+        decomp_json = json.dumps({
+            "decomposition_type": "AND",
+            "sub_questions": [
+                {"question": "Step A?"},
+                {"question": "Step B?"},
+                {"question": "Step C?"},
+            ],
+        })
+        sub1_json = json.dumps({
+            "probability": 0.70,
+            "confidence_low": 0.60, "confidence_high": 0.80,
+            "key_factors_for": [], "key_factors_against": [],
+            "uncertainties": [], "reasoning": "70%",
+        })
+
+        forecaster = _mock_forecaster(decomp_json, [sub1_json])
+
+        # Make the second call fail by returning None from _extract_text
+        call_count = {"n": 0}
+        original_call = forecaster._call_claude
+
+        async def failing_second_call(prompt, model, temperature, timeout):
+            call_count["n"] += 1
+            if call_count["n"] == 3:  # Third call = second sub-question
+                resp = MagicMock()
+                resp.content = []
+                resp.usage = MagicMock(input_tokens=0, output_tokens=0)
+                return resp
+            return await original_call(prompt, model, temperature, timeout)
+
+        forecaster._call_claude = failing_second_call
+        forecaster._extract_text = lambda r: r.content[0].text if r.content else None
+
+        decomposer = QuestionDecomposer(forecaster)
+        market = _make_market("Will A and B and C happen?")
+
+        result = await decomposer.decompose_and_assess(market)
+        # Chain breaks at step B, only step A succeeds (1 result)
+        # With only 1 result, recombine returns just that probability
+        if result is not None:
+            assert result.probability == pytest.approx(0.70, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_uncertainty_message_reflects_conditioning(self):
+        """AND/CONDITIONAL types should note conditional chaining, not independence."""
+        decomp_json = json.dumps({
+            "decomposition_type": "AND",
+            "sub_questions": [
+                {"question": "Step A?"},
+                {"question": "Step B?"},
+            ],
+        })
+        sub_json = json.dumps({
+            "probability": 0.50,
+            "confidence_low": 0.40, "confidence_high": 0.60,
+            "key_factors_for": [], "key_factors_against": [],
+            "uncertainties": [], "reasoning": "50-50",
+        })
+
+        forecaster = _mock_forecaster(decomp_json, [sub_json, sub_json])
+        decomposer = QuestionDecomposer(forecaster)
+        market = _make_market("Will A and B happen together in 2026?")
+
+        result = await decomposer.decompose_and_assess(market)
+        assert result is not None
+        assert any("conditional chaining" in u for u in result.uncertainties)

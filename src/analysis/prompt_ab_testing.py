@@ -7,6 +7,11 @@ category based on Brier score performance.
 
 This creates a compounding improvement loop: better prompts → better predictions
 → better Brier scores → more traffic to better prompts.
+
+Feature 7 enhancement: outcomes are validated against actual market resolutions
+(not just approximated from market price). Pending predictions are tracked per
+variant and resolved when the market settles, feeding real Brier scores back
+into Thompson sampling. State is persisted to the database across restarts.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from src.core.models import MarketCategory
@@ -143,6 +149,8 @@ class PromptVariantManager:
         self.enabled = enabled
         # Per-category variant performance: {category: {variant_name: VariantRecord}}
         self._records: dict[str, dict[str, VariantRecord]] = {}
+        # Pending predictions awaiting resolution: {category: {market_id: {variant_name, predicted_prob}}}
+        self._pending_predictions: dict[str, dict[str, dict]] = {}
 
     def _ensure_category(self, category: str) -> dict[str, VariantRecord]:
         """Ensure all variants are registered for a category."""
@@ -239,6 +247,130 @@ class PromptVariantManager:
                     "beta": record.beta,
                 }
         return stats
+
+    def record_prediction(
+        self,
+        category: MarketCategory,
+        variant_name: str,
+        market_id: str,
+        predicted_prob: float,
+    ) -> None:
+        """Record a pending prediction for outcome-validated scoring.
+
+        Called when a forecast is made. The prediction is stored until the
+        market resolves, at which point record_actual_outcome() computes
+        the real Brier score and updates Thompson sampling params.
+        """
+        cat_key = category.value
+        if cat_key not in self._pending_predictions:
+            self._pending_predictions[cat_key] = {}
+        # Store by market_id; if multiple predictions per market, keep latest
+        self._pending_predictions[cat_key][market_id] = {
+            "variant_name": variant_name,
+            "predicted_prob": predicted_prob,
+        }
+
+    def record_actual_outcome(
+        self,
+        market_id: str,
+        actual_outcome: bool,
+    ) -> int:
+        """Record the actual market resolution and update Thompson params.
+
+        Searches all categories for pending predictions on this market_id,
+        computes the real Brier score, and updates the variant's Thompson
+        sampling parameters.
+
+        Returns:
+            Number of variant records updated.
+        """
+        outcome_val = 1.0 if actual_outcome else 0.0
+        updated = 0
+
+        for cat_key, pending in self._pending_predictions.items():
+            if market_id not in pending:
+                continue
+
+            entry = pending.pop(market_id)
+            variant_name = entry["variant_name"]
+            predicted_prob = entry["predicted_prob"]
+
+            # Real Brier score: (predicted - actual)^2
+            brier = (predicted_prob - outcome_val) ** 2
+
+            variants = self._ensure_category(cat_key)
+            record = variants.get(variant_name)
+            if record is not None:
+                record.update(brier)
+                updated += 1
+                logger.info(
+                    f"A/B outcome: variant '{variant_name}' in {cat_key} — "
+                    f"pred={predicted_prob:.2f}, actual={'YES' if actual_outcome else 'NO'}, "
+                    f"brier={brier:.3f} (n={record.total_predictions})"
+                )
+
+        return updated
+
+    def save_state(self, db) -> None:
+        """Persist Thompson sampling state to the database.
+
+        Args:
+            db: Database instance with _get_conn() method.
+        """
+        conn = db._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+
+        for cat_key, variants in self._records.items():
+            for name, record in variants.items():
+                conn.execute("""
+                    INSERT INTO prompt_variant_stats
+                        (category, variant_name, alpha, beta, total_predictions, sum_brier, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(category, variant_name) DO UPDATE SET
+                        alpha=excluded.alpha,
+                        beta=excluded.beta,
+                        total_predictions=excluded.total_predictions,
+                        sum_brier=excluded.sum_brier,
+                        updated_at=excluded.updated_at
+                """, (cat_key, name, record.alpha, record.beta,
+                      record.total_predictions, record.sum_brier, now))
+
+        conn.commit()
+        logger.debug(f"Saved A/B testing state ({sum(len(v) for v in self._records.values())} records)")
+
+    def load_state(self, db) -> None:
+        """Load Thompson sampling state from the database.
+
+        Args:
+            db: Database instance with _get_conn() method.
+        """
+        try:
+            conn = db._get_conn()
+            rows = conn.execute("SELECT * FROM prompt_variant_stats").fetchall()
+        except Exception as e:
+            logger.debug(f"Could not load A/B testing state: {e}")
+            return
+
+        loaded = 0
+        for row in rows:
+            cat_key = row["category"]
+            name = row["variant_name"]
+
+            # Only load known variants
+            if name not in VARIANT_MODIFIERS:
+                continue
+
+            variants = self._ensure_category(cat_key)
+            if name in variants:
+                record = variants[name]
+                record.alpha = row["alpha"]
+                record.beta = row["beta"]
+                record.total_predictions = row["total_predictions"]
+                record.sum_brier = row["sum_brier"]
+                loaded += 1
+
+        if loaded:
+            logger.info(f"Loaded A/B testing state: {loaded} variant records")
 
     def check_significance(self, min_samples: int = 30) -> dict[str, Optional[str]]:
         """Check if any variant is significantly better per category.

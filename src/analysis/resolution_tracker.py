@@ -20,10 +20,11 @@ logger = logging.getLogger(__name__)
 class ResolutionTracker:
     """Checks Kalshi and Polymarket APIs for settled markets and resolves calibration predictions."""
 
-    def __init__(self, kalshi: KalshiClient, db: Database, polymarket_discovery=None):
+    def __init__(self, kalshi: KalshiClient, db: Database, polymarket_discovery=None, variant_manager=None):
         self.kalshi = kalshi
         self.db = db
         self.polymarket_discovery = polymarket_discovery  # Optional PolymarketDiscovery
+        self.variant_manager = variant_manager  # Optional PromptVariantManager for A/B outcome tracking
 
     async def check_resolutions(self) -> int:
         """Check all unresolved predictions against the Kalshi API.
@@ -200,4 +201,22 @@ class ResolutionTracker:
             )
 
         conn.commit()
+
+        # Resolve contrarian divergence records for this market
+        try:
+            from src.analysis.contrarian_tracker import ContrarianTracker
+            tracker = ContrarianTracker(self.db)
+            tracker.resolve_divergence(market_id, actual_outcome)
+        except Exception as e:
+            logger.debug(f"Contrarian resolution failed for {market_id}: {e}")
+
+        # Resolve prompt variant A/B test outcomes for this market
+        try:
+            if self.variant_manager is not None:
+                updated = self.variant_manager.record_actual_outcome(market_id, actual_outcome)
+                if updated > 0:
+                    self.variant_manager.save_state(self.db)
+        except Exception as e:
+            logger.debug(f"Variant outcome resolution failed for {market_id}: {e}")
+
         return len(rows)

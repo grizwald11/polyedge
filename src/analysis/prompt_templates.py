@@ -55,6 +55,7 @@ MARKET CLOSES: {close_date}
 CONTEXT:
 {news_context}
 {base_rate_context}
+{accuracy_context}
 
 Consider:
 1. Historical base rates for similar political events
@@ -76,6 +77,7 @@ MARKET CLOSES: {close_date}
 CONTEXT:
 {news_context}
 {base_rate_context}
+{accuracy_context}
 
 Consider:
 1. Historical base rates for similar Fed actions / economic indicators
@@ -97,6 +99,7 @@ MARKET CLOSES: {close_date}
 CONTEXT:
 {news_context}
 {base_rate_context}
+{accuracy_context}
 
 Consider:
 1. Historical base rates for similar geopolitical events
@@ -118,6 +121,7 @@ MARKET CLOSES: {close_date}
 CONTEXT:
 {news_context}
 {base_rate_context}
+{accuracy_context}
 
 Consider:
 1. Historical base rates for similar tech events (product launches, benchmarks, etc.)
@@ -139,6 +143,7 @@ MARKET CLOSES: {close_date}
 CONTEXT:
 {news_context}
 {base_rate_context}
+{accuracy_context}
 
 Consider:
 1. Historical base rates and precedents
@@ -159,6 +164,7 @@ MARKET CLOSES: {close_date}
 CONTEXT:
 {news_context}
 {base_rate_context}
+{accuracy_context}
 
 Consider:
 1. Historical base rates for similar events
@@ -238,6 +244,36 @@ CRITICAL: Respond ONLY with valid JSON. No explanation, no markdown.
 
 Required JSON schema:
 {{"probability": <float 0.01-0.99>, "confidence_low": <float>, "confidence_high": <float>, "key_factors_for": ["<string>"], "key_factors_against": ["<string>"], "uncertainties": ["<string>"], "reasoning": "<base rate anchor + evidence adjustment>"}}"""
+
+
+CONDITIONAL_SUB_QUESTION_TEMPLATE = """CONDITIONAL PROBABILITY ESTIMATION
+
+You are estimating the probability of one component of a larger prediction market question,
+ASSUMING that prior components have already occurred.
+
+PARENT QUESTION: {parent_question}
+RESOLUTION CRITERIA: {resolution_criteria}
+
+ASSUME THE FOLLOWING ARE TRUE (already happened):
+{assumed_true}
+
+GIVEN THE ABOVE, ESTIMATE: {sub_question}
+BASE RATE HINT: {base_rate_hint}
+
+CONTEXT:
+{news_context}
+{base_rate_context}
+
+Instructions:
+1. IMPORTANT: You MUST assume the events listed above have occurred. Do NOT re-estimate their probability.
+2. Given those assumptions, estimate the CONDITIONAL probability of the sub-question.
+3. Consider how the assumed events change the likelihood — they may make it more or less likely.
+4. State your reasoning about how the conditioning changes the estimate vs an unconditional estimate.
+
+CRITICAL: Respond ONLY with valid JSON. No explanation, no markdown.
+
+Required JSON schema:
+{{"probability": <float 0.01-0.99>, "confidence_low": <float>, "confidence_high": <float>, "key_factors_for": ["<string>"], "key_factors_against": ["<string>"], "uncertainties": ["<string>"], "reasoning": "<how conditioning on prior events affects this estimate>"}}"""
 
 
 ARB_VALIDATION_TEMPLATE = """ARBITRAGE RELATIONSHIP VALIDATION
@@ -340,6 +376,7 @@ def build_prompt(
     category: MarketCategory,
     news_context: str = "No additional context available.",
     base_rate_context: str = "",
+    accuracy_context: str = "",
 ) -> str:  # M-6: explicit return type
     """Build a complete prompt for Claude from market data and context.
 
@@ -358,4 +395,5 @@ def build_prompt(
             news_context or "No additional context available.", 5000
         ),
         base_rate_context=_sanitize_external_text(base_rate_context, 2000),
+        accuracy_context=_sanitize_external_text(accuracy_context, 2000),
     )
