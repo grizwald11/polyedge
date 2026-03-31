@@ -282,6 +282,15 @@ async def scan_and_trade(
     # 2. Check fills and cleanup stale orders
     await _check_fills_and_cleanup(fill_tracker, position_manager, order_router, settings, logger, kalshi=kalshi)
 
+    # 2b. Resolution tracking — runs even when circuit breaker is active,
+    # so calibration data keeps accumulating during trading halts.
+    try:
+        resolved = await resolution_tracker.check_resolutions()
+        if resolved > 0:
+            logger.info(f"Resolved {resolved} markets (pre-circuit-breaker check)")
+    except Exception as e:
+        logger.debug(f"Early resolution check failed: {e}")
+
     # 3. Circuit breaker check
     unrealized_pnl = position_manager.get_total_unrealized_pnl()
     if not circuit_breaker.check(bankroll, unrealized_pnl=unrealized_pnl):

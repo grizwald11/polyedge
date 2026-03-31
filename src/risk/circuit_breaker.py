@@ -188,6 +188,8 @@ class CircuitBreaker:
         else:
             self._consecutive_losing_days = 0
             self._reduced_sizing = False
+        # Track which day was last recorded to prevent double-counting on restart
+        self._last_recorded_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self._persist_state()
 
     def _halt(self, reason: str) -> None:

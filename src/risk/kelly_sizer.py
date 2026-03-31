@@ -117,7 +117,11 @@ class KellySizer:
         #   < $0.03: always reject (too volatile for reliable sizing)
         #   $0.03-$0.10: require 10% edge (higher bar to compensate for volatility)
         #   >= $0.10: normal min-edge checks apply downstream
-        cost_price_check = order_price if order_price and order_price > 0 else market_price
+        # IMPORTANT: Always use the Kelly-derived market_price for this check,
+        # NOT the stale order_price from signal generation. order_price may be
+        # outdated if the market moved between signal generation and execution,
+        # which can allow massive positions on penny contracts to slip through.
+        cost_price_check = market_price
         if cost_price_check < 0.03:
             logger.debug("Price below $0.03 — too volatile for reliable sizing")
             return 0
@@ -152,9 +156,13 @@ class KellySizer:
         # Dollar amount to risk
         kelly_dollars = half_kelly * bankroll
 
-        # Use the actual order price for contract conversion so that
-        # contracts * price never exceeds the dollar cap.
-        cost_price = order_price if order_price and order_price > 0 else market_price
+        # Use the higher of market_price and order_price for contract conversion.
+        # This ensures: (a) Kelly math is consistent with its own odds calculation,
+        # and (b) when order_price is higher (e.g., buying NO at $0.97 while
+        # market_price is $0.94), the cap accounts for the actual execution cost.
+        # Previously always used order_price, which could be stale and produce
+        # wildly inflated contract counts on cheap contracts.
+        cost_price = max(market_price, order_price) if order_price and order_price > 0 else market_price
 
         # Step 1: Apply LIQUIDITY adjustment BEFORE position/exposure caps.
         # This ensures the risk engine sees the true post-liquidity order size
