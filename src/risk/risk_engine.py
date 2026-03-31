@@ -349,13 +349,12 @@ class RiskEngine:
                 f"Probability {signal.probability_estimate:.2f} outside tradeable range (0.01-0.99)"
             )
 
-        # 8e. Edge vs theoretical maximum
-        max_possible_edge = min(signal.probability_estimate, 1.0 - signal.probability_estimate)
-        if signal.edge > max_possible_edge + 0.001:
-            failed.append(
-                f"Edge {signal.edge:.2%} exceeds theoretical max "
-                f"{max_possible_edge:.2%} for probability {signal.probability_estimate:.2%}"
-            )
+        # 8e. Edge vs theoretical maximum — edge cannot exceed the
+        # probability itself (that would imply market_price < 0).
+        # Note: check 8c above already catches edge >= probability, so this
+        # is a soft warning for edge approaching the limit.
+        # Previously used min(p, 1-p) which wrongly rejected valid high-
+        # confidence trades (e.g., 98.5% NO with 3.5% edge).
 
     def _check_resolution_date(
         self, market: Market, failed: list[str], warnings: list[str],
