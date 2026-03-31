@@ -400,13 +400,21 @@ class NewsResearcher:
                         self._serper_disabled = True
                         self._serper_disabled_at = float("inf")  # Never re-enable via cooldown
                         self._serper_key_at_disable = self.serper_api_key  # M-12
-                    else:
+                    elif self._serper_auth_failure_count >= 2:
+                        # M-10: Require 2+ consecutive auth failures before cooldown.
+                        # A single transient failure should not disable Serper for 1 hour.
                         logger.warning(
                             f"Serper API auth failure #{self._serper_auth_failure_count} "
                             f"(1h cooldown): {detail}"
                         )
                         self._serper_disabled = True
                         self._serper_disabled_at = _time.monotonic()
+                    else:
+                        # First auth failure — log but don't disable yet.
+                        logger.warning(
+                            f"Serper API auth failure #{self._serper_auth_failure_count} "
+                            f"(transient, not disabling yet): {detail}"
+                        )
                     return []
                 elif e.response.status_code >= 500 and attempt < max_retries:
                     wait = 2 ** attempt

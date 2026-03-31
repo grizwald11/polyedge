@@ -560,9 +560,12 @@ class AIProbabilityStrategy:
                 market_efficiency=market_eff,
             )
 
-        # Apply calibration adjustment to the ensemble final probability so that
-        # it corrects both Claude's forecast and any community forecasts uniformly.
-        adjustment = self._category_adjustments.get(category.value, 0.0)
+        # Apply calibration adjustment to the ensemble final probability.
+        # M-4: When consensus sources are present (multi-model ensemble), dampen
+        # the adjustment to avoid double-counting bias that consensus already corrects.
+        raw_adjustment = self._category_adjustments.get(category.value, 0.0)
+        has_consensus = len(getattr(ensemble, "individual_forecasts", [])) > 1
+        adjustment = raw_adjustment * 0.5 if (has_consensus and raw_adjustment != 0.0) else raw_adjustment
         if adjustment != 0.0:
             original_prob = ensemble.final_probability
             adjusted_prob = max(0.01, min(0.99, ensemble.final_probability + adjustment))

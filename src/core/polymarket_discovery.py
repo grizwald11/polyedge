@@ -261,20 +261,31 @@ class PolymarketDiscovery:
         async with httpx.AsyncClient(timeout=POLYMARKET_REQUEST_TIMEOUT) as client:
             for page in range(max_pages):
                 offset = page * limit
-                try:
-                    response = await client.get(
-                        f"{self.gamma_host}/markets",
-                        params={
-                            "closed": "false",
-                            "active": "true",
-                            "limit": limit,
-                            "offset": offset,
-                        },
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                except httpx.HTTPError as e:
-                    logger.warning(f"Polymarket Gamma API page {page} failed: {e}")
+                # M-2: Retry with exponential backoff on transient failures.
+                data = None
+                for attempt in range(3):
+                    try:
+                        response = await client.get(
+                            f"{self.gamma_host}/markets",
+                            params={
+                                "closed": "false",
+                                "active": "true",
+                                "limit": limit,
+                                "offset": offset,
+                            },
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        break
+                    except httpx.HTTPError as e:
+                        if attempt < 2:
+                            import asyncio
+                            wait = min(10, 2 ** (attempt + 1))
+                            logger.debug(f"Polymarket Gamma API page {page} attempt {attempt + 1} failed: {e}, retrying in {wait}s")
+                            await asyncio.sleep(wait)
+                        else:
+                            logger.warning(f"Polymarket Gamma API page {page} failed after 3 attempts: {e}")
+                if data is None:
                     break
 
                 markets = data if isinstance(data, list) else data.get("markets", [])

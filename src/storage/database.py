@@ -1525,8 +1525,41 @@ class Database:
                 "SELECT value FROM settings WHERE key = ?", (key,)
             ).fetchone()
             return row["value"] if row else None
-        except Exception:
-            return None  # Table may not exist yet
+        except Exception as e:
+            # M-1: Log rather than silently swallowing — aids debugging of
+            # schema mismatches, lock contention, and corruption.
+            logger.debug(f"load_setting('{key}') failed (table may not exist yet): {e}")
+            return None
+
+    # ──────────────────────────────────────
+    # Whale Trades (L-1 audit fix)
+    # ──────────────────────────────────────
+
+    def log_whale_trade(
+        self,
+        wallet_address: str,
+        market_id: str,
+        direction: str,
+        size: float,
+        price: float,
+        detected_at: str,
+    ) -> None:
+        """Log a whale trade to the database.
+
+        L-1: Provides a proper abstraction layer so callers don't need
+        to access _get_conn() directly.
+        """
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO whale_trades (wallet_address, market_id, direction, size, price, detected_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (wallet_address, market_id, direction, size, price, detected_at),
+            )
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Failed to log whale trade: {e}")
 
     # ──────────────────────────────────────
     # Stats

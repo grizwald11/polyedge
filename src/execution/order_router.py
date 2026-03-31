@@ -335,6 +335,18 @@ class OrderRouter:
 
     async def _live_fill(self, order: Order) -> OrderResult:
         """Submit order to Kalshi API for live execution."""
+        # C-3: Reject orders on closed/settled/halted markets before hitting the API.
+        market_row = self.db.get_market(order.market_id)
+        if market_row is not None:
+            mkt_closed = market_row.get("closed") or market_row.get("active") == 0
+            mkt_status = str(market_row.get("status", "")).lower()
+            if mkt_closed or mkt_status in ("closed", "settled", "halted", "determined"):
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = f"Market is {mkt_status or 'closed'} — cannot trade"
+                self._log_order(order)
+                logger.warning(f"Order {order.id} rejected: {order.rejection_reason}")
+                return OrderResult(success=False, order=order, error=order.rejection_reason)
+
         # Three-gate safety check
         if not self._live_gates_passed():
             order.status = OrderStatus.REJECTED
@@ -384,21 +396,43 @@ class OrderRouter:
 
         # M-14: Balance pre-flight check — verify sufficient funds before submitting.
         # Catches stale bankroll state that would result in a rejected API call.
-        try:
-            balance = await asyncio.wait_for(self.kalshi.get_balance(), timeout=5.0)
-            if balance is not None and order.cost > balance:
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = (
-                    f"Insufficient balance: order cost ${order.cost:.2f} > "
-                    f"available ${balance:.2f}"
-                )
-                self._log_order(order)
-                logger.warning(f"Balance pre-flight failed: {order.rejection_reason}")
-                return OrderResult(success=False, order=order, error=order.rejection_reason)
-        except (asyncio.TimeoutError, Exception) as e:
-            # Non-blocking: if balance check fails, proceed with order submission
-            # (the exchange will reject if insufficient anyway)
-            logger.debug(f"Balance pre-flight check skipped: {e}")
+        # H-1: For large orders (>10% bankroll), the check is BLOCKING with retries.
+        large_order_threshold = self.settings.trading.bankroll * 0.10
+        is_large_order = order.cost > large_order_threshold
+        balance_retries = 3 if is_large_order else 1
+        balance_checked = False
+        for _bal_attempt in range(balance_retries):
+            try:
+                balance = await asyncio.wait_for(self.kalshi.get_balance(), timeout=5.0)
+                if balance is not None and order.cost > balance:
+                    order.status = OrderStatus.REJECTED
+                    order.rejection_reason = (
+                        f"Insufficient balance: order cost ${order.cost:.2f} > "
+                        f"available ${balance:.2f}"
+                    )
+                    self._log_order(order)
+                    logger.warning(f"Balance pre-flight failed: {order.rejection_reason}")
+                    return OrderResult(success=False, order=order, error=order.rejection_reason)
+                balance_checked = True
+                break
+            except (asyncio.TimeoutError, Exception) as e:
+                if is_large_order and _bal_attempt < balance_retries - 1:
+                    logger.warning(
+                        f"Balance pre-flight retry {_bal_attempt + 1}/{balance_retries} "
+                        f"for large order (${order.cost:.2f}): {e}"
+                    )
+                    await asyncio.sleep(1.0)
+                else:
+                    logger.debug(f"Balance pre-flight check skipped: {e}")
+        if is_large_order and not balance_checked:
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = (
+                f"Balance pre-flight failed after {balance_retries} retries — "
+                f"blocking large order (${order.cost:.2f} > 10% bankroll)"
+            )
+            self._log_order(order)
+            logger.error(f"H-1: {order.rejection_reason}")
+            return OrderResult(success=False, order=order, error=order.rejection_reason)
 
         try:
             # Hard timeout on order creation to prevent hanging indefinitely.
@@ -457,7 +491,9 @@ class OrderRouter:
                         timeout=10.0,
                     )
                     for oo in open_orders:
-                        price_match = abs(oo.get("yes_price", 0) / 100 - order.price) < 0.01
+                        # H-3: Compare in integer cents to avoid float tolerance issues
+                        # on low-priced markets where 0.01 tolerance could be 50% of price.
+                        price_match = abs(int(oo.get("yes_price", 0)) - dollars_to_cents(order.price)) <= 1
                         side_match = oo.get("side", "").lower() == (order.kalshi_side or "").lower()
                         count_match = oo.get("count", 0) == int(order.size)
                         if (
@@ -591,6 +627,18 @@ class OrderRouter:
 
     async def _poly_live_fill(self, order: Order) -> OrderResult:
         """Submit order to Polymarket CLOB API for live execution."""
+        # C-3: Reject orders on closed/settled markets.
+        market_row = self.db.get_market(order.market_id)
+        if market_row is not None:
+            mkt_closed = market_row.get("closed") or market_row.get("active") == 0
+            mkt_status = str(market_row.get("status", "")).lower()
+            if mkt_closed or mkt_status in ("closed", "settled", "halted", "determined"):
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = f"Market is {mkt_status or 'closed'} — cannot trade"
+                self._log_order(order)
+                logger.warning(f"Order {order.id} rejected: {order.rejection_reason}")
+                return OrderResult(success=False, order=order, error=order.rejection_reason)
+
         if self.polymarket is None:
             order.status = OrderStatus.REJECTED
             order.rejection_reason = "Polymarket client not configured"

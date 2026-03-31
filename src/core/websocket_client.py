@@ -110,6 +110,7 @@ class KalshiWebSocket:
         # preceding a fill means the ticker reflects the fill price.
         self._channels: list[str] = ["ticker", "fill"]
         self._ws = None
+        self._ws_lock = asyncio.Lock()  # H-4: Protect _ws assignment against race conditions
         self._cmd_id: int = 0
         self._running: bool = False
 
@@ -227,6 +228,9 @@ class KalshiWebSocket:
 
         while self._running:
             try:
+                # H-7: Reload private key if the file has changed since last load.
+                # This ensures key rotations take effect on reconnect.
+                self._reload_key_if_changed()
                 headers = self._auth_headers()
                 # Explicit SSL context avoids Python 3.12 segfault in
                 # asyncio TLS on macOS ARM64 (null-deref in ssl.read).
@@ -238,7 +242,8 @@ class KalshiWebSocket:
                     ping_timeout=self._ping_timeout,
                     ssl=ssl_ctx,
                 ) as ws:
-                    self._ws = ws
+                    async with self._ws_lock:  # H-4
+                        self._ws = ws
                     backoff = INITIAL_BACKOFF
                     consecutive_failures = 0
                     logger.info(f"WebSocket connected to {self.host}")
@@ -282,7 +287,8 @@ class KalshiWebSocket:
                 self._running = False
                 break
             except Exception as e:
-                self._ws = None
+                async with self._ws_lock:  # H-4
+                    self._ws = None
                 if not self._running:
                     break
                 consecutive_failures += 1
@@ -305,18 +311,20 @@ class KalshiWebSocket:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF)
 
-        self._ws = None
+        async with self._ws_lock:  # H-4
+            self._ws = None
         logger.info("WebSocket client stopped")
 
     async def close(self):
         """Gracefully close the WebSocket connection."""
         self._running = False
-        if self._ws is not None:
-            try:
-                await self._ws.close()
-            except Exception as e:
-                logger.debug(f"WebSocket close error: {e}")
-            self._ws = None
+        async with self._ws_lock:  # H-4
+            if self._ws is not None:
+                try:
+                    await self._ws.close()
+                except Exception as e:
+                    logger.debug(f"WebSocket close error: {e}")
+                self._ws = None
 
     @property
     def connected(self) -> bool:
@@ -536,4 +544,26 @@ class KalshiWebSocket:
         from src.core.key_loader import load_rsa_private_key
         # H-7: Enforce PEM file permissions (consistent with KalshiClient)
         self._private_key = load_rsa_private_key(self.private_key_path, check_permissions=True)
+        self._key_mtime = self._get_key_mtime()
         return self._private_key
+
+    def _get_key_mtime(self) -> float:
+        """Get modification time of the private key file."""
+        import os
+        try:
+            return os.path.getmtime(self.private_key_path) if self.private_key_path else 0.0
+        except OSError:
+            return 0.0
+
+    def _reload_key_if_changed(self):
+        """H-7: Reload private key if the file has been modified since last load.
+
+        Called before each reconnection attempt so key rotations take effect.
+        """
+        if not self.private_key_path:
+            return
+        current_mtime = self._get_key_mtime()
+        if hasattr(self, "_key_mtime") and current_mtime != self._key_mtime:
+            logger.info("Private key file changed — reloading for WebSocket auth (H-7)")
+            self._private_key = None  # Force reload
+            self._load_private_key()

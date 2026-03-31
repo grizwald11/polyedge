@@ -70,13 +70,19 @@ def kalshi_maker_fee(contracts: int, price_cents: int) -> int:
     return int(fee)
 
 
-def polymarket_fee(contracts: int, price: float) -> float:
+def polymarket_fee(contracts: int, price: float, *, fee_enabled: bool = False) -> float:
     """Polymarket event markets are fee-free for maker orders.
 
-    WARNING: This stub returns 0.0 unconditionally. It must NOT be relied on
-    for P&L calculations on fee-enabled Polymarket markets (e.g. crypto,
-    NCAAB, Serie A) where taker fees apply.
+    H-6: Raises ValueError if called on a fee-enabled market, since the actual
+    fee schedule is not yet implemented. This prevents silent P&L miscalculation.
+    For fee-free event markets, returns 0.0 as before.
     """
+    if fee_enabled:
+        raise ValueError(
+            "Polymarket fee calculation not implemented for fee-enabled markets "
+            "(crypto, NCAAB, Serie A). Do not trade fee-enabled markets until "
+            "the fee schedule is implemented."
+        )
     return 0.0
 
 

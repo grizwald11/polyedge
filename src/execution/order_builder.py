@@ -176,6 +176,16 @@ class OrderBuilder:
         )
         return order
 
+    # C-2: Explicit mapping from Direction → (Side, kalshi_side) for Kalshi API.
+    # Kalshi API uses: side="yes"|"no" (outcome token), action="buy"|"sell".
+    # This mapping is validated by assertions below to prevent wrong-side trades.
+    _DIRECTION_MAP: dict[Direction, tuple[Side, str]] = {
+        Direction.BUY_YES:  (Side.BUY,  "yes"),
+        Direction.BUY_NO:   (Side.BUY,  "no"),
+        Direction.SELL_YES: (Side.SELL, "yes"),
+        Direction.SELL_NO:  (Side.SELL, "no"),
+    }
+
     def _resolve_side_and_token(
         self, market: Market, direction: Direction
     ) -> Optional[tuple[Side, str, str]]:
@@ -184,28 +194,27 @@ class OrderBuilder:
         Returns:
             Tuple of (Side, token_id, kalshi_side) or None if token is missing.
         """
-        if direction == Direction.BUY_YES:
-            token = market.yes_token
-            if token:
-                return Side.BUY, token.token_id, "yes"
-        elif direction == Direction.BUY_NO:
-            token = market.no_token
-            if token:
-                return Side.BUY, token.token_id, "no"
-        elif direction == Direction.SELL_YES:
-            token = market.yes_token
-            if token:
-                return Side.SELL, token.token_id, "yes"
-        else:  # SELL_NO
-            token = market.no_token
-            if token:
-                return Side.SELL, token.token_id, "no"
+        # C-2: Use explicit lookup table to prevent mapping errors.
+        side, kalshi_side = self._DIRECTION_MAP[direction]
 
-        logger.warning(
-            "Missing %s token for %s (%s) — cannot build order",
-            direction.value, market.ticker, market.platform.value,
-        )
-        return None
+        # Select the token for the outcome side
+        if kalshi_side == "yes":
+            token = market.yes_token
+        else:
+            token = market.no_token
+
+        if not token:
+            logger.warning(
+                "Missing %s token for %s (%s) — cannot build order",
+                direction.value, market.ticker, market.platform.value,
+            )
+            return None
+
+        # C-2: Defensive assertion — verify the mapping is internally consistent.
+        assert side.value.lower() in ("buy", "sell"), f"Invalid side: {side}"
+        assert kalshi_side in ("yes", "no"), f"Invalid kalshi_side: {kalshi_side}"
+
+        return side, token.token_id, kalshi_side
 
     @staticmethod
     def _clamp_price(price: float) -> float:

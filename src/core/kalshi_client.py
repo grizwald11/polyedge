@@ -22,6 +22,35 @@ logger = logging.getLogger(__name__)
 MAX_CONSECUTIVE_5XX = 5
 
 
+class TokenBucket:
+    """H-2: Proactive token bucket rate limiter.
+
+    Prevents 429s by limiting requests to a maximum rate, spreading them
+    evenly over time. Tokens refill continuously at `rate` per second,
+    up to `capacity`.
+    """
+
+    def __init__(self, rate: float = 8.0, capacity: float = 10.0):
+        self._rate = rate  # tokens per second
+        self._capacity = capacity
+        self._tokens = capacity
+        self._last_refill = time.monotonic()
+
+    async def acquire(self) -> None:
+        """Wait until a token is available, then consume one."""
+        while True:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+            self._last_refill = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            # Wait for enough time to get 1 token
+            wait = (1.0 - self._tokens) / self._rate
+            await asyncio.sleep(wait)
+
+
 class KalshiRateLimitError(Exception):
     """Raised when Kalshi API rate limits are exhausted after retries."""
     pass
@@ -52,6 +81,9 @@ class KalshiClient:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._min_request_interval = min_request_interval
         self._last_request_time: float = 0.0
+        # H-2: Proactive token bucket — prevents 429s by throttling outgoing requests.
+        # Kalshi's rate limit is ~10 req/s; we default to 8/s with burst up to 10.
+        self._rate_limiter = TokenBucket(rate=8.0, capacity=10.0)
         self._consecutive_timeouts: int = 0
         self._consecutive_5xx: int = 0
         self._circuit_breaker_triggers: int = 0  # M-10: track for exponential backoff
@@ -196,6 +228,9 @@ class KalshiClient:
                     request=httpx.Request("GET", self.host + path),
                     response=httpx.Response(503),
                 )
+
+            # H-2: Proactive rate limiting — wait for a token before proceeding.
+            await self._rate_limiter.acquire()
 
             # Enforce minimum interval between requests
             now = time.monotonic()
@@ -475,15 +510,25 @@ class KalshiClient:
     # ──────────────────────────────────────
 
     async def get_balance(self) -> Optional[float]:
-        """Get account balance in dollars."""
+        """Get account balance in dollars.
+
+        Uses Decimal arithmetic internally to avoid float rounding errors
+        on monetary values (C-1 audit fix).
+        """
+        from decimal import Decimal, ROUND_HALF_UP
+
         try:
             data = await self._request("GET", "/portfolio/balance")
             if data and "balance" in data:
                 # Validate balance is numeric before conversion
                 raw_balance = data["balance"]
                 try:
-                    balance = float(raw_balance) / 100.0
-                except (TypeError, ValueError):
+                    # C-1: Use Decimal to avoid float precision loss on money.
+                    balance = float(
+                        (Decimal(str(raw_balance)) / Decimal(100))
+                        .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    )
+                except (TypeError, ValueError, ArithmeticError):
                     logger.error(f"Invalid balance value from Kalshi: {raw_balance!r}")
                     return None
                 if balance < 0:

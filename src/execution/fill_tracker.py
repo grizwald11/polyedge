@@ -78,7 +78,10 @@ class FillTracker:
         # Poll all orders concurrently instead of sequentially
         async def _poll_one(order_id: str, order: Order):
             try:
-                platform = getattr(order, "platform", Platform.KALSHI)
+                platform = getattr(order, "platform", None)
+                if platform is None:
+                    platform = Platform.KALSHI
+                    logger.warning(f"H-5: Order {order.id} missing platform field, defaulting to KALSHI")
                 if platform == Platform.POLYMARKET and self.polymarket is not None:
                     status = await asyncio.wait_for(
                         self.polymarket.get_order(order_id), timeout=self._poll_timeout
@@ -214,12 +217,21 @@ class FillTracker:
         already_recorded = self._partial_recorded.get(order.id, 0)
         delta = filled_count - already_recorded
         if delta < 0:
-            # H-6: Accept API fill corrections unconditionally. Previously we
-            # skipped lower counts, which left stale position data in the DB.
+            # H-6 + M-5: Accept small API fill corrections but reject suspiciously
+            # large ones that could indicate an API bug or data corruption.
+            max_allowed_correction = max(1, int(order.size * 0.05))  # 5% of order size
+            if abs(delta) > max_allowed_correction:
+                logger.error(
+                    f"SUSPICIOUS fill correction for {order.id}: "
+                    f"API={filled_count}, recorded={already_recorded}, "
+                    f"delta={delta}, max_allowed={max_allowed_correction} — "
+                    f"rejecting correction to protect position integrity (M-5)"
+                )
+                return None
             logger.warning(
                 f"Non-monotonic filled_count for {order.id}: "
                 f"API={filled_count}, recorded={already_recorded} — "
-                f"accepting correction (H-6)"
+                f"accepting small correction (H-6, within M-5 bounds)"
             )
             self._partial_recorded[order.id] = filled_count
             return None
@@ -229,7 +241,10 @@ class FillTracker:
         now = datetime.now(timezone.utc)
 
         # Calculate fee on newly filled portion only (platform-aware)
-        platform = getattr(order, "platform", Platform.KALSHI)
+        platform = getattr(order, "platform", None)
+        if platform is None:
+            platform = Platform.KALSHI
+            logger.warning(f"H-5: Order {order.id} missing platform field in partial fill, defaulting to KALSHI")
         if platform == Platform.POLYMARKET:
             fee_dollars = 0.0  # Polymarket event markets are fee-free
         else:
@@ -322,7 +337,10 @@ class FillTracker:
             return None
 
         # Calculate fee on remaining portion only (platform-aware)
-        platform = getattr(order, "platform", Platform.KALSHI)
+        platform = getattr(order, "platform", None)
+        if platform is None:
+            platform = Platform.KALSHI
+            logger.warning(f"H-5: Order {order.id} missing platform field in full fill, defaulting to KALSHI")
         if platform == Platform.POLYMARKET:
             fee_dollars = 0.0
         else:
@@ -383,7 +401,10 @@ class FillTracker:
 
     def _log_order_with_conn(self, order: Order, conn):
         """Persist order status using an existing connection (caller manages transaction)."""
-        platform = getattr(order, "platform", Platform.KALSHI)
+        platform = getattr(order, "platform", None)
+        if platform is None:
+            platform = Platform.KALSHI
+            logger.warning(f"H-5: Order {order.id} missing platform field in log_order, defaulting to KALSHI")
         conn.execute("""
             INSERT OR REPLACE INTO orders (
                 id, market_id, platform, token_id, side, price, size, cost,

@@ -48,6 +48,7 @@ class WhaleMonitor:
         self.db = db
         self._basket: list[WhaleWallet] = []
         self._positions: dict[str, dict[str, WhalePosition]] = {}  # wallet -> {market_id -> pos}
+        self._max_tracked_markets_per_wallet = 200  # L-4: Prevent unbounded growth
         self._load_basket()
 
     def _load_basket(self):
@@ -180,25 +181,13 @@ class WhaleMonitor:
     def _log_whale_trade(self, wallet: str, pos: WhalePosition):
         """Log a whale trade to the database.
 
-        L-4: TODO — This method bypasses the Database abstraction layer by
-        accessing self.db._get_conn() directly and executing raw SQL. Should
-        be refactored to use a Database.log_whale_trade() method instead.
+        L-1 fix: Uses Database.log_whale_trade() abstraction layer.
         """
-        conn = self.db._get_conn()
-        try:
-            conn.execute(
-                "INSERT INTO whale_trades (wallet_address, market_id, direction, size, price, detected_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    wallet,
-                    pos.market_id,
-                    pos.direction.value,
-                    pos.size,
-                    pos.entry_price,
-                    pos.detected_at.isoformat(),
-                ),
-            )
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            logger.warning(f"Failed to log whale trade: {e}")
+        self.db.log_whale_trade(
+            wallet_address=wallet,
+            market_id=pos.market_id,
+            direction=pos.direction.value,
+            size=pos.size,
+            price=pos.entry_price,
+            detected_at=pos.detected_at.isoformat(),
+        )

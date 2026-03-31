@@ -79,15 +79,23 @@ class ClaudeForecaster:
             self._client = anthropic.AsyncAnthropic(api_key=api_key)
         return self._client
 
+    # L-2: Edge threshold for high-stakes model selection (was hardcoded at 0.15).
+    # Uses config value or falls back to 0.15 if not configured.
+    EDGE_HIGHSTAKES_THRESHOLD = 0.15
+
     def _select_model(self, position_value: float = 0.0, edge: float = 0.0) -> str:
         """Select model based on position value or edge size.
 
-        Uses opus for high-stakes positions or large detected edges (>15%),
+        Uses opus for high-stakes positions or large detected edges,
         since opus catches more nuances in resolution criteria and temporal reasoning.
         """
         if position_value > self.settings.claude.highstakes_threshold:
             return self.settings.claude.model_highstakes
-        if abs(edge) > 0.15:
+        edge_threshold = getattr(
+            self.settings.claude, "edge_highstakes_threshold",
+            self.EDGE_HIGHSTAKES_THRESHOLD,
+        )
+        if abs(edge) > edge_threshold:
             return self.settings.claude.model_highstakes
         return self.settings.claude.model_primary
 
@@ -229,12 +237,13 @@ class ClaudeForecaster:
             )
 
         # Hard budget check — refuse API calls if daily hard limit exceeded.
-        # Pre-call estimation: a typical assess_market call uses ~1500-3000 tokens.
-        # If adding the estimated usage would exceed the hard limit, skip the call.
-        # L-11: Approximate token estimate for pre-call budget check. This is a
-        # rough heuristic; should be refined with actual usage data once sufficient
-        # API calls have been logged (track via _total_tokens_today / call_count).
-        ESTIMATED_CALL_TOKENS = 3000
+        # Pre-call estimation: use rolling average of actual token usage if
+        # available, otherwise fall back to 3000 (M-6 audit fix).
+        DEFAULT_ESTIMATED_CALL_TOKENS = 3000
+        if self._call_count_today > 0:
+            ESTIMATED_CALL_TOKENS = int(self._total_tokens_today / self._call_count_today)
+        else:
+            ESTIMATED_CALL_TOKENS = DEFAULT_ESTIMATED_CALL_TOKENS
         hard_limit = self.settings.claude.daily_token_budget * 2
         if self._total_tokens_today + ESTIMATED_CALL_TOKENS > hard_limit:
             logger.critical(
