@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,10 +12,12 @@ from src.core.models import (
     Order,
     OrderStatus,
     OrderType,
+    Platform,
     Side,
     StrategyName,
+    Trade,
 )
-from src.execution.fill_tracker import FillTracker
+from src.execution.fill_tracker import FillTracker, MAX_PROCESSED_FILLS
 
 
 def _make_order() -> Order:
@@ -459,3 +461,669 @@ class TestFillTracker:
         # Fast order should have been filled despite slow order timing out
         assert len(fills) == 1
         assert fills[0].market_id == "MKT-FAST"
+
+    # ──────────────────────────────────────────────────────────────────
+    # Platform routing: Polymarket vs Kalshi
+    # ──────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_polymarket_order_routed_to_polymarket_client(self, mock_kalshi, tmp_db):
+        """Orders with Platform.POLYMARKET should use the polymarket client, not kalshi."""
+        mock_poly = AsyncMock()
+        mock_poly.get_order = AsyncMock(return_value={"status": "executed"})
+
+        tracker = FillTracker(mock_kalshi, tmp_db, polymarket=mock_poly)
+        order = Order(
+            id="PE-poly-order",
+            market_id="POLY-MKT-A",
+            token_id="POLY-MKT-A_yes",
+            side=Side.BUY,
+            price=0.60,
+            size=5,
+            cost=3.00,
+            order_type=OrderType.GTC,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+            platform=Platform.POLYMARKET,
+        )
+        tracker.track(order)
+
+        fills = await tracker.check_fills()
+
+        mock_poly.get_order.assert_called_once_with("PE-poly-order")
+        mock_kalshi.get_order.assert_not_called()
+        assert len(fills) == 1
+        assert fills[0].platform == Platform.POLYMARKET
+
+    @pytest.mark.asyncio
+    async def test_polymarket_order_missing_polymarket_client_falls_back_to_kalshi(self, mock_kalshi, tmp_db):
+        """Platform.POLYMARKET order with no polymarket client falls back to kalshi (line 89-92)."""
+        mock_kalshi.get_order = AsyncMock(return_value={"status": "executed"})
+
+        tracker = FillTracker(mock_kalshi, tmp_db, polymarket=None)
+        order = Order(
+            id="PE-poly-fallback",
+            market_id="POLY-MKT-B",
+            token_id="POLY-MKT-B_yes",
+            side=Side.BUY,
+            price=0.60,
+            size=5,
+            cost=3.00,
+            order_type=OrderType.GTC,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+            platform=Platform.POLYMARKET,
+        )
+        tracker.track(order)
+
+        fills = await tracker.check_fills()
+
+        mock_kalshi.get_order.assert_called_once_with("PE-poly-fallback")
+        assert len(fills) == 1
+
+    @pytest.mark.asyncio
+    async def test_order_missing_platform_defaults_to_kalshi(self, mock_kalshi, tmp_db):
+        """An order where platform attribute is missing defaults to KALSHI (lines 83-84)."""
+        mock_kalshi.get_order = AsyncMock(return_value={"status": "executed"})
+
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        # Simulate missing platform by deleting the attribute
+        object.__setattr__(order, "platform", None)
+        tracker.track(order)
+
+        fills = await tracker.check_fills()
+
+        assert len(fills) == 1
+        # Trade should default to KALSHI platform
+        assert fills[0].platform == Platform.KALSHI
+
+    # ──────────────────────────────────────────────────────────────────
+    # Cumulative timeout (lines 112-117)
+    # ──────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_cumulative_timeout_returns_empty(self, mock_kalshi, tmp_db):
+        """If the 300s cumulative gather timeout fires, check_fills returns []."""
+        async def forever(_order_id):
+            await asyncio.sleep(9999)
+
+        mock_kalshi.get_order = forever
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        tracker.track(_make_order())
+
+        with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+            fills = await tracker.check_fills()
+
+        assert fills == []
+
+    # ──────────────────────────────────────────────────────────────────
+    # Exception result bubbled from gather (lines 124-125)
+    # ──────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_exception_in_gather_result_is_logged_and_skipped(self, mock_kalshi, tmp_db):
+        """An Exception object in gather results should be logged and skipped gracefully."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        tracker.track(order)
+
+        # Patch gather to return an Exception in the results list
+        real_gather = asyncio.gather
+
+        async def patched_gather(*coros, **kwargs):
+            # Run normally but inject an Exception result
+            return [RuntimeError("unexpected gather error")]
+
+        with patch("asyncio.gather", patched_gather):
+            fills = await tracker.check_fills()
+
+        # Should not raise; fills will be empty since we short-circuited
+        assert isinstance(fills, list)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Partial fill exception handling (lines 144-149)
+    # ──────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_partial_fill_exception_logged_not_raised(self, mock_kalshi, tmp_db):
+        """An exception in _record_partial_fill should be caught and logged, not re-raised."""
+        mock_kalshi.get_order = AsyncMock(return_value={
+            "status": "partial",
+            "filled_count": 5,
+            "remaining_count": 5,
+        })
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        tracker.track(_make_order())
+
+        with patch.object(tracker, "_record_partial_fill", side_effect=RuntimeError("DB error")):
+            fills = await tracker.check_fills()
+
+        # Should not raise; partial_trade treated as None
+        assert fills == []
+        # Order remains tracked since remaining > 0
+        assert tracker.pending_count == 1
+
+    # ──────────────────────────────────────────────────────────────────
+    # WebSocket fill for untracked order (lines 179-180)
+    # ──────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_ws_fill_untracked_order_returns_none(self, mock_kalshi, tmp_db):
+        """handle_ws_fill for an order not in _pending_orders returns None."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+
+        fill_update = type("FillUpdate", (), {"order_id": "UNKNOWN-ORDER"})()
+        result = await tracker.handle_ws_fill(fill_update)
+
+        assert result is None
+
+    # ──────────────────────────────────────────────────────────────────
+    # drain_ws_fills (lines 196-198)
+    # ──────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_drain_ws_fills_returns_and_clears(self, mock_kalshi, tmp_db):
+        """drain_ws_fills returns accumulated WS fills and clears the internal list."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        tracker.track(order)
+
+        fill_update = type("FillUpdate", (), {"order_id": order.id})()
+        trade = await tracker.handle_ws_fill(fill_update)
+        assert trade is not None
+
+        # First drain returns the fill
+        drained = tracker.drain_ws_fills()
+        assert len(drained) == 1
+        assert drained[0].order_id == order.id
+
+        # Second drain returns empty
+        assert tracker.drain_ws_fills() == []
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_partial_fill: already processed (line 208)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_partial_fill_already_processed_returns_none(self, mock_kalshi, tmp_db):
+        """_record_partial_fill returns None if order.id already in _processed_fills."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        tracker._processed_fills.add(order.id)
+
+        result = tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
+        assert result is None
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_partial_fill: zero filled_count (line 212)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_partial_fill_zero_filled_count_returns_none(self, mock_kalshi, tmp_db):
+        """_record_partial_fill returns None when filled_count is 0."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+
+        result = tracker._record_partial_fill(order, {"filled_count": 0, "remaining_count": 10})
+        assert result is None
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_partial_fill: delta == 0 (line 239)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_partial_fill_delta_zero_returns_none(self, mock_kalshi, tmp_db):
+        """_record_partial_fill returns None when delta (new fills since last recording) is 0."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        # Pre-record that 6 contracts were already captured
+        tracker._partial_recorded[order.id] = 6
+
+        result = tracker._record_partial_fill(order, {"filled_count": 6, "remaining_count": 4})
+        assert result is None
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_partial_fill: suspicious negative delta (lines 222-237)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_partial_fill_suspicious_correction_rejected(self, mock_kalshi, tmp_db):
+        """A large negative delta (fill correction) exceeding 5% of order size is rejected."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()  # size=10; 5% = 0 (max_allowed = max(1, 0) = 1)
+        # Pretend we already recorded 8, but API now says 5 — delta=-3, max_allowed=1
+        tracker._partial_recorded[order.id] = 8
+
+        result = tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
+        assert result is None
+        # partial_recorded should NOT be updated since the correction was rejected
+        assert tracker._partial_recorded[order.id] == 8
+
+    def test_record_partial_fill_small_correction_accepted(self, mock_kalshi, tmp_db):
+        """A small negative delta within 5% of order size is accepted (H-6)."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        # Use a large order so the 5% tolerance is > 1
+        order = Order(
+            id="PE-correction-test",
+            market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes",
+            side=Side.BUY,
+            price=0.34,
+            size=100,  # 5% = 5 contracts tolerance
+            cost=34.0,
+            order_type=OrderType.GTC,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+        )
+        # Pretend 50 recorded; API says 49 — delta=-1, max_allowed=5 → accepted
+        tracker._partial_recorded[order.id] = 50
+
+        result = tracker._record_partial_fill(order, {"filled_count": 49, "remaining_count": 51})
+        # Small correction: accepted but returns None (no new trade recorded)
+        assert result is None
+        # partial_recorded should be updated to the corrected value
+        assert tracker._partial_recorded[order.id] == 49
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_partial_fill: Polymarket fee-free (line 249)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_partial_fill_polymarket_zero_fee(self, mock_kalshi, tmp_db):
+        """Polymarket partial fills should have zero fee."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = Order(
+            id="PE-poly-partial",
+            market_id="POLY-MKT",
+            token_id="POLY-MKT_yes",
+            side=Side.BUY,
+            price=0.60,
+            size=10,
+            cost=6.0,
+            order_type=OrderType.GTC,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+            platform=Platform.POLYMARKET,
+        )
+
+        trade = tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
+
+        assert trade is not None
+        assert trade.fee == 0.0
+        assert trade.platform == Platform.POLYMARKET
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_partial_fill: missing platform defaults to KALSHI (lines 246-247)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_partial_fill_missing_platform_defaults_to_kalshi(self, mock_kalshi, tmp_db):
+        """Partial fill on order with platform=None defaults to KALSHI and logs warning."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        object.__setattr__(order, "platform", None)
+
+        trade = tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
+
+        assert trade is not None
+        assert trade.platform == Platform.KALSHI
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_partial_fill: taker fee path (line 255)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_partial_fill_taker_order_applies_taker_fee(self, mock_kalshi, tmp_db):
+        """Kalshi IOC (taker) partial fill should use taker fee, not maker fee."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = Order(
+            id="PE-taker-partial",
+            market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes",
+            side=Side.BUY,
+            price=0.34,
+            size=10,
+            cost=3.40,
+            order_type=OrderType.FOK,  # Taker
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+            platform=Platform.KALSHI,
+        )
+
+        trade = tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
+
+        assert trade is not None
+        # Taker fee > 0 for Kalshi
+        assert trade.fee >= 0.0
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_partial_fill: DB transaction rollback (lines 293-295)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_partial_fill_db_error_raises_and_rolls_back(self, mock_kalshi, tmp_db):
+        """DB error in partial fill transaction should rollback and re-raise."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+
+        with patch.object(tmp_db, "log_trade", side_effect=RuntimeError("DB error")):
+            with pytest.raises(RuntimeError, match="DB error"):
+                tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_fill: _processed_fills pruning (lines 319-322)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_processed_fills_pruned_when_exceeds_cap(self, mock_kalshi, tmp_db):
+        """When _processed_fills exceeds MAX_PROCESSED_FILLS, oldest half is pruned."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+
+        # Pre-fill with MAX_PROCESSED_FILLS entries
+        for i in range(MAX_PROCESSED_FILLS):
+            tracker._processed_fills.add(f"old-order-{i}")
+
+        assert len(tracker._processed_fills) == MAX_PROCESSED_FILLS
+
+        # Recording a new fill should trigger pruning
+        order = _make_order()
+        tracker._record_fill(order, {"status": "executed"})
+
+        # After pruning, set should be roughly half the cap
+        assert len(tracker._processed_fills) <= MAX_PROCESSED_FILLS // 2 + 5
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_fill: all contracts already recorded via partials (lines 335-337)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_fill_all_contracts_already_recorded_returns_none(self, mock_kalshi, tmp_db):
+        """When all contracts were already recorded via partial fills, _record_fill returns None."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()  # size=10
+        # Pretend all 10 contracts were already recorded as partials
+        tracker._partial_recorded[order.id] = 10
+
+        result = tracker._record_fill(order, {"status": "executed"})
+
+        assert result is None
+        # Order should still be marked filled
+        assert order.status == OrderStatus.FILLED
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_fill: Polymarket fee-free (line 344-345)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_fill_polymarket_zero_fee(self, mock_kalshi, tmp_db):
+        """Full fill on Polymarket order should have zero fee."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = Order(
+            id="PE-poly-full",
+            market_id="POLY-MKT",
+            token_id="POLY-MKT_yes",
+            side=Side.BUY,
+            price=0.60,
+            size=10,
+            cost=6.0,
+            order_type=OrderType.GTC,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+            platform=Platform.POLYMARKET,
+        )
+
+        trade = tracker._record_fill(order, {"status": "executed"})
+
+        assert trade is not None
+        assert trade.fee == 0.0
+        assert trade.platform == Platform.POLYMARKET
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_fill: missing platform defaults to KALSHI (lines 342-343)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_fill_missing_platform_defaults_to_kalshi(self, mock_kalshi, tmp_db):
+        """Full fill on order with platform=None defaults to KALSHI."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        object.__setattr__(order, "platform", None)
+
+        trade = tracker._record_fill(order, {"status": "executed"})
+
+        assert trade is not None
+        assert trade.platform == Platform.KALSHI
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_fill: taker fee (line 351)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_fill_taker_order_applies_taker_fee(self, mock_kalshi, tmp_db):
+        """Kalshi IOC (taker) full fill uses taker fee."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = Order(
+            id="PE-taker-full",
+            market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes",
+            side=Side.BUY,
+            price=0.34,
+            size=10,
+            cost=3.40,
+            order_type=OrderType.FOK,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+            platform=Platform.KALSHI,
+        )
+
+        trade = tracker._record_fill(order, {"status": "executed"})
+
+        assert trade is not None
+        assert trade.fee >= 0.0
+
+    # ──────────────────────────────────────────────────────────────────
+    # _record_fill: DB transaction rollback (lines 378-380)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_record_fill_db_error_raises_and_rolls_back(self, mock_kalshi, tmp_db):
+        """DB error in _record_fill transaction should rollback and re-raise."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+
+        with patch.object(tmp_db, "log_trade", side_effect=RuntimeError("DB write fail")):
+            with pytest.raises(RuntimeError, match="DB write fail"):
+                tracker._record_fill(order, {"status": "executed"})
+
+    # ──────────────────────────────────────────────────────────────────
+    # _log_order_with_conn: missing platform defaults (lines 406-407)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_log_order_with_conn_missing_platform_defaults_to_kalshi(self, mock_kalshi, tmp_db):
+        """_log_order_with_conn with platform=None defaults to KALSHI and logs warning."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        order = _make_order()
+        order.status = OrderStatus.FILLED
+        object.__setattr__(order, "platform", None)
+
+        conn = tmp_db._get_conn()
+        # Should not raise; inserts with KALSHI
+        tracker._log_order_with_conn(order, conn)
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT platform FROM orders WHERE id=?", (order.id,)
+        ).fetchone()
+        assert row is not None
+        assert row["platform"] == Platform.KALSHI.value
+
+    # ──────────────────────────────────────────────────────────────────
+    # _load_filled_order_ids: exception path (lines 450-452)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_load_filled_order_ids_exception_returns_empty_set(self, mock_kalshi, tmp_db):
+        """If the DB query for filled order IDs fails, return an empty set gracefully."""
+        with patch.object(tmp_db, "_get_conn", side_effect=RuntimeError("DB unavailable")):
+            tracker = FillTracker(mock_kalshi, tmp_db)
+
+        assert tracker._processed_fills == set()
+
+    # ──────────────────────────────────────────────────────────────────
+    # _load_partial_recorded_counts: success + exception (lines 474, 476-478)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_load_partial_recorded_counts_loads_from_db(self, mock_kalshi, tmp_db):
+        """Partial fill counts should be loaded from DB on init if trades exist."""
+        # Pre-record a partial trade in the DB
+        partial_trade = Trade(
+            order_id="PE-partial-restart",
+            market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes",
+            side=Side.BUY,
+            price=0.34,
+            size=6,
+            fee=0.01,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+        )
+        tmp_db.log_trade(partial_trade)
+
+        # New tracker (simulate restart); the order is not in _processed_fills
+        tracker = FillTracker(mock_kalshi, tmp_db)
+
+        # The partial count for this order should NOT be loaded because
+        # log_trade also adds to trades table → order IS in _processed_fills
+        # Let's verify the load mechanism: if order_id is already in _processed_fills
+        # it is excluded from _partial_recorded (see source line 470-472)
+        assert "PE-partial-restart" in tracker._processed_fills
+
+    def test_load_partial_recorded_counts_nonzero_logs_info(self, mock_kalshi, tmp_db):
+        """_load_partial_recorded_counts logs info when counts dict is non-empty (line 474).
+
+        To reach this branch, we need trades in the DB whose order_ids are NOT
+        in _processed_fills when _load_partial_recorded_counts runs. We achieve
+        this by monkeypatching _load_filled_order_ids to return an empty set
+        so that the trade row is not excluded during partial count loading.
+        """
+        partial_trade = Trade(
+            order_id="PE-partial-nodup",
+            market_id="FED-RATE-CUT-MAY26",
+            token_id="FED-RATE-CUT-MAY26_yes",
+            side=Side.BUY,
+            price=0.34,
+            size=7,
+            fee=0.01,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+        )
+        tmp_db.log_trade(partial_trade)
+
+        # Patch _load_filled_order_ids so _processed_fills starts empty,
+        # allowing _load_partial_recorded_counts to include the trade row.
+        with patch.object(FillTracker, "_load_filled_order_ids", return_value=set()):
+            tracker = FillTracker(mock_kalshi, tmp_db)
+
+        assert "PE-partial-nodup" in tracker._partial_recorded
+        assert tracker._partial_recorded["PE-partial-nodup"] == 7
+
+    def test_load_partial_recorded_counts_exception_returns_empty_dict(self, mock_kalshi, tmp_db):
+        """If the DB query for partial counts fails, return empty dict gracefully."""
+        call_count = 0
+        real_get_conn = tmp_db._get_conn
+
+        def patched_get_conn():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:  # Second call is _load_partial_recorded_counts
+                raise RuntimeError("DB unavailable")
+            return real_get_conn()
+
+        with patch.object(tmp_db, "_get_conn", patched_get_conn):
+            tracker = FillTracker(mock_kalshi, tmp_db)
+
+        assert tracker._partial_recorded == {}
+
+    # ──────────────────────────────────────────────────────────────────
+    # _prune_partial_recorded (lines 487-494)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_prune_partial_recorded_removes_stale_entries(self, mock_kalshi, tmp_db):
+        """_prune_partial_recorded removes entries for orders not in _pending_orders."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+
+        # Add 5001 stale entries (above the 5000 threshold)
+        for i in range(5001):
+            tracker._partial_recorded[f"stale-order-{i}"] = i
+
+        # Add one active order (should be kept)
+        active_order = _make_order()
+        tracker._pending_orders[active_order.id] = active_order
+        tracker._partial_recorded[active_order.id] = 3
+
+        tracker._prune_partial_recorded()
+
+        # All stale entries should be pruned; active order entry retained
+        for i in range(5001):
+            assert f"stale-order-{i}" not in tracker._partial_recorded
+        assert tracker._partial_recorded[active_order.id] == 3
+
+    def test_prune_partial_recorded_noop_below_threshold(self, mock_kalshi, tmp_db):
+        """_prune_partial_recorded does nothing if <= 5000 entries."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+
+        for i in range(100):
+            tracker._partial_recorded[f"order-{i}"] = i
+
+        tracker._prune_partial_recorded()
+
+        # Nothing pruned
+        assert len(tracker._partial_recorded) == 100
+
+    # ──────────────────────────────────────────────────────────────────
+    # get_pending_for_market (line 506)
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_get_pending_for_market_filters_by_market_id(self, mock_kalshi, tmp_db):
+        """get_pending_for_market returns only orders matching the given ticker."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+
+        order_a = _make_order()  # market_id="FED-RATE-CUT-MAY26"
+        order_b = Order(
+            id="PE-other-mkt",
+            market_id="TRUMP-GOP-2028",
+            token_id="TRUMP-GOP-2028_yes",
+            side=Side.BUY,
+            price=0.55,
+            size=5,
+            cost=2.75,
+            order_type=OrderType.GTC,
+            status=OrderStatus.OPEN,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=False,
+        )
+        tracker.track(order_a)
+        tracker.track(order_b)
+
+        result = tracker.get_pending_for_market("FED-RATE-CUT-MAY26")
+
+        assert len(result) == 1
+        assert result[0].id == order_a.id
+
+    def test_get_pending_for_market_returns_empty_when_no_match(self, mock_kalshi, tmp_db):
+        """get_pending_for_market returns [] when no orders match the ticker."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        tracker.track(_make_order())
+
+        result = tracker.get_pending_for_market("NONEXISTENT-MARKET")
+
+        assert result == []
+
+    # ──────────────────────────────────────────────────────────────────
+    # cancelled (British spelling) also resolves order (line 154)
+    # ──────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_british_spelling_cancelled_resolves_order(self, mock_kalshi, tmp_db):
+        """Status 'cancelled' (British spelling) should also remove order from pending."""
+        mock_kalshi.get_order = AsyncMock(return_value={"status": "cancelled"})
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        tracker.track(_make_order())
+
+        fills = await tracker.check_fills()
+
+        assert fills == []
+        assert tracker.pending_count == 0

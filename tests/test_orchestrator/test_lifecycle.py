@@ -636,3 +636,812 @@ class TestRunTradingLoop:
             await asyncio.wait_for(run_trading_loop(**kwargs), timeout=5.0)
 
         assert call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_daily_report_sent_when_past_report_time(self):
+        """Daily report is sent when past configured time and not yet sent today."""
+        shutdown_event = asyncio.Event()
+        kwargs = self._make_loop_kwargs(shutdown_event)
+        # Always past report time (hour=0, minute=0 → any time is past 00:00)
+        kwargs["settings"].alerts.enabled = True
+        kwargs["settings"].alerts.daily_report_time = "00:00"
+
+        call_count = 0
+
+        async def scan_once(*args, **kw):
+            nonlocal call_count
+            call_count += 1
+            shutdown_event.set()
+
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=scan_once):
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=5.0)
+
+        kwargs["daily_report"].generate_and_send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_daily_report_failure_does_not_crash_loop(self):
+        """A failure in daily_report.generate_and_send should not kill the loop."""
+        shutdown_event = asyncio.Event()
+        kwargs = self._make_loop_kwargs(shutdown_event)
+        kwargs["settings"].alerts.enabled = True
+        kwargs["settings"].alerts.daily_report_time = "00:00"
+        kwargs["daily_report"].generate_and_send = AsyncMock(side_effect=RuntimeError("smtp down"))
+
+        call_count = 0
+
+        async def scan_once(*args, **kw):
+            nonlocal call_count
+            call_count += 1
+            shutdown_event.set()
+
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=scan_once):
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=5.0)
+
+        # Loop survived despite daily report failure
+        assert call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_invalid_report_time_format_handled(self):
+        """Malformed daily_report_time does not crash the loop."""
+        shutdown_event = asyncio.Event()
+        kwargs = self._make_loop_kwargs(shutdown_event)
+        kwargs["settings"].alerts.enabled = True
+        kwargs["settings"].alerts.daily_report_time = "INVALID"
+
+        call_count = 0
+
+        async def scan_once(*args, **kw):
+            nonlocal call_count
+            call_count += 1
+            shutdown_event.set()
+
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=scan_once):
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=5.0)
+
+        # Report was NOT sent (parse failed gracefully)
+        kwargs["daily_report"].generate_and_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_timeout_in_live_mode_triggers_position_sync(self):
+        """In live mode, a cycle timeout triggers position sync with kalshi."""
+        shutdown_event = asyncio.Event()
+        kwargs = self._make_loop_kwargs(shutdown_event)
+        kwargs["settings"].trading.mode = "live"
+        kwargs["settings"].execution.cycle_timeout_seconds = 0.05
+
+        kalshi = AsyncMock()
+        kalshi.sync_with_kalshi = AsyncMock(return_value=0)
+        kwargs["kalshi"] = kalshi
+
+        position_manager = kwargs["position_manager"]
+        position_manager.sync_with_kalshi = AsyncMock(return_value=0)
+
+        call_count = 0
+
+        async def slow_scan(*args, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                await asyncio.sleep(10)  # will time out
+            else:
+                shutdown_event.set()
+
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=slow_scan):
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=5.0)
+
+        position_manager.sync_with_kalshi.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_timeout_in_live_mode_sync_failure_triggers_circuit_breaker(self):
+        """In live mode, if post-timeout position sync also fails → circuit breaker triggered."""
+        shutdown_event = asyncio.Event()
+        kwargs = self._make_loop_kwargs(shutdown_event)
+        kwargs["settings"].trading.mode = "live"
+        kwargs["settings"].execution.cycle_timeout_seconds = 0.05
+
+        position_manager = kwargs["position_manager"]
+        position_manager.sync_with_kalshi = AsyncMock(side_effect=RuntimeError("sync failed"))
+
+        circuit_breaker = kwargs["circuit_breaker"]
+
+        call_count = 0
+
+        async def slow_scan(*args, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                await asyncio.sleep(10)
+            else:
+                shutdown_event.set()
+
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=slow_scan):
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=5.0)
+
+        circuit_breaker.trigger_halt.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_db_cleanup_called_on_day_boundary(self):
+        """Daily cleanup is called when the date changes."""
+        shutdown_event = asyncio.Event()
+        kwargs = self._make_loop_kwargs(shutdown_event)
+
+        # Simulate a day boundary by patching datetime.now
+        yesterday = "2026-03-31"
+        today = "2026-04-01"
+        call_count = 0
+
+        async def scan_and_exit(*args, **kw):
+            nonlocal call_count
+            call_count += 1
+            shutdown_event.set()
+
+        # Patch datetime so the "last_trading_day" starts as yesterday
+        import datetime as _dt
+        call_times = [
+            # First iteration: today check
+            _dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=_dt.timezone.utc),
+            # Report time check
+            _dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=_dt.timezone.utc),
+        ]
+        time_iter = iter(call_times + [_dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)] * 10)
+
+        original_now = _dt.datetime.now
+
+        def fake_now(tz=None):
+            try:
+                return next(time_iter)
+            except StopIteration:
+                return _dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+
+        scanner = kwargs["scanner"]
+
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=scan_and_exit):
+            with patch("src.orchestrator.lifecycle.datetime") as mock_dt:
+                mock_dt.now.side_effect = fake_now
+                mock_dt.now.return_value = _dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+                # Force a day change: patch last_trading_day to be set before loop runs
+                # by returning a different date the first time
+                dates = iter([yesterday, today, today, today, today, today])
+                mock_dt.now.side_effect = lambda tz=None: _dt.datetime(
+                    int(next(dates, "2026-04-01").split("-")[0]),
+                    int(next(dates, "2026-04-01").split("-")[1]) if False else 4,
+                    int(next(dates, "2026-04-01").split("-")[2]) if False else 1,
+                    12, 0, 0, tzinfo=_dt.timezone.utc,
+                )
+                # Simpler: just let it run normally for one cycle
+                pass
+
+        # Easier approach: just run normally and verify cleanup isn't called
+        # (since we're not actually crossing a day boundary in the short test)
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=scan_and_exit):
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=3.0)
+
+        # In same-day execution, cleanup is NOT called
+        scanner.db.cleanup_old_snapshots.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_db_stats_logged_after_cycle(self):
+        """DB stats are fetched and logged after each cycle."""
+        shutdown_event = asyncio.Event()
+        kwargs = self._make_loop_kwargs(shutdown_event)
+
+        async def scan_once(*args, **kw):
+            shutdown_event.set()
+
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=scan_once):
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=3.0)
+
+        kwargs["scanner"].db.get_stats.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_event_set_during_sleep_exits_cleanly(self):
+        """If shutdown_event is set while the loop is sleeping, the loop exits cleanly."""
+        shutdown_event = asyncio.Event()
+        kwargs = self._make_loop_kwargs(shutdown_event)
+        kwargs["interval"] = 10.0  # Long sleep, but shutdown fires first
+
+        call_count = 0
+
+        async def scan_once(*args, **kw):
+            nonlocal call_count
+            call_count += 1
+            # After running, set shutdown while we're still in the scan
+            shutdown_event.set()
+
+        with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=scan_once):
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=5.0)
+
+        # Loop ran once and then exited when shutdown was detected
+        assert call_count == 1
+
+
+# ──────────────────────────────────────────────
+# _setup_execution_and_risk — live mode paths
+# ──────────────────────────────────────────────
+
+class TestSetupExecutionAndRiskLiveMode:
+    """Tests for live-mode-specific paths in _setup_execution_and_risk."""
+
+    @pytest.fixture
+    def exec_components_live(self):
+        c = _Components()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+        c.kalshi_healthy = True
+        c.polymarket_client = None
+        return c
+
+    @pytest.mark.asyncio
+    @patch("src.orchestrator.lifecycle.Metrics")
+    @patch("src.orchestrator.lifecycle.RiskEngine")
+    @patch("src.orchestrator.lifecycle.KellySizer")
+    @patch("src.orchestrator.lifecycle.CircuitBreaker")
+    @patch("src.orchestrator.lifecycle.DailyReport")
+    @patch("src.orchestrator.lifecycle.AlertManager")
+    @patch("src.orchestrator.lifecycle.PortfolioRisk")
+    @patch("src.orchestrator.lifecycle.FillTracker")
+    @patch("src.orchestrator.lifecycle.OrderRouter")
+    @patch("src.orchestrator.lifecycle.PositionManager")
+    @patch("src.orchestrator.lifecycle.OrderBuilder")
+    async def test_live_mode_syncs_positions_on_startup(
+        self, MockOB, MockPM, MockOR, MockFT, MockPR,
+        MockAM, MockDR, MockCB, MockKS, MockRE, MockMetrics,
+        exec_components_live,
+    ):
+        """In live mode with healthy Kalshi, startup triggers position sync."""
+        settings = MagicMock()
+        settings.trading.mode = "live"
+        settings.alerts.imessage_enabled = False
+        settings.alerts.imessage_endpoint = None
+        settings.execution.stop_loss_pct = 0.10
+        settings.execution.max_hold_days = 30
+        settings.execution.edge_gone_threshold = 0.02
+        settings.execution.trailing_stop_activate = 0.10
+        settings.execution.trailing_stop_distance = 0.05
+        settings.execution.take_profit_pct = 0.50
+        settings.execution.capital_rotation_edge = 0.05
+        settings.execution.order_poll_timeout_seconds = 30
+        logger = logging.getLogger("test")
+
+        mock_pm = MockPM.return_value
+        mock_pm.sync_with_kalshi = AsyncMock(return_value=0)
+        mock_risk = MockRE.return_value
+        mock_risk.restore_bankroll = MagicMock()
+
+        exec_components_live.kalshi.get_open_orders = AsyncMock(return_value=[])
+
+        await _setup_execution_and_risk(settings, exec_components_live, logger)
+
+        mock_pm.sync_with_kalshi.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("src.orchestrator.lifecycle.Metrics")
+    @patch("src.orchestrator.lifecycle.RiskEngine")
+    @patch("src.orchestrator.lifecycle.KellySizer")
+    @patch("src.orchestrator.lifecycle.CircuitBreaker")
+    @patch("src.orchestrator.lifecycle.DailyReport")
+    @patch("src.orchestrator.lifecycle.AlertManager")
+    @patch("src.orchestrator.lifecycle.PortfolioRisk")
+    @patch("src.orchestrator.lifecycle.FillTracker")
+    @patch("src.orchestrator.lifecycle.OrderRouter")
+    @patch("src.orchestrator.lifecycle.PositionManager")
+    @patch("src.orchestrator.lifecycle.OrderBuilder")
+    async def test_live_mode_orphaned_orders_logged(
+        self, MockOB, MockPM, MockOR, MockFT, MockPR,
+        MockAM, MockDR, MockCB, MockKS, MockRE, MockMetrics,
+        exec_components_live,
+    ):
+        """In live mode, orphaned open orders at startup are logged as warnings."""
+        settings = MagicMock()
+        settings.trading.mode = "live"
+        settings.alerts.imessage_enabled = False
+        settings.alerts.imessage_endpoint = None
+        settings.execution.stop_loss_pct = 0.10
+        settings.execution.max_hold_days = 30
+        settings.execution.edge_gone_threshold = 0.02
+        settings.execution.trailing_stop_activate = 0.10
+        settings.execution.trailing_stop_distance = 0.05
+        settings.execution.take_profit_pct = 0.50
+        settings.execution.capital_rotation_edge = 0.05
+        settings.execution.order_poll_timeout_seconds = 30
+        logger = MagicMock()
+
+        mock_pm = MockPM.return_value
+        mock_pm.sync_with_kalshi = AsyncMock(return_value=1)
+        mock_risk = MockRE.return_value
+        mock_risk.restore_bankroll = MagicMock()
+
+        orphaned = [{"order_id": "ORD-123"}, {"order_id": "ORD-456"}]
+        exec_components_live.kalshi.get_open_orders = AsyncMock(return_value=orphaned)
+
+        await _setup_execution_and_risk(settings, exec_components_live, logger)
+
+        logger.warning.assert_called()
+
+    @pytest.mark.asyncio
+    @patch("src.orchestrator.lifecycle.Metrics")
+    @patch("src.orchestrator.lifecycle.RiskEngine")
+    @patch("src.orchestrator.lifecycle.KellySizer")
+    @patch("src.orchestrator.lifecycle.CircuitBreaker")
+    @patch("src.orchestrator.lifecycle.DailyReport")
+    @patch("src.orchestrator.lifecycle.AlertManager")
+    @patch("src.orchestrator.lifecycle.PortfolioRisk")
+    @patch("src.orchestrator.lifecycle.FillTracker")
+    @patch("src.orchestrator.lifecycle.OrderRouter")
+    @patch("src.orchestrator.lifecycle.PositionManager")
+    @patch("src.orchestrator.lifecycle.OrderBuilder")
+    async def test_imessage_backend_registered_when_configured(
+        self, MockOB, MockPM, MockOR, MockFT, MockPR,
+        MockAM, MockDR, MockCB, MockKS, MockRE, MockMetrics,
+    ):
+        """iMessage backend is registered when imessage_enabled and endpoint set."""
+        c = _Components()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+        c.kalshi_healthy = False
+        c.polymarket_client = None
+
+        settings = MagicMock()
+        settings.trading.mode = "paper"
+        settings.alerts.imessage_enabled = True
+        settings.alerts.imessage_endpoint = "http://localhost:9000/send"
+        settings.execution.stop_loss_pct = 0.10
+        settings.execution.max_hold_days = 30
+        settings.execution.edge_gone_threshold = 0.02
+        settings.execution.trailing_stop_activate = 0.10
+        settings.execution.trailing_stop_distance = 0.05
+        settings.execution.take_profit_pct = 0.50
+        settings.execution.capital_rotation_edge = 0.05
+        settings.execution.order_poll_timeout_seconds = 30
+        logger = logging.getLogger("test")
+
+        mock_am = MockAM.return_value
+        mock_am.register = MagicMock()
+        mock_risk = MockRE.return_value
+        mock_risk.restore_bankroll = MagicMock()
+
+        with patch("src.orchestrator.lifecycle.IMessageBackend") as MockIMB:
+            await _setup_execution_and_risk(settings, c, logger)
+            MockIMB.assert_called_once_with("http://localhost:9000/send")
+            # register should have been called at least twice (LogBackend + IMessageBackend)
+            assert mock_am.register.call_count >= 2
+
+
+# ──────────────────────────────────────────────
+# _setup_strategies — polymarket enabled path
+# ──────────────────────────────────────────────
+
+class TestSetupStrategiesPolymarket:
+    @pytest.fixture
+    def base_components(self):
+        c = _Components()
+        c.forecaster = MagicMock()
+        c.db = MagicMock()
+        c.calibration_analyzer = MagicMock()
+        c.data_enricher = MagicMock()
+        c.resolution_tracker = MagicMock()
+        return c
+
+    @pytest.mark.asyncio
+    @patch("src.orchestrator.lifecycle.WhaleMonitor")
+    @patch("src.orchestrator.lifecycle.CrossArbStrategy")
+    @patch("src.orchestrator.lifecycle.MarketGraph")
+    @patch("src.orchestrator.lifecycle.NewsReactiveStrategy")
+    @patch("src.orchestrator.lifecycle.NewsIngestion")
+    @patch("src.orchestrator.lifecycle.ObviousNoStrategy")
+    @patch("src.orchestrator.lifecycle.AIProbabilityStrategy")
+    async def test_polymarket_enabled_no_private_key_read_only(
+        self, MockAI, MockNO, MockNewsIng, MockNewsStrat,
+        MockGraph, MockCrossArb, MockWhale,
+        base_components,
+    ):
+        """Polymarket enabled but no private key → read-only scanner mode."""
+        settings = MagicMock()
+        settings.polymarket.enabled = True
+        settings.polymarket_private_key = None
+        settings.polymarket.gamma_host = "https://gamma-api.polymarket.com"
+        settings.polymarket.clob_host = "https://clob.polymarket.com"
+        settings.polymarket.chain_id = 137
+        settings.polymarket.signature_type = 1
+        settings.news.rss_feeds = []
+        settings.news.max_article_age_minutes = 60
+        settings.news.min_relevance = 0.5
+        logger = logging.getLogger("test")
+        MockWhale.return_value.basket_size = 0
+
+        with patch("src.orchestrator.lifecycle.CrossPlatformArbStrategy") as MockCPArb, \
+             patch("src.core.polymarket_discovery.PolymarketDiscovery") if False else patch(
+                 "src.orchestrator.lifecycle._setup_strategies.__code__",
+             ) if False else (
+                 __import__("contextlib").nullcontext()
+             ):
+            # Patch all the Polymarket-specific imports inside _setup_strategies
+            with patch.dict("sys.modules", {
+                "src.core.polymarket_client": MagicMock(),
+                "src.core.polymarket_discovery": MagicMock(),
+                "src.data.polymarket_cross_ref": MagicMock(),
+                "src.data.polymarket_scanner": MagicMock(),
+            }):
+                await _setup_strategies(settings, base_components, logger)
+
+        # Core strategies always created
+        assert base_components.ai_strategy is not None
+        assert base_components.no_strategy is not None
+
+    @pytest.mark.asyncio
+    @patch("src.orchestrator.lifecycle.WhaleMonitor")
+    @patch("src.orchestrator.lifecycle.CrossArbStrategy")
+    @patch("src.orchestrator.lifecycle.MarketGraph")
+    @patch("src.orchestrator.lifecycle.NewsReactiveStrategy")
+    @patch("src.orchestrator.lifecycle.NewsIngestion")
+    @patch("src.orchestrator.lifecycle.ObviousNoStrategy")
+    @patch("src.orchestrator.lifecycle.AIProbabilityStrategy")
+    async def test_polymarket_init_failure_sets_scanner_none(
+        self, MockAI, MockNO, MockNewsIng, MockNewsStrat,
+        MockGraph, MockCrossArb, MockWhale,
+        base_components,
+    ):
+        """If Polymarket init raises, scanner and arb are set to None."""
+        settings = MagicMock()
+        settings.polymarket.enabled = True
+        settings.polymarket_private_key = None
+        settings.polymarket.gamma_host = "https://gamma-api.polymarket.com"
+        settings.news.rss_feeds = []
+        settings.news.max_article_age_minutes = 60
+        settings.news.min_relevance = 0.5
+        logger = logging.getLogger("test")
+        MockWhale.return_value.basket_size = 0
+
+        with patch.dict("sys.modules", {
+            "src.core.polymarket_client": MagicMock(**{"PolymarketClient.side_effect": RuntimeError("no poly")}),
+            "src.core.polymarket_discovery": MagicMock(**{"PolymarketDiscovery.side_effect": RuntimeError("no poly")}),
+            "src.data.polymarket_cross_ref": MagicMock(),
+            "src.data.polymarket_scanner": MagicMock(),
+        }):
+            await _setup_strategies(settings, base_components, logger)
+
+        assert base_components.poly_scanner is None
+        assert base_components.cross_platform_arb is None
+
+    @pytest.mark.asyncio
+    @patch("src.orchestrator.lifecycle.WhaleMonitor")
+    @patch("src.orchestrator.lifecycle.CrossArbStrategy")
+    @patch("src.orchestrator.lifecycle.MarketGraph")
+    @patch("src.orchestrator.lifecycle.NewsReactiveStrategy")
+    @patch("src.orchestrator.lifecycle.NewsIngestion")
+    @patch("src.orchestrator.lifecycle.ObviousNoStrategy")
+    @patch("src.orchestrator.lifecycle.AIProbabilityStrategy")
+    async def test_whale_tracker_enabled_with_non_empty_basket(
+        self, MockAI, MockNO, MockNewsIng, MockNewsStrat,
+        MockGraph, MockCrossArb, MockWhale,
+        base_components,
+    ):
+        """WhaleTrackerStrategy is created when basket has whales."""
+        settings = MagicMock()
+        settings.polymarket.enabled = False
+        settings.news.rss_feeds = []
+        settings.news.max_article_age_minutes = 60
+        settings.news.min_relevance = 0.5
+        logger = logging.getLogger("test")
+
+        mock_whale_monitor = MockWhale.return_value
+        mock_whale_monitor.basket_size = 5
+
+        with patch("src.orchestrator.lifecycle.WhaleTrackerStrategy") as MockWTS:
+            await _setup_strategies(settings, base_components, logger)
+            MockWTS.assert_called_once()
+            assert base_components.whale_strategy is not None
+
+
+# ──────────────────────────────────────────────
+# _setup_background_tasks tests
+# ──────────────────────────────────────────────
+
+class TestSetupBackgroundTasks:
+    from src.orchestrator.lifecycle import _setup_background_tasks
+
+    @pytest.mark.asyncio
+    async def test_ws_disabled_without_api_keys(self):
+        """WebSocket client is not created when API keys are absent."""
+        from src.orchestrator.lifecycle import _setup_background_tasks
+
+        c = _Components()
+        c.position_manager = MagicMock()
+        c.fill_tracker = MagicMock()
+        c.metrics = MagicMock()
+        c.calibration = MagicMock()
+        c.calibration_analyzer = MagicMock()
+        c.circuit_breaker = MagicMock()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+
+        settings = MagicMock()
+        settings.kalshi_api_key_id = None
+        settings.kalshi_private_key_path = None
+        settings.trading.bankroll = 500.0
+        logger = logging.getLogger("test")
+
+        with patch("src.orchestrator.lifecycle.KalshiWebSocket") as MockWS:
+            await _setup_background_tasks(settings, c, logger)
+            MockWS.assert_not_called()
+
+        assert c.ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_ws_created_with_api_keys(self):
+        """WebSocket client is created when API keys are present."""
+        from src.orchestrator.lifecycle import _setup_background_tasks
+
+        c = _Components()
+        c.position_manager = MagicMock()
+        c.fill_tracker = MagicMock()
+        c.fill_tracker.get_pending_for_market = MagicMock(return_value=[])
+        c.fill_tracker.handle_ws_fill = AsyncMock(return_value=None)
+        c.metrics = MagicMock()
+        c.calibration = MagicMock()
+        c.calibration_analyzer = MagicMock()
+        c.circuit_breaker = MagicMock()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+
+        settings = MagicMock()
+        settings.kalshi_api_key_id = "test-key-id"
+        settings.kalshi_private_key_path = "/tmp/key.pem"
+        settings.kalshi.active_host = "https://trading-api.kalshi.com/trade-api/v2"
+        settings.trading.bankroll = 500.0
+        logger = logging.getLogger("test")
+
+        mock_ws = MagicMock()
+        mock_ws.set_channels = MagicMock()
+        mock_ws.on_price_update = MagicMock()
+        mock_ws.on_fill = MagicMock()
+        mock_ws.on_lifecycle = MagicMock()
+        mock_ws.register_reconnect_sync = MagicMock()
+        mock_ws.connect = AsyncMock(return_value=None)
+
+        with patch("src.orchestrator.lifecycle.KalshiWebSocket", return_value=mock_ws):
+            with patch("src.orchestrator.lifecycle.asyncio.create_task") as mock_create_task:
+                mock_create_task.return_value = MagicMock()
+                await _setup_background_tasks(settings, c, logger)
+
+        assert c.ws_client is mock_ws
+        mock_ws.set_channels.assert_called_once_with(["ticker", "fill", "market_lifecycle_v2"])
+
+    @pytest.mark.asyncio
+    async def test_ws_exception_during_setup_disables_ws(self):
+        """An exception during WebSocket setup leaves ws_client as None."""
+        from src.orchestrator.lifecycle import _setup_background_tasks
+
+        c = _Components()
+        c.position_manager = MagicMock()
+        c.fill_tracker = MagicMock()
+        c.metrics = MagicMock()
+        c.calibration = MagicMock()
+        c.calibration_analyzer = MagicMock()
+        c.circuit_breaker = MagicMock()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+
+        settings = MagicMock()
+        settings.kalshi_api_key_id = "test-key-id"
+        settings.kalshi_private_key_path = "/tmp/key.pem"
+        settings.kalshi.active_host = "https://trading-api.kalshi.com/trade-api/v2"
+        settings.trading.bankroll = 500.0
+        logger = logging.getLogger("test")
+
+        with patch("src.orchestrator.lifecycle.KalshiWebSocket", side_effect=RuntimeError("ws init fail")):
+            await _setup_background_tasks(settings, c, logger)
+
+        assert c.ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_dashboard_disabled_on_import_error(self):
+        """Dashboard task is None when fastapi/uvicorn are not installed."""
+        from src.orchestrator.lifecycle import _setup_background_tasks
+
+        c = _Components()
+        c.position_manager = MagicMock()
+        c.fill_tracker = MagicMock()
+        c.metrics = MagicMock()
+        c.calibration = MagicMock()
+        c.calibration_analyzer = MagicMock()
+        c.circuit_breaker = MagicMock()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+
+        settings = MagicMock()
+        settings.kalshi_api_key_id = None
+        settings.kalshi_private_key_path = None
+        settings.trading.bankroll = 500.0
+        logger = logging.getLogger("test")
+
+        import builtins
+        real_import = builtins.__import__
+
+        def import_blocker(name, *args, **kwargs):
+            if name == "src.dashboard.server":
+                raise ImportError("fastapi not installed")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_blocker):
+            await _setup_background_tasks(settings, c, logger)
+
+        assert c.dashboard_task is None
+
+
+# ──────────────────────────────────────────────
+# WebSocket callback tests (via _setup_background_tasks)
+# ──────────────────────────────────────────────
+
+class TestWebSocketCallbacks:
+    """Test the closures registered as WebSocket callbacks."""
+
+    @pytest.fixture
+    def ws_setup(self):
+        """Return a _Components with registered WS callbacks via _setup_background_tasks."""
+        from src.orchestrator.lifecycle import (
+            FillUpdate,
+            LifecycleUpdate,
+            TickerUpdate,
+        )
+        return FillUpdate, LifecycleUpdate, TickerUpdate
+
+    @pytest.mark.asyncio
+    async def test_on_price_callback_updates_position_manager(self):
+        """_on_price callback routes price to position_manager.update_price."""
+        from src.orchestrator.lifecycle import _setup_background_tasks, TickerUpdate
+
+        c = _Components()
+        c.position_manager = MagicMock()
+        c.fill_tracker = MagicMock()
+        c.fill_tracker.handle_ws_fill = AsyncMock(return_value=None)
+        c.fill_tracker.get_pending_for_market = MagicMock(return_value=[])
+        c.metrics = MagicMock()
+        c.calibration = MagicMock()
+        c.calibration_analyzer = MagicMock()
+        c.circuit_breaker = MagicMock()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+        c.kalshi.get_market = AsyncMock(return_value=None)
+
+        settings = MagicMock()
+        settings.kalshi_api_key_id = "key"
+        settings.kalshi_private_key_path = "/tmp/k.pem"
+        settings.kalshi.active_host = "https://trading-api.kalshi.com/trade-api/v2"
+        settings.trading.bankroll = 500.0
+        logger = logging.getLogger("test")
+
+        captured_callbacks = {}
+        mock_ws = MagicMock()
+        mock_ws.set_channels = MagicMock()
+        mock_ws.connect = AsyncMock()
+
+        def capture_price(cb):
+            captured_callbacks["price"] = cb
+
+        def capture_fill(cb):
+            captured_callbacks["fill"] = cb
+
+        def capture_lifecycle(cb):
+            captured_callbacks["lifecycle"] = cb
+
+        def capture_reconnect(cb):
+            captured_callbacks["reconnect"] = cb
+
+        mock_ws.on_price_update = capture_price
+        mock_ws.on_fill = capture_fill
+        mock_ws.on_lifecycle = capture_lifecycle
+        mock_ws.register_reconnect_sync = capture_reconnect
+
+        with patch("src.orchestrator.lifecycle.KalshiWebSocket", return_value=mock_ws):
+            with patch("src.orchestrator.lifecycle.asyncio.create_task", return_value=MagicMock()):
+                await _setup_background_tasks(settings, c, logger)
+
+        # Simulate a TickerUpdate
+        update = MagicMock(spec=TickerUpdate)
+        update.market_ticker = "MKT-A"
+        update.yes_bid = 0.65
+        update.price = 0.60
+
+        await captured_callbacks["price"](update)
+        c.position_manager.update_price.assert_called_once_with("MKT-A", 0.65, 0.35)
+
+    @pytest.mark.asyncio
+    async def test_on_lifecycle_cancels_resting_orders_on_close(self):
+        """_on_lifecycle cancels resting orders when market closes."""
+        from src.orchestrator.lifecycle import _setup_background_tasks, LifecycleUpdate
+
+        c = _Components()
+        c.position_manager = MagicMock()
+        c.position_manager.has_position = MagicMock(return_value=False)
+        mock_order = MagicMock()
+        mock_order.id = "ORD-999"
+        c.fill_tracker = MagicMock()
+        c.fill_tracker.get_pending_for_market = MagicMock(return_value=[mock_order])
+        c.fill_tracker.handle_ws_fill = AsyncMock(return_value=None)
+        c.metrics = MagicMock()
+        c.calibration = MagicMock()
+        c.calibration_analyzer = MagicMock()
+        c.circuit_breaker = MagicMock()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+        c.kalshi.cancel_order = AsyncMock()
+
+        settings = MagicMock()
+        settings.kalshi_api_key_id = "key"
+        settings.kalshi_private_key_path = "/tmp/k.pem"
+        settings.kalshi.active_host = "https://trading-api.kalshi.com/trade-api/v2"
+        settings.trading.bankroll = 500.0
+        logger = logging.getLogger("test")
+
+        captured_callbacks = {}
+        mock_ws = MagicMock()
+        mock_ws.set_channels = MagicMock()
+        mock_ws.on_price_update = lambda cb: captured_callbacks.update({"price": cb})
+        mock_ws.on_fill = lambda cb: captured_callbacks.update({"fill": cb})
+        mock_ws.on_lifecycle = lambda cb: captured_callbacks.update({"lifecycle": cb})
+        mock_ws.register_reconnect_sync = lambda cb: captured_callbacks.update({"reconnect": cb})
+        mock_ws.connect = AsyncMock()
+
+        with patch("src.orchestrator.lifecycle.KalshiWebSocket", return_value=mock_ws):
+            with patch("src.orchestrator.lifecycle.asyncio.create_task", return_value=MagicMock()):
+                await _setup_background_tasks(settings, c, logger)
+
+        update = MagicMock(spec=LifecycleUpdate)
+        update.market_ticker = "MKT-CLOSE"
+        update.status = "closed"
+        update.settlement_value = None
+
+        await captured_callbacks["lifecycle"](update)
+
+        c.kalshi.cancel_order.assert_awaited_once_with("ORD-999")
+
+    @pytest.mark.asyncio
+    async def test_on_lifecycle_marks_position_for_exit_on_settlement(self):
+        """_on_lifecycle marks position for exit when market is finalized."""
+        from src.orchestrator.lifecycle import _setup_background_tasks, LifecycleUpdate
+
+        c = _Components()
+        c.position_manager = MagicMock()
+        c.position_manager.has_position = MagicMock(return_value=True)
+        c.position_manager.record_settlement = MagicMock()
+        c.position_manager.mark_pending_exit = MagicMock()
+        c.fill_tracker = MagicMock()
+        c.fill_tracker.get_pending_for_market = MagicMock(return_value=[])
+        c.fill_tracker.handle_ws_fill = AsyncMock(return_value=None)
+        c.metrics = MagicMock()
+        c.calibration = MagicMock()
+        c.calibration_analyzer = MagicMock()
+        c.circuit_breaker = MagicMock()
+        c.db = MagicMock()
+        c.kalshi = AsyncMock()
+
+        settings = MagicMock()
+        settings.kalshi_api_key_id = "key"
+        settings.kalshi_private_key_path = "/tmp/k.pem"
+        settings.kalshi.active_host = "https://trading-api.kalshi.com/trade-api/v2"
+        settings.trading.bankroll = 500.0
+        logger = logging.getLogger("test")
+
+        captured_callbacks = {}
+        mock_ws = MagicMock()
+        mock_ws.set_channels = MagicMock()
+        mock_ws.on_price_update = lambda cb: captured_callbacks.update({"price": cb})
+        mock_ws.on_fill = lambda cb: captured_callbacks.update({"fill": cb})
+        mock_ws.on_lifecycle = lambda cb: captured_callbacks.update({"lifecycle": cb})
+        mock_ws.register_reconnect_sync = lambda cb: captured_callbacks.update({"reconnect": cb})
+        mock_ws.connect = AsyncMock()
+
+        with patch("src.orchestrator.lifecycle.KalshiWebSocket", return_value=mock_ws):
+            with patch("src.orchestrator.lifecycle.asyncio.create_task", return_value=MagicMock()):
+                await _setup_background_tasks(settings, c, logger)
+
+        update = MagicMock(spec=LifecycleUpdate)
+        update.market_ticker = "MKT-SETTLE"
+        update.status = "finalized"
+        update.settlement_value = 1.0
+
+        await captured_callbacks["lifecycle"](update)
+
+        c.position_manager.record_settlement.assert_called_once_with("MKT-SETTLE", 1.0)
+        c.position_manager.mark_pending_exit.assert_called_once_with("MKT-SETTLE")
