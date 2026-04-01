@@ -103,3 +103,56 @@
 - 1486 passed, 1 skipped, 0 failed
 
 ---
+
+## Final Summary — 2026-04-01
+
+### Test Count: Before vs After
+- **Before**: 1469 passed, 1 failed, 1 skipped
+- **After**: 1485 passed, 0 failed (test-only), 1 skipped, 1 flaky (pre-existing)
+- **New tests added**: 16 (Platt calibrator: 8, Extremize: 7, Escalating cooldown: 1)
+- **Fixed**: test_confidence_gate_boundary (was using wrong CI width for category)
+
+### Backtest: Before vs After
+| Metric | Before (0.50 Kelly) | After (0.25 Kelly) |
+|--------|--------------------|--------------------|
+| Trades | 0 (CB broken) | 4 |
+| P&L | N/A | -$30.14 |
+| Max Drawdown | N/A | 7.8% |
+| Win Rate | N/A | 50% |
+
+(Note: backtest was completely broken before — circuit breaker loaded stale state and blocked all trades)
+
+### All Changes Made
+1. **Circuit breaker reset()**: Accepts optional bankroll to reset high water mark (fixes backtest)
+2. **Kelly fraction**: 0.50 → 0.25 (quarter-Kelly), with dynamic 0.15-0.30 scaling
+3. **Daily loss limit**: 15% → 8%, with escalating 5% warning level
+4. **Cheap contract filter**: Reject buying contracts under 12¢
+5. **Uncertain zone**: 30-70% markets require 50% higher edge (7.5%)
+6. **Ensemble extremization**: 15% log-odds push away from 50%
+7. **Platt scaling**: Post-hoc calibration from historical data (activates at 50+ records)
+8. **Prompt enhancement**: Granularity + overconfidence check instructions
+9. **Position manager**: Snapshot dict before iteration (race condition fix)
+10. **TTLCache**: Auto-cleanup at 500+ entries
+11. **Database**: Added get_resolved_calibration_records() method
+
+### Recommendations for Future Sessions
+1. **Need more data**: Only 13 calibration records and 22 trades — too little for meaningful backtesting. Run paper trading for 2+ weeks to accumulate data.
+2. **Platt scaling won't activate yet**: Needs 50 resolved predictions. Will auto-activate once enough data exists.
+3. **Consider raising min_edge**: Sweep shows 0.10-0.15 min edge is more profitable than 0.05, but small sample. Monitor with more data.
+4. **Flaky integration test**: `test_exit_logic_in_trading_loop` passes alone but fails intermittently in full suite — likely test isolation issue. Low priority.
+5. **Token budget**: Claude API usage at 1.7M tokens/day exceeds 1M soft limit. Consider reducing max_assessments_per_cycle further or increasing staleness cache TTL.
+6. **News researcher date parsing**: ISO 8601 dates failing to parse — cosmetic but worth fixing.
+7. **New strategies** (not implemented this session):
+   - Order book imbalance signal (infrastructure exists, needs analyzer)
+   - Mean reversion on sharp moves
+   - Late-resolution edge
+8. **Category auto-gating**: Already implemented. Will be more effective once Brier scores exist per category (need more resolved predictions).
+
+### Commits
+```
+887c9c7 Section 3 continued: Platt calibration integration, prompt enhancement
+2aba59b Section 5: Bug sweep — race conditions, memory safety, iteration guards
+7ea4ba9 Section 3: Prediction accuracy — extremization, Platt scaling, category gating
+573345c Section 2: Critical parameter fixes — Kelly, loss limits, cheap contracts
+46a8393 Fix backtest circuit breaker and test_confidence_gate_boundary
+```
