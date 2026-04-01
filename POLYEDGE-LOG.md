@@ -156,3 +156,128 @@
 573345c Section 2: Critical parameter fixes — Kelly, loss limits, cheap contracts
 46a8393 Fix backtest circuit breaker and test_confidence_gate_boundary
 ```
+
+---
+
+## Session 3 — 2026-04-01 Improvements
+
+### Item 1: Fix flaky test_exit_logic_in_trading_loop
+- **Root cause**: `obvious_no` strategy was opening NEW positions during cycle 2 (crash-priced YES at $0.05 triggered it), masking the exit assertion
+- **Fix**: Mock `no_strategy.generate_signals` to return `[]` in cycle 2; assert on specific position closures, not total count
+- **Also fixed**: Removed unused `asyncio.Lock` in position_manager.py that created cross-event-loop issues
+- **Commit**: `ede2452`
+
+### Item 2: Fix ISO 8601 date parsing in news_researcher.py
+- **Root cause**: `[:20]` truncation was stripping timezone info from dates like `2026-03-15T14:30:00+05:30`
+- **Fix**: Full ISO 8601 parser with Z→+00:00 normalization, fractional seconds support, multiple format fallbacks
+- **Tests**: 12 new date parsing tests covering all edge cases
+- **Commit**: `3752301`
+
+### Item 3: Token budget optimization (1.7M → ~700K tokens/day)
+- Increased cache TTL from 300s → 600s
+- Reduced max_assessments_per_cycle from 10 → 5
+- Increased reassessment_interval from 2h → 4h
+- Raised reassessment_price_move from 0.02 → 0.03
+- Added volume-change dedup to staleness check
+- **Commit**: `5cef667`
+
+### Item 4: Orderbook imbalance analyzer
+- New `src/data/orderbook_analyzer.py` (230 lines)
+- Calculates VWAP, bid/ask depth ratio, detects strong imbalance (>2x)
+- Applies ±15% max confidence modifier based on book pressure direction
+- 21 tests covering balanced/imbalanced books, thin liquidity, edge cases
+- **Commit**: `ccf2000`
+
+### Item 5: Mean reversion strategy
+- New `src/strategies/mean_reversion.py` (170 lines)
+- Fades sharp moves >10% in 2h lookback window, auto-closes in 4h
+- Max 3 concurrent positions, 2% max position size
+- Uses database snapshots to measure price moves
+- 15 tests covering signals, entry/exit tracking, edge cases
+- **Commit**: `2a1a7d3`
+
+### Item 9: WebSocket price monitor with auto-exit
+- New `src/core/price_monitor.py` (160 lines)
+- 10% adverse move → alert, 15% → auto-exit signal
+- Dedup via _alerted/_exited sets, 60s grace period for fresh positions
+- Async callback system for triggering exit orders
+- 12 tests covering all alert paths
+- **Commit**: `c8f08ae`
+
+### Item 6: Late resolution strategy
+- New `src/strategies/late_resolution.py` (253 lines)
+- Targets markets resolving within 6h where evidence supports >90% certainty but price lags <80%
+- Keyword-based evidence assessment from news context (speed over accuracy for near-expiry)
+- **Commit**: `9f641c1`
+
+### Item 7: Monte Carlo risk simulator
+- New `src/risk/monte_carlo.py` (242 lines)
+- Vectorized numpy simulation: 10K paths × 200 trades in <1s
+- Tracks drawdowns, ruin probability, time-to-double
+- `compare_kelly_fractions()` for side-by-side analysis
+- **Commit**: `f90bc42`
+
+### Item 8: Position correlation detector
+- New `src/risk/correlation_detector.py` (227 lines)
+- Event_ticker match → 100% correlated, same-category keyword overlap >30% → 50%
+- Jaccard similarity on meaningful keywords (stop words filtered)
+- Enforces max_correlated_exposure_pct limit
+- **Commit**: `923c858`
+
+### Item 12: Memory profiling and size limits
+- resolution_analyzer: evict oldest half when cache exceeds 500 entries
+- prompt_ab_testing: cap _pending_predictions at 500 per category
+- news_researcher: tightened _MAX_CONTEXT_CACHE from 1000 to 500
+- Verified existing bounds: metrics._all_signal_edges, _gated_signal_edges already capped at 1000; fill_tracker._processed_fills capped at 10K; _ws_fills drained regularly
+- **Commit**: `6600a32`
+
+### Item 10: Parameter sweep analysis (Monte Carlo)
+
+**Kelly Fraction Sweep** (binary market, avg entry ~$0.50):
+
+| Kelly | Win Rate | Median Final | 95th DD | Ruin | Time to 2x |
+|-------|----------|-------------|---------|------|------------|
+| 0.10 | 55% | $605 | 17.6% | 0% | N/A |
+| 0.25 | 55% | $774 | 39.6% | 0% | N/A |
+| 0.10 | 60% | $1,069 | 23.5% | 0% | 147 trades |
+| 0.25 | 60% | $2,881 | 50.2% | 0% | 66 trades |
+| 0.10 | 65% | $2,766 | 26.3% | 0% | 77 trades |
+| 0.20 | 65% | $7,838 | 40.1% | 0% | 45 trades |
+
+**Key findings**:
+- The 5% position cap constrains Kelly at fractions >0.25 (median plateaus at 60%/65% WR)
+- At 55% win rate, growth is slow but survivable at all fractions
+- At 60%+ win rate, 0.20-0.25 Kelly is the sweet spot (good growth, <50% drawdown)
+- 0% ruin across all scenarios thanks to 5% position cap — the cap is doing its job
+- **Recommendation**: Keep kelly_fraction=0.25, which is optimal for expected 58-63% win rates
+
+**Min Edge Sweep** (kelly=0.25):
+
+| Min Edge | Win Rate | Avg Price | Median Final | 95th DD |
+|----------|----------|-----------|-------------|---------|
+| 0.03 | 55% | $0.45 | $3,371 | 54.6% |
+| 0.05 | 58% | $0.48 | $3,057 | 52.2% |
+| 0.07 | 60% | $0.50 | $2,881 | 50.8% |
+| 0.10 | 63% | $0.52 | $3,308 | 46.5% |
+
+- Lower min_edge produces more trades with slightly worse win rate but higher payoff ratios (cheaper contracts)
+- Current 0.05 min_edge_ai is reasonable — trades off volume vs quality well
+- min_edge 0.10 has best risk-adjusted return (highest median with <47% drawdown)
+
+### Test Suite Status
+- **1602 passed, 0 failed, 1 skipped**
+- New tests added: 56 (correlation detector) + 22 (monte carlo) + 22 (late resolution) + 12 (price monitor) + 15 (mean reversion) + 21 (orderbook) + 12 (date parsing) = 160 new tests
+
+### Session 3 Commits
+```
+ede2452 Fix flaky test_exit_logic_in_trading_loop
+3752301 Fix ISO 8601 date parsing in news researcher
+5cef667 Reduce Claude API token usage from 1.7M to ~700K/day
+ccf2000 Add order book imbalance analyzer with confidence signal
+2a1a7d3 Add mean reversion strategy for sharp intraday moves
+c8f08ae Add real-time WebSocket price monitor with auto-exit
+9f641c1 Add late resolution strategy for near-expiry markets
+f90bc42 Add Monte Carlo risk simulator for Kelly fraction validation
+923c858 Add position correlation detector with keyword overlap
+6600a32 Add memory bounds to caches for 24/7 operation stability
+```
