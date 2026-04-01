@@ -491,7 +491,7 @@ class TestConfidenceAdjustment:
         adjusted = sizer.calculate_position_size(
             edge=0.10, probability=0.50, bankroll=500.0, confidence=0.9,
         )
-        # 0.2 + 0.8*0.9 = 0.92x — should be close to base
+        # 0.9^1.5 ≈ 0.85x — should be close to base
         assert adjusted > 0
         assert adjusted <= base
 
@@ -504,7 +504,7 @@ class TestConfidenceAdjustment:
         adjusted = sizer.calculate_position_size(
             edge=0.06, probability=0.50, bankroll=500.0, confidence=0.5,
         )
-        # 0.2 + 0.8*0.5 = 0.60x — should be noticeably smaller
+        # 0.5^1.5 ≈ 0.35x — should be noticeably smaller
         assert adjusted > 0
         assert adjusted < base
 
@@ -516,7 +516,7 @@ class TestConfidenceAdjustment:
         adjusted = sizer.calculate_position_size(
             edge=0.10, probability=0.50, bankroll=500.0, confidence=0.1,
         )
-        # 0.2 + 0.8*0.1 = 0.28x — much smaller
+        # 0.1^1.5 ≈ 0.03x — much smaller (floored at 0.2)
         assert adjusted < base
 
     def test_none_confidence_no_adjustment(self, sizer):

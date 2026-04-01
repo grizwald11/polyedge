@@ -164,10 +164,16 @@ class MarketScanner:
             if has_target_cat:
                 score += 10
 
-            # Price extremity score (extreme prices have more mispricing potential, 0-10)
+            # Price extremity score (extreme prices have more mispricing potential, 0-20)
+            # Markets at <10% or >90% are where the biggest relative mispricings
+            # occur — a $0.05 market moving to $0.08 is a 60% return, while a
+            # $0.50 market moving to $0.53 is only 6%. Previous scoring (max 10)
+            # under-weighted these opportunities vs volume.
             mid_price = m.yes_price
-            if mid_price < 0.15 or mid_price > 0.85:
-                score += 10  # Extreme prices: small absolute errors = large relative edge
+            if mid_price < 0.10 or mid_price > 0.90:
+                score += 20  # Very extreme: highest mispricing potential
+            elif mid_price < 0.15 or mid_price > 0.85:
+                score += 12  # Extreme
             elif mid_price < 0.30 or mid_price > 0.70:
                 score += 5  # Moderate extremity
 

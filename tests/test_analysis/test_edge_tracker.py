@@ -79,16 +79,16 @@ class TestEdgeShrinkage:
             tracker.record_resolution(f"MKT-{i}", actual_outcome=(i % 2 == 0))
         shrinkage = tracker.compute_edge_shrinkage()
         # avg_predicted = 0.20, avg_realized ≈ (0.55*12 - 0.45*13)/25 ≈ -0.003
-        # ratio ≈ negative, clamped to 0.3
+        # ratio ≈ negative, clamped to 0.5
         assert shrinkage <= 1.0
 
     def test_shrinkage_clamped(self, tracker):
-        """Shrinkage should be clamped to [0.3, 1.5]."""
+        """Shrinkage should be clamped to [0.5, 1.5]."""
         for i in range(25):
             tracker.record_predicted_edge(f"MKT-{i}", 0.50, 0.45, "BUY_YES")
             tracker.record_resolution(f"MKT-{i}", actual_outcome=False)
         shrinkage = tracker.compute_edge_shrinkage()
-        assert shrinkage >= 0.3
+        assert shrinkage >= 0.5
 
     def test_category_filter(self, tracker):
         for i in range(25):
@@ -97,7 +97,7 @@ class TestEdgeShrinkage:
             )
             tracker.record_resolution(f"POL-{i}", actual_outcome=True)
         shrinkage = tracker.compute_edge_shrinkage(category="Politics")
-        assert shrinkage > 0.3
+        assert shrinkage > 0.5
 
 
 class TestEdgeMultiplier:

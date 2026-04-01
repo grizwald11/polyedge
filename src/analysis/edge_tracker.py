@@ -144,7 +144,7 @@ class EdgeTracker:
         """Compute ratio of realized edge / predicted edge.
 
         Returns:
-            Shrinkage ratio clamped to [0.3, 1.5].
+            Shrinkage ratio clamped to [0.5, 1.5].
             1.0 = edges materialize as predicted.
             0.5 = edges are 50% overestimated.
             1.5 = edges are 50% underestimated (rare).
@@ -163,7 +163,7 @@ class EdgeTracker:
             return 1.0
 
         ratio = avg_realized / avg_predicted
-        return max(0.3, min(1.5, ratio))
+        return max(0.5, min(1.5, ratio))
 
     def get_edge_multiplier(self, category: str = "") -> float:
         """Get the edge discount multiplier for position sizing.

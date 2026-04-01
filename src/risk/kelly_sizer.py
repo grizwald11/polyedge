@@ -158,9 +158,12 @@ class KellySizer:
         kelly_dollars = half_kelly * bankroll
 
         # Confidence adjustment: uncertain predictions get smaller positions.
-        # confidence=0.9 (narrow CI) → 0.92x, confidence=0.5 (wide CI) → 0.60x
+        # Use confidence^1.5 (quadratic-ish) instead of linear — this penalizes
+        # low-confidence predictions more aggressively while barely affecting
+        # high-confidence ones. Linear was too generous to uncertain signals.
+        # confidence=0.9 → 0.89x, confidence=0.7 → 0.67x, confidence=0.5 → 0.48x
         if confidence is not None and 0.0 < confidence <= 1.0:
-            confidence_mult = max(0.2, 0.2 + 0.8 * confidence)
+            confidence_mult = max(0.2, confidence ** 1.5)
             kelly_dollars *= confidence_mult
 
         # Use the higher of market_price and order_price for contract conversion.
@@ -195,6 +198,16 @@ class KellySizer:
 
         # Step 2: Cap 1 — Max position percentage
         max_position = bankroll * self.settings.trading.max_position_pct
+        # High-probability trades (P>0.95, typically obvious-NO) have tiny payoffs
+        # but full downside if the market flips. Cap these at 3% of bankroll
+        # instead of the normal 5% to limit black-swan exposure.
+        if probability > 0.95:
+            high_prob_cap = bankroll * 0.03
+            max_position = min(max_position, high_prob_cap)
+            logger.debug(
+                f"Kelly: high-prob cap applied (P={probability:.2f}), "
+                f"max_position=${max_position:.2f}"
+            )
         kelly_dollars = min(kelly_dollars, max_position)
 
         # Step 3: Cap 2 — Don't exceed remaining exposure room
@@ -332,7 +345,11 @@ class KellySizer:
         average 5%, the multiplier is 0.5 — Kelly will use half the
         predicted edge for sizing.
         """
-        multiplier = max(0.3, min(multiplier, 1.0))
+        # Floor at 0.5: if realized edges are less than half of predicted,
+        # the model is too unreliable to trade — better to skip entirely.
+        # Previous floor of 0.3 allowed trading with 70% edge shrinkage,
+        # which means most "edges" were noise.
+        multiplier = max(0.5, min(multiplier, 1.0))
         if multiplier != self._edge_multiplier:
             logger.info(
                 f"Kelly: edge multiplier {self._edge_multiplier:.2f} → {multiplier:.2f}"
