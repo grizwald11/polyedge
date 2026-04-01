@@ -54,6 +54,12 @@ CONSIDERING THE OPPOSITE:
 - Before finalizing, explicitly state the strongest argument AGAINST your estimate.
 - If you cannot articulate a strong counterargument, your estimate may be overconfident.
 
+GRANULARITY:
+- Use precise probabilities like 0.63 or 0.71, not round numbers like 0.60 or 0.70. Round numbers signal lazy estimation. Superforecasters use granular estimates.
+
+OVERCONFIDENCE CHECK:
+- Most AI models are systematically overconfident by 5-15%. Before finalizing, ask: "Would I bet my own money at these odds?" If the answer is uncertain, move your estimate 5% toward 50%.
+
 CRITICAL: Respond ONLY with a valid JSON object. No explanation, no markdown, no code fences, no text before or after the JSON. Your entire response must be parseable as JSON.
 
 Required JSON schema:

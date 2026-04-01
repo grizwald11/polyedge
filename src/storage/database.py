@@ -1261,6 +1261,22 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_resolved_calibration_records(self) -> list[dict]:
+        """Get resolved calibration records for Platt scaling.
+
+        Returns only records where actual_outcome is known (0 or 1),
+        with predicted_probability and actual_outcome fields.
+        """
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT predicted_probability, "
+            "CASE WHEN actual_outcome = 1 THEN 'Yes' ELSE 'No' END AS actual_outcome "
+            "FROM calibration_records "
+            "WHERE actual_outcome IS NOT NULL "
+            "ORDER BY predicted_at"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def store_prediction(
         self,
         market_ticker: str,

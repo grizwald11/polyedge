@@ -13,6 +13,7 @@ from typing import Optional
 
 from src.analysis.adversarial_analyzer import AdversarialAnalyzer
 from src.analysis.analogue_finder import AnalogueFinder
+from src.analysis.platt_calibrator import PlattCalibrator
 from src.analysis.calibration_analyzer import CalibrationAnalyzer
 from src.analysis.contrarian_tracker import ContrarianTracker
 from src.analysis.resolution_analyzer import ResolutionAnalyzer
@@ -58,6 +59,8 @@ class AIProbabilityStrategy:
         self.contrarian_tracker: ContrarianTracker | None = ContrarianTracker(db) if db else None
         self.resolution_analyzer = ResolutionAnalyzer(forecaster)
         self.adversarial_analyzer = AdversarialAnalyzer(forecaster)
+        self.platt_calibrator: Optional[PlattCalibrator] = None
+        self._init_platt_calibrator()
         self.consensus_aggregator: Optional[ConsensusAggregator] = None
         # Initialize consensus aggregator if data enricher has the required clients
         if data_enricher:
@@ -78,6 +81,27 @@ class AIProbabilityStrategy:
         increases the effective min_edge to avoid false signals.
         """
         self._regime_edge_multiplier = max(0.5, min(multiplier, 3.0))
+
+    def _init_platt_calibrator(self) -> None:
+        """Initialize Platt calibrator from historical calibration records."""
+        if not self.db:
+            return
+        try:
+            records = self.db.get_resolved_calibration_records()
+            if not records:
+                return
+            predictions = [r["predicted_probability"] for r in records]
+            outcomes = [1 if r["actual_outcome"] == "Yes" else 0 for r in records]
+            self.platt_calibrator = PlattCalibrator()
+            params = self.platt_calibrator.fit(predictions, outcomes)
+            if self.platt_calibrator.is_active:
+                logger.info(
+                    f"Platt calibrator active: a={params.a:.3f}, b={params.b:.3f}, "
+                    f"Brier {params.brier_before:.4f} → {params.brier_after:.4f}"
+                )
+        except Exception as e:
+            logger.debug(f"Platt calibrator init failed: {e}")
+            self.platt_calibrator = None
 
     def refresh_calibration_adjustments(self) -> None:
         """Reload per-category bias corrections from calibration data."""
@@ -422,6 +446,15 @@ class AIProbabilityStrategy:
         if getattr(forecast, "parse_failed", False):
             logger.warning(f"Skipping {market.ticker}: Claude response parse failed")
             return None
+
+        # Apply Platt scaling to correct systematic calibration bias
+        if self.platt_calibrator and self.platt_calibrator.is_active:
+            raw_prob = forecast.probability
+            forecast.probability = self.platt_calibrator.calibrate(raw_prob)
+            if abs(forecast.probability - raw_prob) > 0.01:
+                logger.debug(
+                    f"Platt calibration: {market.ticker} {raw_prob:.3f} → {forecast.probability:.3f}"
+                )
 
         # Record Claude-vs-market divergence for contrarian accuracy tracking
         if self.contrarian_tracker:
