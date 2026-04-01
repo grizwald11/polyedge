@@ -37,6 +37,10 @@ class TTLCache:
     def set(self, key: str, data: Any) -> None:
         """Store a value with TTL expiration."""
         self._store[key] = (time.monotonic() + self.ttl_seconds, data)
+        # Auto-cleanup: prune expired entries when cache grows large
+        # to prevent unbounded memory growth from never-accessed keys
+        if len(self._store) > 500:
+            self.cleanup_expired()
 
     def clear(self) -> None:
         """Clear all cached entries."""

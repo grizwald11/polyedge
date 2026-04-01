@@ -5,6 +5,7 @@ Aggregates trades into positions and provides portfolio-level metrics.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -98,6 +99,7 @@ class PositionManager:
         self._capital_rotation_edge = capital_rotation_edge
         self._positions: dict[str, Position] = {}  # market_id -> Position
         self._pending_exits: set[str] = set()  # market_ids with resting exit orders
+        self._lock = asyncio.Lock()  # Protects _positions from concurrent mutation
         self._load_positions_from_db()
 
     def update_from_trade(self, trade: Trade, market_question: str = "") -> Position:
@@ -548,7 +550,7 @@ class PositionManager:
             List of (position, reason) tuples
         """
         candidates: list[tuple[Position, str]] = []
-        for market_id, position in self._positions.items():
+        for market_id, position in list(self._positions.items()):
             market = markets.get(market_id) if markets else None
             should, reason = self.should_exit(position, market)
             if should:
@@ -710,7 +712,7 @@ class PositionManager:
 
         # Check for local positions not on Kalshi
         stale_keys = []
-        for market_id, local_pos in self._positions.items():
+        for market_id, local_pos in list(self._positions.items()):
             if not local_pos.paper and market_id not in api_tickers:
                 mismatches += 1
                 if auto_correct:
