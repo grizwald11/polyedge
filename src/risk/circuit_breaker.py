@@ -155,13 +155,20 @@ class CircuitBreaker:
             return 0.5  # Quarter-Kelly (half of half-Kelly)
         return 1.0
 
-    def reset(self) -> None:
-        """Manually reset the circuit breaker."""
+    def reset(self, bankroll: Optional[float] = None) -> None:
+        """Manually reset the circuit breaker.
+
+        Args:
+            bankroll: If provided, reset high water mark to this value.
+                      Essential for backtests to avoid stale peak state.
+        """
         self._halted = False
         self._halt_reason = None
         self._halt_time = None
         self._consecutive_losing_days = 0
         self._reduced_sizing = False
+        if bankroll is not None:
+            self._high_water_mark = bankroll
         self._persist_state()
         logger.info("Circuit breaker reset")
 

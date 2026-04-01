@@ -435,8 +435,8 @@ class BacktestEngine:
         equity_curve = [bankroll]
         cb_skipped = 0
 
-        # Reset circuit breaker for clean backtest state
-        self.circuit_breaker.reset()
+        # Reset circuit breaker for clean backtest state (pass bankroll to reset HWM)
+        self.circuit_breaker.reset(bankroll=bankroll)
         # Track daily P&L for circuit breaker day-boundary resets
         current_day: str | None = None
         daily_pnl = 0.0
