@@ -128,6 +128,8 @@ class StrategyName(str, Enum):
     NEWS_REACTIVE = "news_reactive"
     OBVIOUS_NO = "obvious_no"
     CROSS_PLATFORM_ARB = "cross_platform_arb"
+    MEAN_REVERSION = "mean_reversion"
+    LATE_RESOLUTION = "late_resolution"
 
 
 class MarketCategory(str, Enum):
