@@ -81,6 +81,7 @@ class ResolutionAnalyzer:
         """Initialize with a ClaudeForecaster instance for API calls."""
         self.forecaster = forecaster
         self._cache: dict[str, ResolutionAnalysis] = {}
+        self._MAX_CACHE_SIZE = 500
 
     async def analyze(self, market: Market) -> ResolutionAnalysis:
         """Analyze a market's resolution criteria.
@@ -91,6 +92,14 @@ class ResolutionAnalyzer:
         cache_key = market.ticker
         if cache_key in self._cache:
             return self._cache[cache_key]
+
+        # Evict oldest entries if cache is full
+        if len(self._cache) >= self._MAX_CACHE_SIZE:
+            # Drop first half of cache (oldest insertions in dict order)
+            keys = list(self._cache.keys())
+            for k in keys[: len(keys) // 2]:
+                del self._cache[k]
+            logger.debug(f"Resolution cache evicted to {len(self._cache)} entries")
 
         # Don't analyze markets with no description
         if not market.description or len(market.description.strip()) < 20:

@@ -189,8 +189,10 @@ class NewsResearcher:
         # auto-recover if the key is rotated/changed.
         self._serper_key_at_disable: Optional[str] = None
         # M-6: Cache last successful context per market question for fallback
+        # Bounded to prevent memory growth in 24/7 operation
         self._last_successful_context: dict[str, str] = {}
         self._last_successful_time: dict[str, float] = {}
+        self._MAX_CONTEXT_CACHE = 500
 
     def reset_serper(self) -> None:
         """Manually re-enable Serper after permanent disable.
@@ -765,8 +767,7 @@ class NewsResearcher:
         self._last_successful_context[cache_key] = context
         self._last_successful_time[cache_key] = time.monotonic()
         # Evict oldest entries if cache exceeds limit
-        _MAX_CONTEXT_CACHE = 1000
-        if len(self._last_successful_context) > _MAX_CONTEXT_CACHE:
+        if len(self._last_successful_context) > self._MAX_CONTEXT_CACHE:
             oldest_key = min(self._last_successful_time, key=self._last_successful_time.get)  # type: ignore[arg-type]
             del self._last_successful_context[oldest_key]
             del self._last_successful_time[oldest_key]

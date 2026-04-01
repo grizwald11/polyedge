@@ -264,6 +264,13 @@ class PromptVariantManager:
         cat_key = category.value
         if cat_key not in self._pending_predictions:
             self._pending_predictions[cat_key] = {}
+        # Cap pending predictions per category to prevent unbounded growth
+        _MAX_PENDING_PER_CAT = 500
+        if len(self._pending_predictions[cat_key]) >= _MAX_PENDING_PER_CAT:
+            # Drop oldest half
+            keys = list(self._pending_predictions[cat_key].keys())
+            for k in keys[: len(keys) // 2]:
+                del self._pending_predictions[cat_key][k]
         # Store by market_id; if multiple predictions per market, keep latest
         self._pending_predictions[cat_key][market_id] = {
             "variant_name": variant_name,
