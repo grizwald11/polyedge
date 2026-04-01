@@ -115,6 +115,18 @@ class CircuitBreaker:
             logger.critical(f"CIRCUIT BREAKER HALTED: {reason}")
             return False
 
+        # Escalating cool-down: at 5% daily loss, reduce position sizes by 50%
+        # before the full halt at 8%. This gives the bot a chance to slow down
+        # before hitting the hard limit.
+        warning_limit = bankroll * 0.05
+        if daily_pnl < -warning_limit and not self._reduced_sizing:
+            self._reduced_sizing = True
+            self._persist_state()
+            logger.warning(
+                f"Daily loss warning: ${daily_pnl:.2f} exceeds 5% "
+                f"(${-warning_limit:.2f}) — reducing position sizes by 50%"
+            )
+
         # Consecutive losing day state machine:
         #   0-2 losing days → normal operation (full Kelly multiplier)
         #   3-4 losing days → reduced_sizing=True (quarter-Kelly via 0.5 multiplier)

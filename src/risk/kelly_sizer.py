@@ -27,7 +27,12 @@ BRIER_POOR = 0.30       # 25% sizing (M-11: was 0.28, aligned with random=0.25)
 
 
 class KellySizer:
-    """Half-Kelly position sizing with configurable caps."""
+    """Quarter-Kelly position sizing with dynamic adjustment and caps."""
+
+    # Dynamic Kelly bounds: scale fraction based on rolling win rate
+    KELLY_MIN = 0.15  # Floor during losing streaks
+    KELLY_MAX = 0.30  # Ceiling during winning streaks
+    KELLY_WINDOW = 20  # Rolling window for win rate calculation
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -40,6 +45,28 @@ class KellySizer:
         self._circuit_breaker_multiplier: float = 1.0
         self._regime_multiplier: float = 1.0
         self._edge_multiplier: float = 1.0
+        self._recent_outcomes: list[bool] = []  # True=win, False=loss
+
+    def record_outcome(self, won: bool) -> None:
+        """Record a trade outcome for dynamic Kelly adjustment."""
+        self._recent_outcomes.append(won)
+        if len(self._recent_outcomes) > self.KELLY_WINDOW:
+            self._recent_outcomes = self._recent_outcomes[-self.KELLY_WINDOW:]
+
+    @property
+    def dynamic_kelly_fraction(self) -> float:
+        """Compute Kelly fraction scaled by rolling win rate.
+
+        With fewer than KELLY_WINDOW trades, use the configured default.
+        With enough data, interpolate between KELLY_MIN (0% wins) and
+        KELLY_MAX (100% wins) based on rolling win rate.
+        """
+        if len(self._recent_outcomes) < self.KELLY_WINDOW:
+            return self.settings.trading.kelly_fraction
+        win_rate = sum(self._recent_outcomes) / len(self._recent_outcomes)
+        # Linear interpolation: 0% win rate → KELLY_MIN, 100% → KELLY_MAX
+        fraction = self.KELLY_MIN + win_rate * (self.KELLY_MAX - self.KELLY_MIN)
+        return fraction
 
     def calculate_position_size(
         self,
@@ -151,8 +178,8 @@ class KellySizer:
         if kelly_fraction <= 0:
             return 0
 
-        # Apply half-Kelly
-        half_kelly = kelly_fraction * self.settings.trading.kelly_fraction
+        # Apply dynamic Kelly fraction (scales with rolling win rate)
+        half_kelly = kelly_fraction * self.dynamic_kelly_fraction
 
         # Dollar amount to risk
         kelly_dollars = half_kelly * bankroll

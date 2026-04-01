@@ -1,0 +1,313 @@
+You are working on PolyEdge, an AI-driven prediction market trading bot. It is a Python 3.12 project running on a Mac Mini M4 Pro via pm2. The bot targets Kalshi (primary, live) and Polymarket (disabled, future). There are 1,470 tests and a 70MB live SQLite database.
+
+## RULES OF ENGAGEMENT
+- Read CLAUDE.md first for full project context.
+- Run `python3 -m pytest -q 2>&1 | tail -10` to confirm baseline test status. Record in POLYEDGE-LOG.md.
+- Run the existing backtest: `python3 -m scripts.backtest_engine --db data/markets.db --validate`
+- Record ALL baseline metrics in POLYEDGE-LOG.md before changing anything.
+- Commit after each completed section (do NOT push).
+- Log everything in POLYEDGE-LOG.md with timestamps.
+- If a change breaks more than 3 tests, revert immediately.
+- Write tests for every new feature.
+- Use `python3` not `python` (macOS).
+
+---
+
+## EXISTING ARCHITECTURE (DO NOT REBUILD — IMPROVE)
+
+The codebase is mature with 60+ Python files. Key modules:
+
+**Orchestrator**: `src/orchestrator/` — startup, scan_cycle, trade_cycle, lifecycle
+**Strategies**: `src/strategies/` — ai_probability, cross_arb, cross_platform_arb, whale_tracker, news_reactive, obvious_no
+**Analysis**: `src/analysis/` — claude_forecaster, ensemble, calibration, calibration_analyzer, prompt_templates, prompt_ab_testing, market_classifier, decomposer, adversarial_analyzer, temporal_analyzer, regime_detector, contrarian_tracker, analogue_finder, resolution_analyzer, bayesian_updater, news_researcher, ci_calibrator, edge_tracker
+**Core**: `src/core/` — kalshi_client, polymarket_client, market_discovery, websocket_client, models, key_loader, retry_helper
+**Execution**: `src/execution/` — order_builder, order_router, position_manager, fill_tracker
+**Risk**: `src/risk/` — risk_engine, kelly_sizer, circuit_breaker, correlation
+**Storage**: `src/storage/database.py` — SQLite with WAL mode
+**Dashboard**: `src/dashboard/` — HTMX dashboard with API routes
+**Alerts**: `src/alerts/` — daily_report, imessage_alert, alert_manager
+**Backtest**: `src/scripts/backtest_engine.py` — walk-forward validation, parameter sweeps, MockForecaster
+
+The ensemble in `src/analysis/ensemble.py` already does:
+- Brier-score-weighted multi-model averaging
+- Market efficiency scoring (volume, liquidity, time-to-resolution)
+- CI-width confidence penalties
+- Disagreement factor for multi-model spreads
+
+The AI strategy in `src/strategies/ai_probability.py` already has:
+- Category divergence thresholds (data-rich 0.30, uncertain 0.45, speculative 0.50)
+- Temporal edge discounting
+- Edge significance checks (market-inside-CI rejection)
+- Smart model escalation (sonnet → opus for edge > 15%)
+- Calibration bias adjustments per category
+- Regime-based edge multiplier
+- Community forecast integration (Manifold, Metaculus)
+- Adversarial analysis, resolution analysis, analogue finding
+
+---
+
+## SECTION 1: AUDIT & BASELINE (DO THIS FIRST)
+
+1. Run the full test suite: `python3 -m pytest -q`
+2. Run backtest: `python3 -m scripts.backtest_engine --db data/markets.db`
+3. Run backtest with validation: `python3 -m scripts.backtest_engine --db data/markets.db --validate`
+4. Run calibration report: `python3 -m src.scripts.calibration_report`
+5. Check recent logs: `tail -100 data/logs/polyedge.log`
+6. Check database stats:
+   ```python
+   import sqlite3
+   conn = sqlite3.connect('data/markets.db')
+   print("Markets:", conn.execute("SELECT COUNT(*) FROM markets").fetchone())
+   print("Resolved:", conn.execute("SELECT COUNT(*) FROM markets WHERE result != '' AND result IS NOT NULL").fetchone())
+   print("Calibration records:", conn.execute("SELECT COUNT(*) FROM calibration_records").fetchone())
+   print("Trades:", conn.execute("SELECT COUNT(*) FROM trades").fetchone())
+   print("Snapshots:", conn.execute("SELECT COUNT(*) FROM market_snapshots").fetchone())
+   ```
+
+Record ALL results in POLYEDGE-LOG.md. This is the baseline everything is measured against.
+
+---
+
+## SECTION 2: CRITICAL PARAMETER FIXES
+
+### 2A: Kelly Fraction — Currently 0.5 (DANGEROUS)
+In `config/settings.yaml`, `kelly_fraction: 0.5` (half-Kelly). Research shows:
+- At 0.5x Kelly with a 45-55% win rate, drawdowns can reach 50-80% of capital
+- Professional prediction market traders use 0.15-0.25x Kelly maximum
+- One Kalshi bot study found 0.75x Kelly "compounds losses catastrophically"
+
+**Fix**: Change to 0.25 in settings.yaml AND in `src/risk/kelly_sizer.py`:
+- Default kelly_fraction: 0.25 (quarter-Kelly)
+- Add dynamic Kelly: scale between 0.15 (losing streak) and 0.30 (winning streak)
+- Track rolling 20-trade win rate; adjust Kelly proportionally
+- Run parameter sweep to confirm: `python3 -m scripts.backtest_engine --sweep kelly_fraction=0.10,0.15,0.20,0.25,0.30,0.50`
+
+### 2B: Daily Loss Limit — Currently 15% (Too Generous)
+In settings.yaml `daily_loss_limit_pct: 0.15`. That means the bot can lose $750 of a $5000 bankroll in a single day before stopping.
+
+**Fix**: Reduce to 0.08 (8%). Add escalating cool-down:
+- After 5% daily loss: reduce position sizes by 50% for rest of day
+- After 8% daily loss: halt all trading until next day
+- After 20% total drawdown from peak: halt until manual review
+
+### 2C: Cheap Contract Filter — MISSING
+Research on 300K+ Kalshi contracts shows contracts under 10¢ lose 60%+ of invested money on average. There is currently NO price floor filter.
+
+**Fix**: Add to `src/strategies/ai_probability.py` in `_assess_market()`:
+```python
+# Reject cheap contracts — structural losers
+if market.yes_price < 0.12 and direction == Direction.BUY_YES:
+    logger.debug(f"Cheap YES contract rejection: {market.ticker} at {market.yes_price:.0%}")
+    return None
+if market.no_price < 0.12 and direction == Direction.BUY_NO:
+    logger.debug(f"Cheap NO contract rejection: {market.ticker} at {market.no_price:.0%}")
+    return None
+```
+Also add to `obvious_no.py` — ensure obvious NO strategy only buys NO contracts priced above 85¢ (YES below 15¢).
+
+---
+
+## SECTION 3: PREDICTION ACCURACY IMPROVEMENTS
+
+### 3A: Ensemble Extremization — NOT IMPLEMENTED
+Research shows extremizing ensemble forecasts by 15-25% improves accuracy. The current `ensemble.py` does weighted averaging but NO extremization.
+
+**Fix**: Add extremization to `ensemble_forecast()` and `multi_model_ensemble()`:
+```python
+def extremize(probability: float, factor: float = 1.2) -> float:
+    """Push probability away from 50% toward 0 or 1.
+    
+    Research: extremizing aggregated forecasts improves calibration
+    because averaging pulls too far toward 50%. Factor of 1.2 = 20% extremization.
+    """
+    if probability <= 0.01 or probability >= 0.99:
+        return probability
+    # Log-odds extremization
+    import math
+    log_odds = math.log(probability / (1 - probability))
+    extremized_odds = log_odds * factor
+    result = 1 / (1 + math.exp(-extremized_odds))
+    return max(0.01, min(0.99, result))
+```
+Apply AFTER the weighted average, BEFORE edge calculation. Make the factor configurable in settings.yaml. Default 1.15 (conservative).
+
+### 3B: Platt Scaling Post-Hoc Calibration — NOT IMPLEMENTED
+Research shows Platt scaling brings AI forecasters to near-superforecaster accuracy. The current `calibration.py` tracks Brier scores but doesn't apply post-hoc calibration to future predictions.
+
+**Fix**: Add `src/analysis/platt_calibrator.py`:
+1. Collect historical (predicted_probability, actual_outcome) pairs from calibration_records
+2. Fit a logistic regression: `calibrated = 1 / (1 + exp(-(a * raw_prob + b)))`
+3. Apply to all new forecasts BEFORE they enter the ensemble
+4. Re-fit weekly as more data accumulates
+5. Require minimum 50 resolved predictions before activating
+6. Track Brier score with and without Platt scaling to measure improvement
+
+### 3C: Category Auto-Gating — PARTIALLY IMPLEMENTED
+`ai_probability.py` loads `_category_brier_scores` from calibration but doesn't hard-block categories with bad Brier scores.
+
+**Fix**: Add to `scan_for_opportunities()`:
+```python
+# Auto-gate categories with poor calibration
+cat_brier = self._category_brier_scores.get(category.value)
+if cat_brier is not None and cat_brier > 0.30:
+    logger.info(
+        f"Category auto-gate: {category.value} Brier={cat_brier:.3f} > 0.30 — "
+        f"skipping {market.ticker} (poor historical accuracy)"
+    )
+    continue
+```
+Threshold 0.30 = worse than random (0.25). If the bot is worse than a coin flip in a category, stop trading it.
+
+### 3D: 30-70% Probability Zone Handling
+Markets priced 30-70% are the hardest to predict. The current min_edge is 5% across all price ranges.
+
+**Fix**: Add tiered edge requirements based on market price:
+```python
+# In _assess_market(), after calculating edge:
+if 0.30 <= market.yes_price <= 0.70:
+    # Uncertain zone: require 50% higher edge
+    effective_min_edge = min_edge * 1.5
+    if abs(edge) < effective_min_edge:
+        logger.debug(f"Uncertain zone rejection: {market.ticker} edge={abs(edge):.3f} < {effective_min_edge:.3f}")
+        return None
+```
+
+### 3E: Superforecaster Prompt Enhancement
+The prompts in `src/analysis/prompt_templates.py` should be enhanced with superforecaster techniques:
+
+1. Add explicit base rate anchoring: "Start with the historical base rate for this type of event, then adjust"
+2. Add pre-mortem instruction: "Before finalizing, state the most likely reason this prediction could be wrong"
+3. Add calibration nudge: "Most AI models are overconfident. Consider whether your estimate should be closer to 50%"
+4. Add granular probability instruction: "Use precise probabilities like 0.63 or 0.71, not round numbers like 0.60 or 0.70"
+5. Verify these are actually in the prompt template — read `prompt_templates.py` to check what's already there
+
+---
+
+## SECTION 4: NEW EDGE SOURCES
+
+### 4A: YES+NO Structural Arbitrage Scanner
+The `cross_arb.py` does logical arbitrage between related markets. But there's a simpler form: scanning for markets where YES + NO prices sum to less than $1.00 on the same market.
+
+**Fix**: Add to `src/strategies/cross_arb.py` or create `src/strategies/yesno_arb.py`:
+1. Scan all active markets every 30 seconds
+2. For each market: check if `yes_price + no_price < 0.99` (after fees)
+3. If found: buy both YES and NO simultaneously for guaranteed profit
+4. This is pure execution speed — no prediction needed
+5. Use WebSocket for real-time price feeds (`src/core/websocket_client.py` already exists)
+
+### 4B: Order Book Imbalance Signal
+The WebSocket client can provide order book data. Add order book analysis:
+
+1. Calculate volume-weighted midpoint (better fair value estimate than last trade)
+2. Detect order book imbalance: if buy_volume > 2x sell_volume, price likely to rise
+3. Use as a supplementary signal that boosts or reduces confidence in AI probability signals
+4. Add to `src/data/` as `orderbook_analyzer.py`
+
+### 4C: Mean Reversion on Sharp Moves
+When a market moves >10% in a short period, it often reverts partially.
+
+1. Track price momentum from `market_snapshots` table
+2. Detect markets that moved >10% in last 2 hours
+3. Take the opposite side with small position (1-2% of bankroll)
+4. Close within 4 hours — this is a short-term trade
+5. Add as `src/strategies/mean_reversion.py`
+
+### 4D: Late-Resolution Edge
+Markets very close to resolution (last few hours) where the outcome is nearly certain from public data but the market hasn't fully repriced. Example: weather market where temperature is already known but contract hasn't moved to 95%+.
+
+1. Filter for markets resolving within 6 hours
+2. Run full news/data check
+3. If public information makes outcome >90% certain but market is still at 70%, trade aggressively
+4. This is a speed advantage — processing public information faster than other participants
+
+---
+
+## SECTION 5: BUG SWEEP & HARDENING
+
+1. **Run full test suite**: `python3 -m pytest -v 2>&1 | grep FAIL` — fix ALL failures
+2. **Type checking**: `python3 -m mypy src/ --ignore-missing-imports 2>&1 | head -30` — fix errors
+3. **Error handling audit**: Grep for bare `except:` or `except Exception:` without logging — add proper error logging
+4. **Race conditions**: The orchestrator runs strategies concurrently. Check for shared mutable state between strategies
+5. **Database integrity**: Ensure WAL mode is working correctly under concurrent access. Check for any `database is locked` errors in logs
+6. **Stale data detection**: If market data is older than the scan interval (300s), flag it and don't trade
+7. **pm2 recovery**: After restart, the bot should pick up existing positions from the database — verify this works
+8. **Circuit breaker edge cases**: What happens if daily_loss_limit is hit mid-trade? Verify the circuit breaker in `src/risk/circuit_breaker.py` handles this
+9. **API rate limit handling**: Check `src/core/retry_helper.py` for proper exponential backoff with jitter
+10. **Memory profiling**: The bot runs 24/7 — check for growing data structures in the main loop. Especially `_forecast_cache` TTL in claude_forecaster.py (currently 300s TTL, good) and any unbounded lists
+
+---
+
+## SECTION 6: BACKTEST IMPROVEMENTS
+
+1. **Run parameter sweep on Kelly**:
+   ```bash
+   python3 -m scripts.backtest_engine --sweep kelly_fraction=0.10,0.15,0.20,0.25,0.30,0.50
+   ```
+   Record results in POLYEDGE-LOG.md. Use this to set optimal Kelly.
+
+2. **Run parameter sweep on min_edge**:
+   ```bash
+   python3 -m scripts.backtest_engine --sweep min_edge=0.03,0.05,0.07,0.10,0.12,0.15
+   ```
+
+3. **Walk-forward validation**: The engine supports this. Run it and record out-of-sample results:
+   ```bash
+   python3 -m scripts.backtest_engine --validate
+   ```
+
+4. **Category-level analysis**: The backtest already tracks `category_metrics`. Analyze which categories are profitable and which are losing money. Use this to set category auto-gates.
+
+5. **Backtest the cheap contract filter**: Compare P&L with and without the 12¢ price floor.
+
+6. **Fee modeling verification**: Kalshi fees are in `src/core/models.py` as `kalshi_taker_fee()` and `kalshi_maker_fee()`. Verify they match current Kalshi fee schedule (fees changed in 2026).
+
+---
+
+## SECTION 7: PERFORMANCE & MONITORING
+
+1. **Calibration report automation**: Ensure `src/scripts/calibration_report.py` runs daily and logs results
+2. **Edge decay tracking**: The `edge_tracker.py` exists — verify it's being called and logging edge decay over time. If predicted edges are shrinking relative to realized edges, the market is adapting.
+3. **Per-strategy P&L tracking**: Each strategy should have independent P&L visible in the dashboard
+4. **Alert on accuracy degradation**: If rolling 20-trade Brier score exceeds 0.30, alert via `alert_manager.py`
+5. **Log analysis**: Parse recent logs for recurring errors, warnings, or patterns:
+   ```bash
+   grep -c "ERROR\|WARNING\|CRITICAL" data/logs/polyedge.log
+   grep "circuit.breaker\|budget.exceeded\|parse.failed" data/logs/polyedge.log | tail -20
+   ```
+
+---
+
+## SECTION 8: DOCUMENTATION & FINAL REPORT
+
+1. Update CLAUDE.md with any architectural changes
+2. Update POLYEDGE-LOG.md with:
+   - Final test count (before vs after)
+   - Backtest results (before vs after parameter changes)
+   - Parameter sweep results
+   - Category-level profitability analysis
+   - List of all changes made
+   - Recommendations for future sessions
+3. Commit everything. Do NOT push.
+
+---
+
+## PRIORITIES (if running low on context):
+1. **Section 1** (Audit & baseline) — must have data before changing anything
+2. **Section 2** (Parameter fixes) — Kelly at 0.5 is the biggest risk, cheap contracts are losing money
+3. **Section 3A-3B** (Extremization + Platt scaling) — highest impact on accuracy
+4. **Section 3C-3D** (Category gating + uncertain zone) — stop trading where you lose
+5. **Section 5** (Bug sweep) — reliability for 24/7 operation
+6. **Section 6** (Backtest validation) — prove changes work before they go live
+7. **Section 4** (New strategies) — diversify edge sources
+8. Everything else
+
+## KEY INSIGHTS:
+- The bot already has sophisticated infrastructure. The gains are in TUNING, not rebuilding.
+- Kelly 0.5 → 0.25 is probably worth more than any new strategy. Sizing IS the edge.
+- Category auto-gating (stop trading losers) is free alpha.
+- Cheap contract avoidance is free alpha — research proves contracts under 10¢ are structural losers.
+- Extremization is a proven 15-25% accuracy improvement that takes 20 lines of code to implement.
+- Platt scaling is the bridge from "good AI" to "superforecaster-level" calibration.
+- The backtest engine is powerful — USE IT to validate every change before going live.
+
+BEGIN. Run Section 1 immediately. Record baseline. Then fix the dangerous parameters in Section 2.

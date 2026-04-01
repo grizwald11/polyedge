@@ -258,6 +258,19 @@ class AIProbabilityStrategy:
         6. Edge calculation — compute edge, check significance and minimum threshold
         7. Signal generation — build and return Signal if edge is sufficient
         """
+        # Cheap contract filter: contracts under 12¢ are structural losers.
+        # Research on 300K+ Kalshi contracts shows <10¢ contracts lose 60%+.
+        # Applied before Claude API call to save tokens.
+        if market.yes_price < 0.12 and market.no_price < 0.12:
+            logger.debug(
+                f"Cheap contract rejection: {market.ticker} both sides under 12¢ "
+                f"(YES={market.yes_price:.0%}, NO={market.no_price:.0%})"
+            )
+            return None
+        # Reject buying the cheap side — only the expensive side has structural edge
+        # (This is checked post-forecast when direction is known, but we can
+        # pre-reject markets where both sides are cheap)
+
         # Staleness check: skip re-assessment if recent prediction is still fresh
         if self.db:
             try:
@@ -635,9 +648,15 @@ class AIProbabilityStrategy:
             )
             return None
 
-        if abs(edge) < min_edge:
+        # Uncertain zone: markets priced 30-70% are hardest to predict.
+        # Require 50% higher edge to trade these.
+        effective_min_edge = min_edge
+        if 0.30 <= market.yes_price <= 0.70:
+            effective_min_edge = min_edge * 1.5
+
+        if abs(edge) < effective_min_edge:
             # H-13: Log distinct reasons for edge rejection
-            if edge < 0 and abs(edge) < min_edge:
+            if edge < 0 and abs(edge) < effective_min_edge:
                 logger.debug(
                     f"Edge rejection (negative): {market.ticker} edge={edge:+.3f} — "
                     f"market pricing is unfavorable (ensemble={ensemble.final_probability:.3f}, "
@@ -651,7 +670,7 @@ class AIProbabilityStrategy:
             else:
                 logger.debug(
                     f"Edge rejection (below threshold): {market.ticker} edge={abs(edge):.3f} "
-                    f"< min_edge={min_edge:.3f} — marginal opportunity, insufficient edge "
+                    f"< min_edge={effective_min_edge:.3f} — marginal opportunity, insufficient edge "
                     f"(ensemble={ensemble.final_probability:.3f}, market={market.yes_price:.3f})"
                 )
             return None
@@ -666,6 +685,15 @@ class AIProbabilityStrategy:
             probability_estimate = 1.0 - ensemble.final_probability
             market_price = market.no_price
             edge = abs(edge)
+
+        # Cheap contract filter (direction-aware): reject buying contracts under 12¢.
+        # Research: contracts under 10¢ lose 60%+ of invested capital on average.
+        if market_price < 0.12:
+            logger.debug(
+                f"Cheap contract rejection: {market.ticker} {direction.value} "
+                f"at {market_price:.0%} — structural loser under 12¢"
+            )
+            return None
 
         # Smart Model Escalation: if edge > 15% and initial model was sonnet,
         # re-verify with opus. Opus catches ~10-20% more nuances in resolution

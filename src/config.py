@@ -49,9 +49,9 @@ class TradingConfig(BaseModel):
     min_edge_arb: float = 0.02
     min_edge_obvious_no: float = 0.01
     min_edge_news: float = 0.03  # Lower threshold: news edges are fast/temporary
-    kelly_fraction: float = 0.5
+    kelly_fraction: float = 0.25
     prefer_maker: bool = True
-    daily_loss_limit_pct: float = 0.15
+    daily_loss_limit_pct: float = 0.08
     max_drawdown_pct: float = 0.20  # H-3: Halt if equity drops >20% from peak
     max_obvious_no_pct: float = 0.10
     obvious_no_probability_multiplier: float = 0.3  # Conservative P(YES) scaling for obvious-NO markets.

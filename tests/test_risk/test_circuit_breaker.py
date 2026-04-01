@@ -40,47 +40,53 @@ class TestDailyLossLimit:
         assert cb.is_halted() is False
 
     def test_daily_loss_triggers_halt(self, cb, tmp_db):
-        # Daily loss limit = 15% of $500 = $75
-        _log_losing_trade(tmp_db, pnl=-80.0)
+        # Daily loss limit = 8% of $500 = $40
+        _log_losing_trade(tmp_db, pnl=-45.0)
 
         assert cb.check(500.0) is False
         assert cb.is_halted() is True
         assert "Daily loss limit" in cb.halt_reason
 
     def test_small_loss_ok(self, cb, tmp_db):
-        _log_losing_trade(tmp_db, pnl=-20.0)
+        _log_losing_trade(tmp_db, pnl=-10.0)
         assert cb.check(500.0) is True
 
     def test_stays_halted_once_triggered(self, cb, tmp_db):
-        _log_losing_trade(tmp_db, pnl=-80.0)
+        _log_losing_trade(tmp_db, pnl=-45.0)
         cb.check(500.0)
 
         # Still halted on next check
         assert cb.check(500.0) is False
+
+    def test_escalating_cooldown_at_5pct(self, cb, tmp_db):
+        """At 5% daily loss ($25), reduce position sizes before full halt."""
+        _log_losing_trade(tmp_db, pnl=-28.0)  # > 5% of $500 but < 8%
+        assert cb.check(500.0) is True  # Not halted yet
+        assert cb.is_reduced_sizing is True  # But sizing is reduced
 
 
 class TestUnrealizedPnlInDailyLimit:
     """Unrealized P&L from open positions counts at 75% weight toward daily limit (M-3)."""
 
     def test_unrealized_loss_triggers_halt(self, cb, tmp_db):
-        # Realized = -55, unrealized = -40 * 0.75 = -30, total = -85 > 15% of 500 = 75
-        _log_losing_trade(tmp_db, pnl=-55.0)
-        assert cb.check(500.0, unrealized_pnl=-40.0) is False
+        # Realized = -30, unrealized = -20 * 0.75 = -15, total = -45 > 8% of 500 = 40
+        _log_losing_trade(tmp_db, pnl=-30.0)
+        assert cb.check(500.0, unrealized_pnl=-20.0) is False
         assert cb.is_halted() is True
 
     def test_unrealized_loss_alone_insufficient(self, cb):
-        # Only unrealized = -30 * 0.5 = -15, no realized losses, under $50 limit
-        assert cb.check(500.0, unrealized_pnl=-30.0) is True
+        # Only unrealized = -20 * 0.75 = -15, no realized losses, under $40 limit
+        assert cb.check(500.0, unrealized_pnl=-20.0) is True
 
     def test_unrealized_profit_offsets(self, cb, tmp_db):
-        # Realized = -40, unrealized = +20 * 0.5 = +10, net = -30, under limit
-        _log_losing_trade(tmp_db, pnl=-40.0)
-        assert cb.check(500.0, unrealized_pnl=20.0) is True
+        # Realized = -30, unrealized = +10 * 0.75 = +7.5, net = -22.5, under $40 limit
+        _log_losing_trade(tmp_db, pnl=-30.0)
+        assert cb.check(500.0, unrealized_pnl=10.0) is True
 
     def test_discounted_unrealized_under_limit(self, cb, tmp_db):
-        # Realized = -30, unrealized = -15 * 0.5 = -7.5, total = -37.5, under $50 limit
-        _log_losing_trade(tmp_db, pnl=-30.0)
-        assert cb.check(500.0, unrealized_pnl=-15.0) is True
+        # Realized = -15, unrealized = -10 * 0.75 = -7.5, total = -22.5, under $40 limit
+        _log_losing_trade(tmp_db, pnl=-15.0)
+        assert cb.check(500.0, unrealized_pnl=-10.0) is True
 
 
 class TestConsecutiveLosses:

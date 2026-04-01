@@ -41,9 +41,9 @@ trading:
   min_edge_ai: 0.05             # 5% minimum edge for AI strategy
   min_edge_arb: 0.02            # 2% minimum edge for arbitrage
   min_edge_obvious_no: 0.01     # 1% minimum for obvious NO
-  kelly_fraction: 0.5           # Half-Kelly
+  kelly_fraction: 0.25          # Quarter-Kelly (research: 0.15-0.25 optimal for prediction markets)
   prefer_maker: true            # Always use limit orders when possible
-  daily_loss_limit_pct: 0.15    # 15% daily loss circuit breaker (raised from 10%)
+  daily_loss_limit_pct: 0.08    # 8% daily loss circuit breaker (was 15% — too generous)
   max_obvious_no_pct: 0.10      # Max 10% bankroll in obvious NO positions
   max_trades_per_cycle: 5       # Max trades per scan cycle (matches config.py default)
 
