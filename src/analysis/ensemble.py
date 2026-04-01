@@ -20,6 +20,32 @@ from src.core.models import EnsembleForecast, ForecastResult
 
 logger = logging.getLogger(__name__)
 
+# Default extremization factor. Research shows extremizing aggregated
+# forecasts by 15-25% improves calibration because simple averaging pulls
+# too far toward 50%. A factor of 1.15 = 15% extremization (conservative).
+DEFAULT_EXTREMIZE_FACTOR = 1.15
+
+
+def extremize(probability: float, factor: float = DEFAULT_EXTREMIZE_FACTOR) -> float:
+    """Push probability away from 50% toward 0 or 1 using log-odds scaling.
+
+    Research: extremizing aggregated forecasts improves calibration
+    because averaging pulls too far toward 50%.
+
+    Args:
+        probability: Raw probability (0-1)
+        factor: Extremization strength. 1.0 = no change, 1.2 = 20% extremization.
+
+    Returns:
+        Extremized probability, clamped to [0.01, 0.99]
+    """
+    if probability <= 0.01 or probability >= 0.99:
+        return probability
+    log_odds = math.log(probability / (1 - probability))
+    extremized_odds = log_odds * factor
+    result = 1 / (1 + math.exp(-extremized_odds))
+    return max(0.01, min(0.99, result))
+
 
 @dataclass
 class ModelWeight:
@@ -136,6 +162,9 @@ def ensemble_forecast(
         + market_price * market_weight
     )
 
+    # Extremize: push away from 50% to correct for averaging regression
+    final_prob = extremize(final_prob)
+
     # Clamp
     final_prob = max(0.01, min(0.99, final_prob))
 
@@ -214,6 +243,9 @@ def multi_model_ensemble(
     final_prob = market_price * market_weight
     for mw in model_weights:
         final_prob += mw.forecast.probability * mw.weight
+
+    # Extremize: push away from 50% to correct for averaging regression
+    final_prob = extremize(final_prob)
 
     final_prob = max(0.01, min(0.99, final_prob))
     edge = final_prob - market_price

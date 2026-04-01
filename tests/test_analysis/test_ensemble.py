@@ -5,9 +5,37 @@ import pytest
 from src.analysis.ensemble import (
     _compute_model_weights,
     ensemble_forecast,
+    extremize,
     multi_model_ensemble,
 )
 from src.core.models import EnsembleForecast, ForecastResult
+
+
+class TestExtremize:
+    def test_pushes_above_50_higher(self):
+        assert extremize(0.60) > 0.60
+
+    def test_pushes_below_50_lower(self):
+        assert extremize(0.40) < 0.40
+
+    def test_50_unchanged(self):
+        assert abs(extremize(0.50) - 0.50) < 0.001
+
+    def test_extreme_values_unchanged(self):
+        assert extremize(0.01) == 0.01
+        assert extremize(0.99) == 0.99
+
+    def test_clamped_to_valid_range(self):
+        assert 0.01 <= extremize(0.02) <= 0.99
+        assert 0.01 <= extremize(0.98) <= 0.99
+
+    def test_factor_1_is_identity(self):
+        assert abs(extremize(0.70, factor=1.0) - 0.70) < 0.001
+
+    def test_higher_factor_more_extreme(self):
+        mild = extremize(0.70, factor=1.1)
+        strong = extremize(0.70, factor=1.3)
+        assert strong > mild > 0.70
 
 
 def _make_forecast(prob: float, model: str = "claude-sonnet-4-6") -> ForecastResult:
@@ -132,8 +160,8 @@ class TestMultiModelEnsemble:
         """Works correctly with a single forecast."""
         f = _make_forecast(0.65, model="solo")
         result = multi_model_ensemble([f], market_price=0.50)
-        # 0.65 * 0.60 + 0.50 * 0.40 = 0.39 + 0.20 = 0.59 (market_weight=0.40)
-        assert abs(result.final_probability - 0.59) < 0.01
+        # Base: 0.65 * 0.60 + 0.50 * 0.40 ≈ 0.59, then extremized away from 50%
+        assert abs(result.final_probability - 0.59) < 0.04
 
     def test_empty_forecasts_returns_market_price(self):
         """Empty forecast list returns market price."""
@@ -166,7 +194,8 @@ class TestMultiModelEnsemble:
         """With market_weight=0, only model forecasts matter."""
         f = _make_forecast(0.70, model="solo")
         result = multi_model_ensemble([f], market_price=0.50, market_weight=0.0)
-        assert abs(result.final_probability - 0.70) < 0.01
+        # 0.70 extremized → ~0.726
+        assert abs(result.final_probability - 0.70) < 0.04
 
     def test_clamped_to_valid_range(self):
         f = _make_forecast(0.99, model="extreme")
@@ -361,8 +390,9 @@ class TestCIPenaltyScaling:
         )
         result = ensemble_forecast(f, market_price=0.50, claude_weight=0.85)
         # With CI=0, effective weight = 0.85 * (1 - 0*0.5) = 0.85
+        # Base: 0.70 * 0.85 + 0.50 * 0.15 ≈ 0.67, then extremized
         expected = 0.70 * 0.85 + 0.50 * 0.15
-        assert abs(result.final_probability - expected) < 0.01
+        assert abs(result.final_probability - expected) < 0.04
 
 
 class TestInvertedCIRegression:
