@@ -29,7 +29,7 @@ class ClaudeForecaster:
     """Calls Claude to assess market probabilities."""
 
     # Cache TTL in seconds — avoid re-assessing same market within 5 minutes
-    _CACHE_TTL_SECONDS = 300
+    _CACHE_TTL_SECONDS = 600
 
     def __init__(self, settings: Settings):
         self.settings = settings

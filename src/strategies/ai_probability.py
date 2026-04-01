@@ -309,12 +309,20 @@ class AIProbabilityStrategy:
                     cached_price = latest["market_price_at_prediction"]
                     relative_move = price_move / max(cached_price, 0.01) if cached_price > 0 else price_move
                     if age < timedelta(hours=staleness_hours) and relative_move < staleness_price_move:
-                        logger.debug(
-                            f"Skipping {market.ticker}: recent prediction "
-                            f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f} "
-                            f"({relative_move:.0%} relative))"
-                        )
-                        return None
+                        # Also check if volume changed significantly — a volume spike
+                        # can signal new information even without a price move
+                        volume_changed = False
+                        cached_volume = latest.get("volume_at_prediction")
+                        if cached_volume and cached_volume > 0 and market.volume_24h > 0:
+                            volume_ratio = market.volume_24h / cached_volume
+                            volume_changed = volume_ratio > 1.5 or volume_ratio < 0.5
+                        if not volume_changed:
+                            logger.debug(
+                                f"Skipping {market.ticker}: recent prediction "
+                                f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f} "
+                                f"({relative_move:.0%} relative), volume stable)"
+                            )
+                            return None
             except Exception as e:
                 logger.debug(f"Staleness check failed for {market.ticker}: {e}")
 

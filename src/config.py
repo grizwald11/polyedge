@@ -120,7 +120,7 @@ class ClaudeConfig(BaseModel):
     highstakes_threshold: float = 50.0
     max_tokens: int = 2000
     temperature: float = 0.3
-    max_assessments_per_cycle: int = 10
+    max_assessments_per_cycle: int = 5
     ensemble_weight: float = 0.85
     category_temperatures: dict[str, float] = Field(default_factory=lambda: {
         "Politics": 0.25,
@@ -137,8 +137,8 @@ class ClaudeConfig(BaseModel):
     decomposition_enabled: bool = True  # Enable multi-step decomposition for compound questions
     max_divergence_from_market: float = 0.40  # Reject if |claude - market| > this
     api_timeout_seconds: int = 60  # Hard timeout on Claude API calls
-    reassessment_interval_hours: float = 2.0  # Skip re-assessment if prediction is younger than this
-    reassessment_price_move: float = 0.02  # Re-assess if relative price move exceeds this (2%)
+    reassessment_interval_hours: float = 4.0  # Skip re-assessment if prediction is younger than this
+    reassessment_price_move: float = 0.03  # Re-assess if relative price move exceeds this (3%)
     daily_token_budget: int = 1_000_000  # Soft daily token budget warning threshold
     max_concurrent_assessments: int = 5  # Max parallel Claude API calls per scan cycle
 
