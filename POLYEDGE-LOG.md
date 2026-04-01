@@ -264,9 +264,27 @@
 - Current 0.05 min_edge_ai is reasonable — trades off volume vs quality well
 - min_edge 0.10 has best risk-adjusted return (highest median with <47% drawdown)
 
+### Item 11: Test coverage improvement (78% → 85%)
+386 new tests added across 10 test files:
+
+| Module | Before | After | Tests Added |
+|--------|--------|-------|-------------|
+| retry_helper | 0% | 100% | 19 |
+| news_ingestion | 54% | 100% | 41 |
+| kalshi_client | 38% | 92% | 65 |
+| polymarket_client | 26% | 95% | 60 |
+| metrics | 74% | 100% | 27 |
+| ai_probability | 74% | 98% | 65 |
+| cross_arb | 70% | 99% | 38 |
+| fill_tracker | 74% | 100% | 27 |
+| orchestrator/lifecycle | 54% | 76% | 18 |
+| orchestrator/scan_cycle | 55% | 83% | 28 |
+
+- **Commit**: `a4edd32`
+
 ### Test Suite Status
-- **1602 passed, 0 failed, 1 skipped**
-- New tests added: 56 (correlation detector) + 22 (monte carlo) + 22 (late resolution) + 12 (price monitor) + 15 (mean reversion) + 21 (orderbook) + 12 (date parsing) = 160 new tests
+- **1988 passed, 0 failed**
+- Total new tests this session: ~546
 
 ### Session 3 Commits
 ```
