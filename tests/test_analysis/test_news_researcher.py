@@ -452,6 +452,86 @@ class TestTruncateAtSentence:
         assert _truncate_at_sentence(text, 6) == "Exact."
 
 
+class TestDateParsing:
+    """Verify _is_stale handles all common date formats including ISO 8601."""
+
+    def _make_result(self, date_str: str) -> NewsResult:
+        return NewsResult(
+            title="Test Article Title That Is Long Enough",
+            snippet="Test snippet",
+            source="reuters.com",
+            date=date_str,
+            url="https://example.com/article",
+        )
+
+    def test_iso8601_with_colon_timezone(self):
+        """The format that was failing: 2026-03-31T12:50:00+00:00."""
+        researcher = NewsResearcher()
+        result = self._make_result("2026-03-31T12:50:00+00:00")
+        # 1 day old from 2026-04-01 — stale at 1-day threshold, not at 7
+        assert researcher._is_stale(result, max_age_days=30) is False
+
+    def test_iso8601_zulu_suffix(self):
+        """ISO 8601 with Z suffix for UTC."""
+        researcher = NewsResearcher()
+        result = self._make_result("2026-04-01T09:01:00Z")
+        assert researcher._is_stale(result, max_age_days=7) is False
+
+    def test_iso8601_fractional_seconds(self):
+        researcher = NewsResearcher()
+        result = self._make_result("2026-04-01T09:01:00.123+00:00")
+        assert researcher._is_stale(result, max_age_days=7) is False
+
+    def test_iso8601_no_timezone(self):
+        """ISO 8601 without timezone — assume UTC."""
+        researcher = NewsResearcher()
+        result = self._make_result("2026-04-01T10:00:00")
+        assert researcher._is_stale(result, max_age_days=7) is False
+
+    def test_date_only(self):
+        researcher = NewsResearcher()
+        result = self._make_result("2026-04-01")
+        assert researcher._is_stale(result, max_age_days=7) is False
+
+    def test_space_separator_with_tz(self):
+        researcher = NewsResearcher()
+        result = self._make_result("2026-04-01 10:00:00+00:00")
+        assert researcher._is_stale(result, max_age_days=7) is False
+
+    def test_text_month_with_tz(self):
+        researcher = NewsResearcher()
+        result = self._make_result("Mar 31, 2026 14:30:00 +0000")
+        assert researcher._is_stale(result, max_age_days=30) is False
+
+    def test_old_iso8601_is_stale(self):
+        researcher = NewsResearcher()
+        result = self._make_result("2025-01-15T10:00:00+00:00")
+        assert researcher._is_stale(result, max_age_days=7) is True
+
+    def test_empty_date_not_stale(self):
+        researcher = NewsResearcher()
+        result = self._make_result("")
+        assert researcher._is_stale(result, max_age_days=7) is False
+
+    def test_relative_days(self):
+        researcher = NewsResearcher()
+        result = self._make_result("3 days ago")
+        assert researcher._is_stale(result, max_age_days=7) is False
+        assert researcher._is_stale(result, max_age_days=2) is True
+
+    def test_relative_weeks_stale(self):
+        researcher = NewsResearcher()
+        result = self._make_result("2 weeks ago")
+        assert researcher._is_stale(result, max_age_days=7) is True
+
+    def test_unparseable_with_old_fetch_timestamp(self):
+        import time
+        researcher = NewsResearcher()
+        result = self._make_result("some random date string")
+        old_ts = time.monotonic() - (8 * 86400)
+        assert researcher._is_stale(result, max_age_days=7, fetch_timestamp=old_ts) is True
+
+
 class TestSerperRecovery:
     """Tests for Serper permanent disable and recovery (H-3)."""
 

@@ -514,10 +514,16 @@ class NewsResearcher:
             if days > effective_max:
                 return True
         # Try parsing absolute dates (M-13: includes timezone-aware formats)
+        from datetime import datetime, timezone
+        date_str = result.date.strip()
+        # Normalize 'Z' suffix to '+00:00' for strptime %z compatibility
+        normalized = re.sub(r"Z$", "+00:00", date_str)
         for fmt in (
-            "%Y-%m-%dT%H:%M:%S%z",     # ISO 8601 with timezone offset
+            "%Y-%m-%dT%H:%M:%S%z",     # ISO 8601: 2026-03-19T10:00:00+00:00
+            "%Y-%m-%dT%H:%M:%S.%f%z",  # ISO 8601 with fractional seconds
             "%Y-%m-%d %H:%M:%S%z",      # ISO-like with space separator
-            "%Y-%m-%d %H:%M:%S %Z",     # With timezone name (e.g., UTC)
+            "%Y-%m-%dT%H:%M:%S",        # ISO 8601 without timezone (assume UTC)
+            "%Y-%m-%d %H:%M:%S",        # Datetime without timezone (assume UTC)
             "%b %d, %Y %H:%M:%S %z",    # e.g., "Mar 15, 2026 14:30:00 +0000"
             "%Y-%m-%d",
             "%b %d, %Y",
@@ -525,8 +531,9 @@ class NewsResearcher:
             "%m/%d/%Y",
         ):
             try:
-                from datetime import datetime, timezone
-                parsed = datetime.strptime(result.date.strip()[:20], fmt).replace(tzinfo=timezone.utc)
+                parsed = datetime.strptime(normalized, fmt)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
                 age_days = (datetime.now(timezone.utc) - parsed).days
                 if age_days > effective_max:
                     return True
