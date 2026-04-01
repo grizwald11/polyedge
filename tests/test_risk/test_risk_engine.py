@@ -263,15 +263,19 @@ class TestCheckAll:
         assert any("Obvious NO" in c for c in result.failed_checks)
 
     def test_fails_correlated_exposure(self, engine, signal, market, position_manager):
-        """Filling AI_PROBABILITY to near 20% limit should block another AI_PROBABILITY trade."""
+        """Filling AI_PROBABILITY to near 20% limit should block another AI_PROBABILITY trade.
+
+        With 50% correlation fallback, need raw exposure > 2x the limit so that
+        effective_correlated (50%) + proposed_cost > max_correlated ($100).
+        """
         from src.core.models import Side, Trade
 
-        # Fill up strategy exposure to near 20% of $500 = $100
-        for i in range(4):
+        # Fill up strategy exposure: 8 x $25 = $200 raw → $100 effective (50%)
+        for i in range(8):
             trade = Trade(
                 order_id=f"PE-corr-{i}", market_id=f"AI-MKT-{i}",
                 token_id=f"AI-MKT-{i}_yes", side=Side.BUY,
-                price=0.50, size=50,  # $25 each = $100 total
+                price=0.50, size=50,  # $25 each = $200 total raw
                 strategy=StrategyName.AI_PROBABILITY, paper=True,
             )
             position_manager.update_from_trade(trade)

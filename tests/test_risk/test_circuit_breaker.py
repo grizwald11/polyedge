@@ -40,8 +40,8 @@ class TestDailyLossLimit:
         assert cb.is_halted() is False
 
     def test_daily_loss_triggers_halt(self, cb, tmp_db):
-        # Daily loss limit = 10% of $500 = $50
-        _log_losing_trade(tmp_db, pnl=-55.0)
+        # Daily loss limit = 15% of $500 = $75
+        _log_losing_trade(tmp_db, pnl=-80.0)
 
         assert cb.check(500.0) is False
         assert cb.is_halted() is True
@@ -52,7 +52,7 @@ class TestDailyLossLimit:
         assert cb.check(500.0) is True
 
     def test_stays_halted_once_triggered(self, cb, tmp_db):
-        _log_losing_trade(tmp_db, pnl=-55.0)
+        _log_losing_trade(tmp_db, pnl=-80.0)
         cb.check(500.0)
 
         # Still halted on next check
@@ -63,8 +63,8 @@ class TestUnrealizedPnlInDailyLimit:
     """Unrealized P&L from open positions counts at 75% weight toward daily limit (M-3)."""
 
     def test_unrealized_loss_triggers_halt(self, cb, tmp_db):
-        # Realized = -40, unrealized = -40 * 0.5 = -20, total = -60 > 10% of 500 = 50
-        _log_losing_trade(tmp_db, pnl=-40.0)
+        # Realized = -55, unrealized = -40 * 0.75 = -30, total = -85 > 15% of 500 = 75
+        _log_losing_trade(tmp_db, pnl=-55.0)
         assert cb.check(500.0, unrealized_pnl=-40.0) is False
         assert cb.is_halted() is True
 

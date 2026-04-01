@@ -121,7 +121,7 @@ class TestRiskPipelineIntegration:
 
         # Insert a trade with large realized loss so get_daily_pnl() returns negative
         bankroll = pipeline_settings.trading.bankroll
-        loss_amount = bankroll * 0.12  # 12% loss exceeds 10% daily limit
+        loss_amount = bankroll * 0.18  # 18% loss exceeds 15% daily limit
         now = datetime.now(timezone.utc).isoformat()
         conn = pipeline_db._get_conn()
         conn.execute(

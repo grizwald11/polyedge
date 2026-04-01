@@ -51,7 +51,7 @@ class TradingConfig(BaseModel):
     min_edge_news: float = 0.03  # Lower threshold: news edges are fast/temporary
     kelly_fraction: float = 0.5
     prefer_maker: bool = True
-    daily_loss_limit_pct: float = 0.10
+    daily_loss_limit_pct: float = 0.15
     max_drawdown_pct: float = 0.20  # H-3: Halt if equity drops >20% from peak
     max_obvious_no_pct: float = 0.10
     obvious_no_probability_multiplier: float = 0.3  # Conservative P(YES) scaling for obvious-NO markets.
@@ -174,11 +174,11 @@ class ExecutionConfig(BaseModel):
     max_poll_attempts: int = 5  # Max order status poll attempts
     cycle_timeout_seconds: int = 300  # Hard timeout per scan-trade cycle
     # Exit thresholds (previously hardcoded in position_manager.py)
-    stop_loss_pct: float = 0.30          # Exit if unrealized loss > 30% of cost basis
+    stop_loss_pct: float = 0.20          # Exit if unrealized loss > 20% of cost basis
     max_hold_days: int = 21              # Exit if held > 21 days
     edge_gone_threshold: float = 0.20    # Exit if remaining edge < 20% of original
     trailing_stop_activate: float = 0.12 # Activate trailing stop after 12% gain
-    trailing_stop_distance: float = 0.50 # Trail 50% of peak gain
+    trailing_stop_distance: float = 0.35 # Trail 35% of peak gain
     take_profit_pct: float = 0.80        # Take profit at 80% of max theoretical gain
     capital_rotation_edge: float = 0.40  # When exposure >35%, exit positions with <40% remaining edge
 

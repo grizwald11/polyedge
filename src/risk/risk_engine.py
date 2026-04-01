@@ -251,15 +251,18 @@ class RiskEngine:
                     f"${correlated_exposure + proposed_cost:.2f} > ${max_correlated:.2f}"
                 )
         else:
+            # Strategy-based fallback: not all trades in one strategy are correlated,
+            # so use 50% of strategy exposure as effective correlated exposure.
             strategy_exposure = self.positions.get_strategy_exposure(signal.strategy)
+            effective_correlated = strategy_exposure * 0.5
             logger.info(
-                "Correlated exposure check (strategy-based fallback, no PortfolioRisk): "
-                "%s = $%.2f", signal.strategy.value, strategy_exposure,
+                "Correlated exposure check (strategy-based fallback, 50%% correlation): "
+                "%s = $%.2f (raw $%.2f)", signal.strategy.value, effective_correlated, strategy_exposure,
             )
-            if strategy_exposure + proposed_cost > max_correlated:
+            if effective_correlated + proposed_cost > max_correlated:
                 failed.append(
                     f"Correlated exposure exceeded for {signal.strategy.value}: "
-                    f"${strategy_exposure + proposed_cost:.2f} > ${max_correlated:.2f}"
+                    f"${effective_correlated + proposed_cost:.2f} > ${max_correlated:.2f}"
                 )
 
     def _check_circuit_breaker(self, failed: list[str]) -> None:

@@ -40,10 +40,24 @@ When the question involves compound events (A AND B, sequential steps, condition
 4. For conditional: P(A and B) = P(A) × P(B|A).
 5. State the decomposition in your reasoning.
 
+TEMPORAL CALIBRATION:
+- Check how many days remain until resolution (provided in the market details).
+- If resolving within 7 days: focus on scheduled events, announced decisions, and near-certain developments. Narrow your CI.
+- If resolving 7-30 days: include announced events but widen CI for unknown catalysts.
+- If resolving 30+ days: materially reduce confidence — many unforecast developments will occur. Widen CI significantly.
+
+BASE RATE REQUIREMENT:
+- You MUST state an explicit base rate in your reasoning: "In historically similar situations, the base rate is approximately X%."
+- Then explain how you adjusted from that base rate given current evidence.
+
+CONSIDERING THE OPPOSITE:
+- Before finalizing, explicitly state the strongest argument AGAINST your estimate.
+- If you cannot articulate a strong counterargument, your estimate may be overconfident.
+
 CRITICAL: Respond ONLY with a valid JSON object. No explanation, no markdown, no code fences, no text before or after the JSON. Your entire response must be parseable as JSON.
 
 Required JSON schema:
-{"probability": <float 0.01-0.99>, "confidence_low": <float>, "confidence_high": <float>, "key_factors_for": ["<string>", ...], "key_factors_against": ["<string>", ...], "uncertainties": ["<string>", ...], "reasoning": "<brief explanation including decomposition if applicable>"}"""
+{"probability": <float 0.01-0.99>, "confidence_low": <float>, "confidence_high": <float>, "base_rate": <float 0.01-0.99>, "key_factors_for": ["<string>", ...], "key_factors_against": ["<string>", ...], "uncertainties": ["<string>", ...], "reasoning": "<brief explanation including base rate, decomposition if applicable, and strongest counterargument>"}"""
 
 
 POLITICS_TEMPLATE = """Assess the probability of this POLITICAL market resolving YES.

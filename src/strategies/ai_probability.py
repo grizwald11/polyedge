@@ -620,14 +620,18 @@ class AIProbabilityStrategy:
             except Exception as e:
                 logger.debug(f"Temporal analysis failed for {market.ticker}: {e}")
 
-        # M-7: Edge significance check — reject when edge is smaller than
-        # the confidence interval half-width. If CI is 40-70% and edge is 5%,
-        # the edge is within the noise band and not statistically meaningful.
-        ci_half_width = ci_width / 2.0
-        if abs(edge) < ci_half_width and abs(edge) < 0.15:
+        # M-7: Edge significance check — reject when market price falls inside
+        # Claude's confidence interval. If CI is [55%, 65%] and market is at 60%,
+        # Claude isn't confident the market is wrong. But if market is at 45% and
+        # CI is [55%, 65%], the entire CI is above the market — genuine edge.
+        ci_low = ensemble.final_probability - ci_width / 2.0
+        ci_high = ensemble.final_probability + ci_width / 2.0
+        market_inside_ci = ci_low <= market.yes_price <= ci_high
+        if market_inside_ci and abs(edge) < 0.15:
             logger.debug(
-                f"Edge significance rejection: {market.ticker} edge={abs(edge):.3f} < "
-                f"CI half-width={ci_half_width:.3f} — edge within noise band"
+                f"Edge significance rejection: {market.ticker} market price "
+                f"{market.yes_price:.3f} is within CI [{ci_low:.3f}, {ci_high:.3f}] "
+                f"— no confident edge"
             )
             return None
 

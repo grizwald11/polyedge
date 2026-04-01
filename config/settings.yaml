@@ -43,7 +43,7 @@ trading:
   min_edge_obvious_no: 0.01     # 1% minimum for obvious NO
   kelly_fraction: 0.5           # Half-Kelly
   prefer_maker: true            # Always use limit orders when possible
-  daily_loss_limit_pct: 0.10    # 10% daily loss circuit breaker
+  daily_loss_limit_pct: 0.15    # 15% daily loss circuit breaker (raised from 10%)
   max_obvious_no_pct: 0.10      # Max 10% bankroll in obvious NO positions
   max_trades_per_cycle: 5       # Max trades per scan cycle (matches config.py default)
 
