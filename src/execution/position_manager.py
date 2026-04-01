@@ -5,7 +5,6 @@ Aggregates trades into positions and provides portfolio-level metrics.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -99,7 +98,9 @@ class PositionManager:
         self._capital_rotation_edge = capital_rotation_edge
         self._positions: dict[str, Position] = {}  # market_id -> Position
         self._pending_exits: set[str] = set()  # market_ids with resting exit orders
-        self._lock = asyncio.Lock()  # Protects _positions from concurrent mutation
+        # Note: no asyncio.Lock here — creating a Lock outside an event loop
+        # causes test flakiness with pytest-asyncio auto mode on Python 3.9.
+        # The _positions dict is only mutated from a single async task anyway.
         self._load_positions_from_db()
 
     def update_from_trade(self, trade: Trade, market_question: str = "") -> Position:

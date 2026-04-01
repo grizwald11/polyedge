@@ -560,6 +560,9 @@ class TestFullPaperTradeCycle:
 
         positions_before_exit = len(position_manager.get_all_positions())
 
+        # Track which positions were opened so we can verify exits
+        opened_market_ids = {p.market_id for p in position_manager.get_all_positions()}
+
         # Cycle 2: provide markets with crashed prices to trigger stop-loss.
         # The trading loop calls update_price() with market prices, so we need
         # the market data itself to reflect the crash.
@@ -574,14 +577,18 @@ class TestFullPaperTradeCycle:
 
         # Also make Claude return no edge so no NEW positions open
         forecaster.assess_market = AsyncMock(return_value=_mock_forecast(0.05))
+        # Prevent obvious_no from opening new positions on crashed markets
+        # (YES=0.05 qualifies as obvious NO candidate, masking exit results)
+        no_strategy.generate_signals = MagicMock(return_value=[])
 
         await scan_and_trade(**kwargs, cycle_count=2)
 
-        # Verify at least one position was closed
-        positions_after_exit = len(position_manager.get_all_positions())
-        assert positions_after_exit < positions_before_exit, (
-            f"Expected exits: had {positions_before_exit} positions, "
-            f"now have {positions_after_exit}"
+        # Verify at least one of the original positions was closed
+        remaining_ids = {p.market_id for p in position_manager.get_all_positions()}
+        closed_ids = opened_market_ids - remaining_ids
+        assert len(closed_ids) >= 1, (
+            f"Expected at least 1 exit from {opened_market_ids}, "
+            f"but all still open: {remaining_ids}"
         )
 
     @pytest.mark.asyncio
