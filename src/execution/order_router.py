@@ -681,13 +681,28 @@ class OrderRouter:
             poly_side = order.side.value  # "BUY" or "SELL"
             poly_order_type = "GTC" if order.order_type == OrderType.GTC else "FOK"
 
-            result = await self.polymarket.create_and_post_order(
-                token_id=order.token_id,
-                side=poly_side,
-                price=order.price,
-                size=order.size,
-                order_type=poly_order_type,
-            )
+            # Retry up to 2 attempts on transient API failures (network errors, 5xx)
+            result = None
+            last_error: Exception | None = None
+            for _poly_attempt in range(2):
+                try:
+                    result = await self.polymarket.create_and_post_order(
+                        token_id=order.token_id,
+                        side=poly_side,
+                        price=order.price,
+                        size=order.size,
+                        order_type=poly_order_type,
+                    )
+                    break  # Success — exit retry loop
+                except Exception as _poly_err:
+                    last_error = _poly_err
+                    if _poly_attempt == 0:
+                        logger.warning(
+                            f"Polymarket API call failed (attempt 1/2): {_poly_err} — retrying in 1s"
+                        )
+                        await asyncio.sleep(1.0)
+                    else:
+                        raise  # Re-raise on second failure to hit outer except
 
             now = datetime.now(timezone.utc)
 
@@ -702,10 +717,14 @@ class OrderRouter:
             if status in ("matched", "filled"):
                 order.status = OrderStatus.FILLED
                 order.filled_at = now
-                # C-2: Read actual fill price from API response, fall back to order price
+                # C-2: Read actual fill price from API response, fall back to order price.
+                # Polymarket responses may use "price", "avg_price", or omit the field
+                # entirely (None). Check both fields and fall back to order.price.
                 try:
-                    api_price = float(result.get("price", order.price))
-                    order.fill_price = api_price if api_price > 0 else order.price
+                    raw_price = result.get("price") or result.get("avg_price")
+                    api_price = float(raw_price) if raw_price is not None else None
+                    order.fill_price = (api_price if api_price is not None and api_price > 0
+                                        else order.price)
                 except (TypeError, ValueError) as e:
                     logger.warning(
                         "M-N1: Polymarket fill price parse failed for %s: %s — "
@@ -718,7 +737,7 @@ class OrderRouter:
                 self._log_order(order)
                 logger.info(
                     f"[POLY LIVE] Order resting: {order.side.value} {int(order.size)}x "
-                    f"{order.token_id[:16]}... @ ${order.price:.2f}"
+                    f"{order.token_id} @ ${order.price:.2f}"
                 )
                 return OrderResult(success=True, order=order, trade=None)
             else:
@@ -745,9 +764,10 @@ class OrderRouter:
             self._log_order(order)
             self.db.log_trade(trade)
 
+            fill_logged_price = order.fill_price if order.fill_price is not None else order.price
             logger.info(
                 f"[POLY LIVE] Filled: {order.side.value} {int(order.size)}x "
-                f"{order.token_id[:16]}... @ ${order.price:.2f}"
+                f"{order.token_id} @ ${fill_logged_price:.2f}"
             )
 
             return OrderResult(success=True, order=order, trade=trade)
