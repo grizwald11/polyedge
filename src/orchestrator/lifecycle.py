@@ -40,6 +40,7 @@ from src.orchestrator.startup import _acquire_pid_lock, _release_pid_lock, setup
 from src.risk.circuit_breaker import CircuitBreaker
 from src.risk.correlation_detector import CorrelationDetector
 from src.risk.kelly_sizer import KellySizer
+from src.risk.monte_carlo import MonteCarloSimulator
 from src.risk.portfolio_risk import PortfolioRisk
 from src.risk.risk_engine import RiskEngine
 from src.storage.database import Database
@@ -678,6 +679,57 @@ async def main():
             f"vol=${m.volume_24h:>10,.0f} | "
             f"{m.question[:65]}"
         )
+
+    # Startup validation: Monte Carlo risk simulation against historical trade stats
+    try:
+        conn = c.db._get_conn()
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*)                                                   AS total,
+                SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END)         AS wins,
+                AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl / NULLIF(size, 0) END) AS avg_win,
+                AVG(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) / NULLIF(size, 0) END) AS avg_loss
+            FROM trades
+            WHERE realized_pnl IS NOT NULL AND size > 0
+            """
+        ).fetchone()
+        total_trades = row["total"] if row else 0
+        if total_trades >= 10:
+            wins = row["wins"] or 0
+            win_rate = wins / total_trades
+            avg_win = row["avg_win"] if row["avg_win"] is not None else 0.3
+            avg_loss = row["avg_loss"] if row["avg_loss"] is not None else 0.2
+            simulator = MonteCarloSimulator()
+            mc_result = simulator.run(
+                starting_bankroll=settings.trading.bankroll,
+                win_rate=win_rate,
+                avg_win=avg_win,
+                avg_loss=avg_loss,
+                kelly_fraction=settings.trading.kelly_fraction,
+                num_simulations=5000,
+                trades_per_sim=200,
+            )
+            logger.info(
+                f"Monte Carlo validation ({total_trades} historical trades): "
+                f"win_rate={win_rate:.1%}, avg_win={avg_win:.3f}, avg_loss={avg_loss:.3f} | "
+                f"median_bankroll=${mc_result.median_final_bankroll:.2f}, "
+                f"dd95={mc_result.drawdown_95th:.1%}, "
+                f"ruin={mc_result.probability_of_ruin:.1%}"
+            )
+            if mc_result.probability_of_ruin > 0.05:
+                logger.warning(
+                    f"Monte Carlo WARNING: ruin probability {mc_result.probability_of_ruin:.1%} "
+                    f"exceeds 5% threshold — consider reducing kelly_fraction "
+                    f"(currently {settings.trading.kelly_fraction}) or position sizing"
+                )
+        else:
+            logger.info(
+                f"Monte Carlo validation skipped: only {total_trades} historical trades "
+                f"(need >= 10 for meaningful simulation)"
+            )
+    except Exception as e:
+        logger.warning(f"Monte Carlo startup validation failed (non-fatal): {e}")
 
     # Phase 4: Start background tasks (WebSocket, dashboard)
     await _setup_background_tasks(settings, c, logger)
