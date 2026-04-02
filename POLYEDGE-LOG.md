@@ -299,3 +299,74 @@ f90bc42 Add Monte Carlo risk simulator for Kelly fraction validation
 923c858 Add position correlation detector with keyword overlap
 6600a32 Add memory bounds to caches for 24/7 operation stability
 ```
+
+---
+
+## Session 4 — 2026-04-01 Integration Wiring
+
+**Problem**: Session 3 built 6 new modules but none were connected to the main loop.
+All built strategies, risk tools, and monitors were sitting unused.
+
+### 1. Wire MeanReversion + LateResolution into orchestrator
+- Added to `_Components`, instantiated in `_setup_strategies()`
+- Threaded through `run_trading_loop()` → `scan_and_trade()` → `_generate_all_signals()`
+- Late resolution gets news_researcher connected when news ingestion is available
+- Both have proper error handling and strategy failure tracking
+- **Commit**: `cf984e3`
+
+### 2. Wire PriceMonitor into WebSocket + position sync
+- PriceMonitor instantiated in `_setup_execution_and_risk()`
+- Connected to WebSocket `_on_price` callback for real-time adverse move detection
+- Auto-exits positions with >15% adverse move via `mark_pending_exit()`
+- Positions synced each scan cycle after price updates
+- Alert callback registered for adverse move notifications via alert_manager
+- **Commit**: `89cf9be`
+
+### 3. Wire CorrelationDetector into RiskEngine
+- CorrelationDetector instantiated in lifecycle, passed to RiskEngine constructor
+- Now runs first in `_check_correlated_exposure()` using keyword Jaccard + event_ticker matching
+- Falls back to portfolio_risk or strategy-based heuristic if detector fails
+- **Commit**: `51af5cb`
+
+### 4. Wire OrderBookAnalyzer into AI probability strategy
+- AI strategy now applies orderbook imbalance signal to adjust edge and confidence
+- Optional `orderbook_analyzer` attribute set externally when available
+- **Commit**: `3ef79f3`
+
+### 5. Add min_edge + config for new strategies
+- Added `min_edge_mean_reversion` (0.05) and `min_edge_late_resolution` (0.10) to TradingConfig
+- `RiskEngine._get_min_edge()` now handles all 6 strategy types
+- **Commit**: `3ef79f3`
+
+### 6. Wire MonteCarloSimulator into startup validation
+- Runs 5K Monte Carlo simulations at startup using historical trade stats
+- Logs median bankroll, 95th percentile drawdown, ruin probability
+- Warns if ruin probability exceeds 5%
+- Skips gracefully if <10 trades or on any error
+- **Commit**: `132cf94`
+
+### 7. Fix Polymarket execution error handling
+- Added price field fallback: `result["price"]` || `result["avg_price"]` || `order.price`
+- Added 2-attempt retry with 1s delay on Polymarket API failures
+- Full token_id in critical log messages, truncation only in debug
+- **Commit**: `fc15430`
+
+### 8. Add calibration trend tracking with deterioration alerts
+- `CalibrationAnalyzer.check_trend()` compares Brier score to previous report
+- Alerts via alert_manager when deterioration >0.03 detected
+- 6 new tests for trend detection
+- **Commit**: `fd10da8`
+
+### Test Suite Status
+- **1994 passed, 0 failed**
+
+### Session 4 Commits
+```
+cf984e3 Wire MeanReversion + LateResolution strategies into orchestrator
+89cf9be Wire PriceMonitor into WebSocket and position sync loop
+51af5cb Wire CorrelationDetector into RiskEngine as primary correlation check
+3ef79f3 Wire OrderBookAnalyzer into AI strategy, add min_edge for new strategies
+132cf94 Wire MonteCarloSimulator into startup validation
+fc15430 Fix Polymarket execution error handling
+fd10da8 Add calibration trend tracking with deterioration alerts
+```
