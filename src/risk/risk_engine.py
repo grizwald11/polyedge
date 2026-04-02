@@ -525,5 +525,11 @@ class RiskEngine:
             return self.settings.trading.min_edge_arb
         elif strategy == StrategyName.OBVIOUS_NO:
             return self.settings.trading.min_edge_obvious_no
+        elif strategy == StrategyName.NEWS_REACTIVE:
+            return self.settings.trading.min_edge_news
+        elif strategy == StrategyName.MEAN_REVERSION:
+            return self.settings.trading.min_edge_mean_reversion
+        elif strategy == StrategyName.LATE_RESOLUTION:
+            return self.settings.trading.min_edge_late_resolution
         else:
             return self.settings.trading.min_edge_ai

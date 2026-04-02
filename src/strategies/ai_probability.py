@@ -71,6 +71,7 @@ class AIProbabilityStrategy:
             )
         self._category_adjustments: dict[str, float] = {}
         self._regime_edge_multiplier: float = 1.0
+        self.orderbook_analyzer = None  # Set externally if available
         self._category_base_rates: dict[str, dict] = {}
         self._category_brier_scores: dict[str, float] = {}
 
@@ -806,6 +807,18 @@ class AIProbabilityStrategy:
                 logger.warning(f"Opus escalation failed for {market.ticker}: {e}")
                 # Continue with sonnet signal on escalation failure
 
+        # Apply orderbook imbalance signal if analyzer is available
+        ob_confidence = ensemble.confidence
+        if self.orderbook_analyzer is not None:
+            try:
+                from src.data.orderbook_analyzer import apply_orderbook_signal
+                orderbook = getattr(market, '_orderbook', None)
+                if orderbook:
+                    analysis = self.orderbook_analyzer(orderbook, "yes" if direction == Direction.BUY_YES else "no")
+                    edge, ob_confidence = apply_orderbook_signal(edge, ensemble.confidence, analysis, direction)
+            except Exception as e:
+                logger.debug(f"Orderbook signal skipped for {market.ticker}: {e}")
+
         signal = Signal(
             strategy=StrategyName.AI_PROBABILITY,
             market_id=market.ticker,
@@ -814,7 +827,7 @@ class AIProbabilityStrategy:
             edge=edge,
             probability_estimate=probability_estimate,
             market_price=market_price,
-            confidence=ensemble.confidence,
+            confidence=ob_confidence,
             reasoning=forecast.reasoning,
         )
 
