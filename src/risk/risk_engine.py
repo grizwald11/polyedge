@@ -33,12 +33,14 @@ class RiskEngine:
         db: Database | None = None,
         portfolio_risk: PortfolioRisk | None = None,
         manipulation_detector: ManipulationDetector | None = None,
+        correlation_detector=None,
     ):
         self.settings = settings
         self.positions = position_manager
         self.circuit_breaker = circuit_breaker
         self.db = db
         self.portfolio_risk = portfolio_risk
+        self.correlation_detector = correlation_detector
         self.manipulation_detector = manipulation_detector or ManipulationDetector()
         self._bankroll_override: float | None = None  # Live-synced bankroll
         # Cooldown after exiting a position: longer for losses to avoid
@@ -233,8 +235,31 @@ class RiskEngine:
         self, bankroll: float, signal: Signal, proposed_cost: float,
         failed: list[str], warnings: list[str],
     ) -> None:
-        """4. Correlated exposure (max 20% — event-based if available, else strategy-based)."""
+        """4. Correlated exposure (max 20% — keyword+event if available, else strategy-based)."""
         max_correlated = bankroll * self.settings.trading.max_correlated_exposure_pct
+
+        # Primary: use CorrelationDetector (keyword + event_ticker matching)
+        if self.correlation_detector is not None:
+            try:
+                result = self.correlation_detector.check_correlation(
+                    signal.market_id, proposed_cost, bankroll,
+                )
+                if not result.allowed:
+                    failed.append(
+                        f"Correlated exposure exceeded for {signal.market_id}: "
+                        f"${result.correlated_exposure:.2f} > ${result.max_allowed:.2f} "
+                        f"({len(result.correlations)} correlated positions)"
+                    )
+                elif result.correlations:
+                    warnings.append(
+                        f"Correlated positions detected for {signal.market_id}: "
+                        f"{len(result.correlations)} positions, ${result.correlated_exposure:.2f} exposure"
+                    )
+                return
+            except Exception as e:
+                logger.warning(f"CorrelationDetector failed for {signal.market_id}: {e}")
+                # Fall through to portfolio_risk or strategy-based fallback
+
         if self.portfolio_risk is not None:
             correlated_exposure = self.portfolio_risk.get_correlated_exposure(signal.market_id)
             logger.debug(

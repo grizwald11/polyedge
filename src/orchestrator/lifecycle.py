@@ -38,6 +38,7 @@ from src.metrics import Metrics
 from src.orchestrator.scan_cycle import scan_and_trade
 from src.orchestrator.startup import _acquire_pid_lock, _release_pid_lock, setup_logging
 from src.risk.circuit_breaker import CircuitBreaker
+from src.risk.correlation_detector import CorrelationDetector
 from src.risk.kelly_sizer import KellySizer
 from src.risk.portfolio_risk import PortfolioRisk
 from src.risk.risk_engine import RiskEngine
@@ -215,6 +216,7 @@ class _Components:
         self.kelly_sizer: KellySizer | None = None
         self.risk_engine: RiskEngine | None = None
         self.metrics: Metrics | None = None
+        self.correlation_detector: CorrelationDetector | None = None
         self.price_monitor: PriceMonitor | None = None
         self.ws_client: KalshiWebSocket | None = None
         self.ws_task = None
@@ -419,8 +421,16 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
     # Risk
     c.circuit_breaker = CircuitBreaker(settings, c.db)
     c.kelly_sizer = KellySizer(settings)
+    try:
+        c.correlation_detector = CorrelationDetector(c.position_manager, c.db, settings)
+        logger.info("Correlation detector enabled")
+    except Exception as e:
+        c.correlation_detector = None
+        logger.info(f"Correlation detector disabled: {e}")
+
     c.risk_engine = RiskEngine(
         settings, c.position_manager, c.circuit_breaker, c.db, c.portfolio_risk,
+        correlation_detector=c.correlation_detector,
     )
     c.risk_engine.restore_bankroll()
 
