@@ -18,6 +18,7 @@ from src.config import load_settings
 from src.core.kalshi_client import KalshiClient
 from src.core.market_discovery import MarketDiscovery
 from src.core.models import Platform
+from src.core.price_monitor import PriceMonitor
 from src.core.websocket_client import (
     FillUpdate,
     KalshiWebSocket,
@@ -59,6 +60,7 @@ async def run_trading_loop(
     alert_manager, daily_report, metrics, settings, interval,
     poly_scanner=None, cross_platform_arb=None,
     mean_reversion_strategy=None, late_resolution_strategy=None,
+    price_monitor=None,
     shutdown_event: asyncio.Event | None = None,
 ):
     """Run the scan-assess-trade loop on an interval."""
@@ -127,6 +129,7 @@ async def run_trading_loop(
                 cross_platform_arb=cross_platform_arb,
                 mean_reversion_strategy=mean_reversion_strategy,
                 late_resolution_strategy=late_resolution_strategy,
+                price_monitor=price_monitor,
             ), timeout=settings.execution.cycle_timeout_seconds)
             stats = scanner.db.get_stats()
             logger.info(
@@ -212,6 +215,7 @@ class _Components:
         self.kelly_sizer: KellySizer | None = None
         self.risk_engine: RiskEngine | None = None
         self.metrics: Metrics | None = None
+        self.price_monitor: PriceMonitor | None = None
         self.ws_client: KalshiWebSocket | None = None
         self.ws_task = None
         self.dashboard_task = None
@@ -420,6 +424,25 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
     )
     c.risk_engine.restore_bankroll()
 
+    # Price monitor for adverse move detection
+    c.price_monitor = PriceMonitor()
+    c.price_monitor.update_positions(c.position_manager.get_all_positions())
+
+    async def _on_adverse_move(alert):
+        msg = (
+            f"ADVERSE MOVE on {alert.market_id}: {alert.adverse_pct:.1%} "
+            f"(entry={alert.entry_price:.2f}, now={alert.current_price:.2f})"
+        )
+        if alert.should_exit:
+            msg = f"AUTO-EXIT triggered — {msg}"
+        try:
+            await c.alert_manager.send_circuit_breaker_alert(msg)
+        except Exception as e:
+            logger.warning(f"Failed to send adverse move alert: {e}")
+
+    c.price_monitor.on_adverse_move(_on_adverse_move)
+    logger.info("Price monitor initialized")
+
     # Metrics
     c.metrics = Metrics()
     # L-5: Wire metrics into KalshiClient for API latency tracking
@@ -448,6 +471,13 @@ async def _setup_background_tasks(settings, c: _Components, logger) -> None:
                 yes_price = update.yes_bid if update.yes_bid > 0 else update.price
                 no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
                 c.position_manager.update_price(update.market_ticker, yes_price, no_price)
+                # Check for adverse moves on open positions
+                if c.price_monitor is not None:
+                    alert = await c.price_monitor.check_price(
+                        update.market_ticker, yes_price, no_price
+                    )
+                    if alert and alert.should_exit:
+                        c.position_manager.mark_pending_exit(update.market_ticker)
 
             async def _on_fill(update: FillUpdate):
                 trade = await c.fill_tracker.handle_ws_fill(update)
@@ -668,6 +698,7 @@ async def main():
             cross_platform_arb=c.cross_platform_arb,
             mean_reversion_strategy=c.mean_reversion_strategy,
             late_resolution_strategy=c.late_resolution_strategy,
+            price_monitor=c.price_monitor,
             shutdown_event=shutdown_event,
         )
     except KeyboardInterrupt:

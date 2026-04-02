@@ -272,6 +272,7 @@ async def scan_and_trade(
     cross_platform_arb=None,
     mean_reversion_strategy=None,
     late_resolution_strategy=None,
+    price_monitor=None,
 ):
     """Execute one complete scan-assess-trade cycle.
 
@@ -347,6 +348,13 @@ async def scan_and_trade(
 
     # 5. Update position prices
     await _update_position_prices(markets, position_manager, kalshi, poly_scanner, logger)
+
+    # 5a. Sync price monitor with current positions for adverse move detection
+    if price_monitor is not None:
+        try:
+            price_monitor.update_positions(position_manager.get_all_positions())
+        except Exception as e:
+            logger.debug(f"Price monitor sync failed: {e}")
 
     # 5b. Bayesian belief updates on open positions
     try:
