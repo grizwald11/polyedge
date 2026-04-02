@@ -478,6 +478,22 @@ async def scan_and_trade(
 
                 kelly_sizer.update_calibration_multiplier(report.overall_brier)
                 kelly_sizer.set_circuit_breaker_multiplier(circuit_breaker.get_kelly_multiplier())
+
+                trend_status, trend_delta = calibration_analyzer.check_trend(report.overall_brier)
+                if trend_status == "deteriorating":
+                    logger.warning(
+                        f"Calibration DETERIORATING: Brier worsened by {trend_delta:+.3f} "
+                        f"(now {report.overall_brier:.3f})"
+                    )
+                    await alert_manager.send_error_alert(
+                        error=f"Calibration deteriorating: Brier score worsened by {trend_delta:+.3f} to {report.overall_brier:.3f}",
+                        context="Consider reviewing recent predictions and prompt templates",
+                    )
+                elif trend_status == "improving":
+                    logger.info(
+                        f"Calibration improving: Brier improved by {trend_delta:+.3f} "
+                        f"(now {report.overall_brier:.3f})"
+                    )
             else:
                 logger.info("Calibration: no resolved predictions yet")
         except Exception as e:

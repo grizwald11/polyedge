@@ -53,6 +53,32 @@ class CalibrationAnalyzer:
 
     def __init__(self, db: Database):
         self.db = db
+        self._previous_brier: Optional[float] = None
+
+    def check_trend(self, current_brier: float) -> tuple[str, float]:
+        """Compare current Brier score to previous and classify the trend.
+
+        Args:
+            current_brier: The most recently computed overall Brier score.
+
+        Returns:
+            (status, delta) where status is "improving", "stable", or "deteriorating"
+            and delta is current_brier - previous_brier (positive = worse).
+            If no previous value exists, returns ("stable", 0.0) and records the baseline.
+        """
+        if self._previous_brier is None:
+            self._previous_brier = current_brier
+            return ("stable", 0.0)
+
+        delta = current_brier - self._previous_brier
+        self._previous_brier = current_brier
+
+        if delta > 0.03:
+            return ("deteriorating", delta)
+        elif delta < -0.03:
+            return ("improving", delta)
+        else:
+            return ("stable", delta)
 
     def generate_report(self) -> CalibrationReport:
         """Generate a full calibration report from all resolved predictions.

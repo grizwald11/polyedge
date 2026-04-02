@@ -239,6 +239,47 @@ class TestCategoryAdjustments:
         assert base_rates["Small"]["yes_rate"] > 0.5  # Still above global
 
 
+class TestCheckTrend:
+    def test_first_call_returns_stable(self, analyzer):
+        """First call establishes baseline and returns stable with zero delta."""
+        status, delta = analyzer.check_trend(0.15)
+        assert status == "stable"
+        assert delta == 0.0
+
+    def test_deteriorating_when_brier_increases_by_more_than_threshold(self, analyzer):
+        analyzer.check_trend(0.10)  # baseline
+        status, delta = analyzer.check_trend(0.14)
+        assert status == "deteriorating"
+        assert delta == pytest.approx(0.04)
+
+    def test_improving_when_brier_decreases_by_more_than_threshold(self, analyzer):
+        analyzer.check_trend(0.18)  # baseline
+        status, delta = analyzer.check_trend(0.14)
+        assert status == "improving"
+        assert delta == pytest.approx(-0.04)
+
+    def test_stable_when_change_within_threshold(self, analyzer):
+        analyzer.check_trend(0.15)  # baseline
+        status, delta = analyzer.check_trend(0.16)  # delta = 0.01, below 0.03
+        assert status == "stable"
+        assert delta == pytest.approx(0.01)
+
+    def test_boundary_exactly_at_threshold_is_stable(self, analyzer):
+        """Delta of exactly 0.03 should not trigger deteriorating (must be strictly >)."""
+        analyzer.check_trend(0.10)
+        status, delta = analyzer.check_trend(0.13)  # delta = 0.03 exactly
+        assert status == "stable"
+        assert delta == pytest.approx(0.03)
+
+    def test_previous_brier_updated_each_call(self, analyzer):
+        """Each call updates the baseline for the next comparison."""
+        analyzer.check_trend(0.20)  # baseline = 0.20
+        analyzer.check_trend(0.22)  # delta = 0.02, stable; baseline now 0.22
+        status, delta = analyzer.check_trend(0.26)  # delta = 0.04 from 0.22
+        assert status == "deteriorating"
+        assert delta == pytest.approx(0.04)
+
+
 class TestDatabaseMethods:
     """Test the new database methods added for resolution tracking."""
 
