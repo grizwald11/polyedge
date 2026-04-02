@@ -139,6 +139,7 @@ async def _generate_all_signals(
     markets, poly_markets, ai_strategy, no_strategy, news_strategy,
     cross_arb_strategy, whale_strategy, cross_platform_arb,
     alert_manager, metrics, logger,
+    mean_reversion_strategy=None, late_resolution_strategy=None,
 ):
     """Generate signals from all strategies. Returns (all_signals, ai_signals, no_signals)."""
     all_signals: list = []
@@ -198,6 +199,24 @@ async def _generate_all_signals(
             logger.error(f"Cross-platform arb strategy failed: {e}", exc_info=True)
             _strategy_failures.append("cross_platform_arb")
 
+    if mean_reversion_strategy is not None:
+        _strategies_attempted += 1
+        try:
+            mr_signals = mean_reversion_strategy.generate_signals(markets)
+            all_signals.extend(mr_signals)
+        except Exception as e:
+            logger.error(f"Mean reversion strategy failed: {e}", exc_info=True)
+            _strategy_failures.append("mean_reversion")
+
+    if late_resolution_strategy is not None:
+        _strategies_attempted += 1
+        try:
+            lr_signals = await late_resolution_strategy.generate_signals(markets)
+            all_signals.extend(lr_signals)
+        except Exception as e:
+            logger.error(f"Late resolution strategy failed: {e}", exc_info=True)
+            _strategy_failures.append("late_resolution")
+
     # M-20: Warn if ANY strategies failed (degraded mode), escalate if ALL failed
     if _strategy_failures and _strategies_attempted > 0:
         if len(_strategy_failures) >= _strategies_attempted:
@@ -251,6 +270,8 @@ async def scan_and_trade(
     cycle_count: int = 0,
     poly_scanner=None,
     cross_platform_arb=None,
+    mean_reversion_strategy=None,
+    late_resolution_strategy=None,
 ):
     """Execute one complete scan-assess-trade cycle.
 
@@ -375,6 +396,8 @@ async def scan_and_trade(
         markets, poly_markets, ai_strategy, no_strategy, news_strategy,
         cross_arb_strategy, whale_strategy, cross_platform_arb,
         alert_manager, metrics, logger,
+        mean_reversion_strategy=mean_reversion_strategy,
+        late_resolution_strategy=late_resolution_strategy,
     )
 
     if not all_signals:

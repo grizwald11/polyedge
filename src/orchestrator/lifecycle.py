@@ -44,6 +44,8 @@ from src.storage.database import Database
 from src.strategies.ai_probability import AIProbabilityStrategy
 from src.strategies.cross_arb import CrossArbStrategy
 from src.strategies.cross_platform_arb import CrossPlatformArbStrategy
+from src.strategies.late_resolution import LateResolutionStrategy
+from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.news_reactive import NewsReactiveStrategy
 from src.strategies.obvious_no import ObviousNoStrategy
 from src.strategies.whale_tracker import WhaleTrackerStrategy
@@ -56,6 +58,7 @@ async def run_trading_loop(
     calibration, resolution_tracker, calibration_analyzer, fill_tracker,
     alert_manager, daily_report, metrics, settings, interval,
     poly_scanner=None, cross_platform_arb=None,
+    mean_reversion_strategy=None, late_resolution_strategy=None,
     shutdown_event: asyncio.Event | None = None,
 ):
     """Run the scan-assess-trade loop on an interval."""
@@ -122,6 +125,8 @@ async def run_trading_loop(
                 fill_tracker, alert_manager, metrics, settings, cycle_count,
                 poly_scanner=poly_scanner,
                 cross_platform_arb=cross_platform_arb,
+                mean_reversion_strategy=mean_reversion_strategy,
+                late_resolution_strategy=late_resolution_strategy,
             ), timeout=settings.execution.cycle_timeout_seconds)
             stats = scanner.db.get_stats()
             logger.info(
@@ -192,6 +197,8 @@ class _Components:
         self.whale_strategy: WhaleTrackerStrategy | None = None
         self.market_graph: MarketGraph | None = None
         self.portfolio_risk: PortfolioRisk | None = None
+        self.mean_reversion_strategy: MeanReversionStrategy | None = None
+        self.late_resolution_strategy: LateResolutionStrategy | None = None
         self.poly_scanner = None
         self.cross_platform_arb: CrossPlatformArbStrategy | None = None
         self.polymarket_client = None
@@ -267,6 +274,19 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
     c.no_strategy = ObviousNoStrategy(settings)
 
     try:
+        c.mean_reversion_strategy = MeanReversionStrategy(settings, c.db)
+        logger.info("Mean reversion strategy enabled")
+    except Exception as e:
+        logger.info(f"Mean reversion strategy disabled: {e}")
+
+    try:
+        news_researcher = None  # Will be set below if news ingestion is available
+        c.late_resolution_strategy = LateResolutionStrategy(settings, c.db)
+        logger.info("Late resolution strategy enabled")
+    except Exception as e:
+        logger.info(f"Late resolution strategy disabled: {e}")
+
+    try:
         news_ingestion = NewsIngestion(
             rss_feeds=settings.news.rss_feeds,
             max_article_age_minutes=settings.news.max_article_age_minutes,
@@ -274,6 +294,10 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
         )
         c.news_strategy = NewsReactiveStrategy(c.forecaster, news_ingestion, settings, c.db)
         logger.info("News-reactive strategy enabled")
+        # Wire news ingestion into late resolution strategy if available
+        if c.late_resolution_strategy is not None:
+            c.late_resolution_strategy.news_researcher = news_ingestion
+            logger.info("Late resolution: news researcher connected")
     except Exception as e:
         logger.info(f"News-reactive strategy disabled: {e}")
 
@@ -642,6 +666,8 @@ async def main():
             settings, settings.scanning.interval_seconds,
             poly_scanner=c.poly_scanner,
             cross_platform_arb=c.cross_platform_arb,
+            mean_reversion_strategy=c.mean_reversion_strategy,
+            late_resolution_strategy=c.late_resolution_strategy,
             shutdown_event=shutdown_event,
         )
     except KeyboardInterrupt:
