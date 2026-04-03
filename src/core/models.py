@@ -37,9 +37,11 @@ def dollars_to_cents(dollars: float) -> int:
     """Convert dollars (0.01-0.99) to Kalshi cents (1-99).
 
     Uses Decimal to avoid floating-point rounding errors.
+    M-6 FIX: Multiply first, then round — avoids sub-cent precision loss
+    from quantize-then-multiply order.
     """
     from decimal import ROUND_HALF_UP, Decimal
-    return int(Decimal(str(dollars)).quantize(Decimal("0.01")) * 100)
+    return int((Decimal(str(dollars)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 # ──────────────────────────────────────────────

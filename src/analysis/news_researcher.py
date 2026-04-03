@@ -277,6 +277,33 @@ class NewsResearcher:
             self._serper_auth_failure_count = 0
             self._serper_key_at_disable = None
 
+        # H-3 FIX: Auto-recover permanently disabled Serper after 1 hour.
+        # If 3+ auth failures were actually transient (network issue misclassified
+        # as auth), we don't want to permanently lose the paid search backend.
+        # After 1 hour, attempt a single probe query — if it succeeds, re-enable.
+        SERPER_PERMANENT_PROBE_INTERVAL = 3600  # 1 hour
+        if (
+            self._serper_disabled
+            and self._serper_disabled_at == float("inf")
+            and self.serper_api_key
+            and self._serper_key_at_disable == self.serper_api_key  # Key hasn't changed
+        ):
+            import time as _time
+            last_probe = getattr(self, "_serper_last_probe_time", 0.0)
+            if _time.monotonic() - last_probe >= SERPER_PERMANENT_PROBE_INTERVAL:
+                self._serper_last_probe_time = _time.monotonic()
+                logger.info("H-3: Probing Serper API after permanent disable (1h recovery attempt)")
+                try:
+                    probe_results = await self._search_serper("test probe query")
+                    if probe_results is not None:  # Even empty list means API responded OK
+                        logger.info("H-3: Serper probe succeeded — re-enabling API")
+                        self._serper_disabled = False
+                        self._serper_disabled_at = 0.0
+                        self._serper_auth_failure_count = 0
+                        self._serper_key_at_disable = None
+                except Exception as probe_err:
+                    logger.debug(f"H-3: Serper probe still failing: {probe_err}")
+
         # Re-enable Serper after cooldown — but not if permanently disabled
         # (3+ consecutive auth failures sets _serper_disabled_at to float("inf"))
         if self._serper_disabled and 0 < self._serper_disabled_at < float("inf"):
@@ -507,6 +534,7 @@ class NewsResearcher:
             weeks = int(weeks_match.group(1))
             if weeks * 7 > effective_max:
                 return True
+            return False  # Relative date parsed successfully and within threshold
         months_match = re.search(r"(\d+)\s*month", date_lower)
         if months_match:
             return True  # Any "X months ago" is too old
@@ -515,6 +543,7 @@ class NewsResearcher:
             days = int(days_match.group(1))
             if days > effective_max:
                 return True
+            return False  # Relative date parsed successfully and within threshold
         # Try parsing absolute dates (M-13: includes timezone-aware formats)
         from datetime import datetime, timezone
         date_str = result.date.strip()
@@ -557,11 +586,14 @@ class NewsResearcher:
                     f"— marking stale (conservative policy)"
                 )
                 return True
+        # H-7 FIX: Articles with unparseable dates and no fetch_timestamp
+        # are treated as stale by default. Previously they were kept indefinitely,
+        # which risked injecting months-old context into Claude's assessments.
         logger.info(
             f"Could not parse date '{result.date}' for '{result.title[:50]}...' "
-            f"— keeping article (staleness unknown)"
+            f"— marking stale (H-7: no verifiable date, conservative policy)"
         )
-        return False
+        return True
 
     def _score_relevance(self, result: NewsResult, market_question: str) -> float:
         """Score a result's relevance to the market question.

@@ -71,6 +71,8 @@ class KalshiClient:
         max_concurrent: int = 5,
         min_request_interval: float = 0.1,
         metrics: Optional[Any] = None,
+        rate_limit_per_second: float = 8.0,
+        burst_capacity: float = 10.0,
     ):
         self.host = host.rstrip("/")
         self.api_key_id = api_key_id
@@ -81,9 +83,8 @@ class KalshiClient:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._min_request_interval = min_request_interval
         self._last_request_time: float = 0.0
-        # H-2: Proactive token bucket — prevents 429s by throttling outgoing requests.
-        # Kalshi's rate limit is ~10 req/s; we default to 8/s with burst up to 10.
-        self._rate_limiter = TokenBucket(rate=8.0, capacity=10.0)
+        # M-3: Configurable rate limiter via constructor (reads from KalshiConfig).
+        self._rate_limiter = TokenBucket(rate=rate_limit_per_second, capacity=burst_capacity)
         self._consecutive_timeouts: int = 0
         self._consecutive_5xx: int = 0
         self._circuit_breaker_triggers: int = 0  # M-10: track for exponential backoff

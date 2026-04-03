@@ -85,6 +85,30 @@ class DailyReport:
                 lines.append(f"Biggest loss: ${min(pnls):+.2f}")
         lines.append("")
 
+        # H-6 FIX: Show skipped signals so we can detect if the risk engine
+        # is blocking profitable trades. Without this, false negatives are
+        # invisible until calibration review weeks later.
+        try:
+            skipped = self.db.get_skipped_signals_for_date(date_str)
+            if skipped:
+                lines.append(f"Skipped signals: {len(skipped)}")
+                # Group by risk gate reason
+                reason_counts: dict[str, int] = {}
+                total_edge = 0.0
+                for sig in skipped:
+                    reasons = sig.get("risk_failed_checks", "unknown")
+                    for reason in (reasons.split(",") if reasons else ["unknown"]):
+                        reason = reason.strip()
+                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                    total_edge += abs(sig.get("edge", 0))
+                avg_edge = total_edge / len(skipped) if skipped else 0
+                lines.append(f"  Avg edge of skipped: {avg_edge:.1%}")
+                for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1])[:5]:
+                    lines.append(f"  {reason}: {count}")
+                lines.append("")
+        except Exception as e:
+            logger.debug(f"Failed to load skipped signals: {e}")
+
         # Portfolio overview
         lines.append(f"Total P&L (all time): ${stats.get('total_pnl', 0):+.2f}")
         lines.append(f"Total trades (all time): {stats.get('total_trades', 0)}")

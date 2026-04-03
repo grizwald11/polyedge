@@ -64,6 +64,39 @@ class CircuitBreaker:
                     self.reset_daily()
                 else:
                     return False
+            # H-4 FIX: Auto-recover from max drawdown halt after 48 hours
+            # with reduced sizing (quarter-Kelly). This prevents the bot from
+            # staying halted indefinitely during weekends or unattended periods.
+            # Only applies to drawdown < 30%; severe drawdowns (>=30%) still
+            # require manual reset to force review of strategy.
+            elif "Max drawdown" in (self._halt_reason or "") and self._halt_time:
+                now = datetime.now(timezone.utc)
+                seconds_since_halt = (now - self._halt_time).total_seconds()
+                drawdown_pct = self._extract_drawdown_pct(self._halt_reason)
+                if seconds_since_halt >= 172800 and drawdown_pct < 0.30:  # 48 hours
+                    logger.warning(
+                        f"H-4: Auto-recovering from drawdown halt after 48h "
+                        f"(drawdown={drawdown_pct:.1%}). Enabling reduced sizing."
+                    )
+                    self._halted = False
+                    self._halt_reason = None
+                    self._halt_time = None
+                    self._reduced_sizing = True
+                    self._save_state()
+                else:
+                    return False
+            elif "Unrealized loss" in (self._halt_reason or "") and self._halt_time:
+                now = datetime.now(timezone.utc)
+                seconds_since_halt = (now - self._halt_time).total_seconds()
+                if seconds_since_halt >= 86400:  # 24h for unrealized loss halt
+                    logger.warning("Auto-recovering from unrealized loss halt after 24h")
+                    self._halted = False
+                    self._halt_reason = None
+                    self._halt_time = None
+                    self._reduced_sizing = True
+                    self._save_state()
+                else:
+                    return False
             else:
                 return False
 
@@ -210,6 +243,26 @@ class CircuitBreaker:
         # Track which day was last recorded to prevent double-counting on restart
         self._last_recorded_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self._persist_state()
+
+    @staticmethod
+    def _extract_drawdown_pct(halt_reason: str) -> float:
+        """Extract drawdown percentage from halt reason string.
+
+        H-4: Used for auto-recovery logic — only auto-recover if drawdown < 30%.
+        """
+        import re
+        match = re.search(r'(\d+\.?\d*)%', halt_reason or "")
+        if match:
+            return float(match.group(1)) / 100.0
+        return 1.0  # Conservative: treat as severe if we can't parse
+
+    def _save_state(self) -> None:
+        """Alias for _persist_state (used by H-4 auto-recovery)."""
+        self._persist_state()
+
+    def trigger_halt(self, reason: str) -> None:
+        """Public API to halt all trading (used by orchestrator on critical failures)."""
+        self._halt(reason)
 
     def _halt(self, reason: str) -> None:
         """Halt all trading."""

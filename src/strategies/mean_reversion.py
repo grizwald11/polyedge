@@ -123,15 +123,28 @@ class MeanReversionStrategy:
         if price_range < MIN_PRICE_MOVE_PCT * oldest_price:
             return None
 
+        # M-9 FIX: Category-aware reversion factor instead of blanket 50%.
+        # Political markets tend to trend (new information), while culture/entertainment
+        # markets revert more reliably (sentiment spikes fade).
+        REVERSION_FACTORS = {
+            "Politics": 0.30, "Elections": 0.30,
+            "Fed": 0.35, "Economics": 0.35,
+            "Geopolitics": 0.30,
+            "Culture": 0.50, "Entertainment": 0.50,
+            "Tech": 0.40, "AI": 0.40,
+        }
+        cat_value = market.category.value if hasattr(market.category, 'value') else str(market.category)
+        reversion_factor = REVERSION_FACTORS.get(cat_value, 0.35)
+
         # Direction: fade the move (take opposite side)
         if price_move > 0:
             # Price went UP → buy NO (expect reversion down)
             direction = Direction.BUY_NO
-            edge = price_move_pct * 0.5  # Estimate half the move reverts
+            edge = price_move_pct * reversion_factor
         else:
             # Price went DOWN → buy YES (expect reversion up)
             direction = Direction.BUY_YES
-            edge = price_move_pct * 0.5
+            edge = price_move_pct * reversion_factor
 
         # Estimate probability of reversion
         # Higher moves have higher reversion probability up to a point

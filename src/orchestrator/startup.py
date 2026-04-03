@@ -31,6 +31,13 @@ def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log")
     file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
     root.addHandler(file_handler)
 
+    # L-5 FIX: Enforce restrictive permissions on log file
+    import os
+    try:
+        os.chmod(log_file, 0o600)
+    except OSError:
+        pass  # May fail on first run before file exists
+
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)

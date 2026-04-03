@@ -192,8 +192,12 @@ class TestSignalDetails:
         assert len(signals) == 1
         assert signals[0].strategy == StrategyName.MEAN_REVERSION
 
-    def test_signal_edge_is_half_move(self, tmp_db):
-        """Edge should be approximately half the price move percentage."""
+    def test_signal_edge_is_category_scaled_move(self, tmp_db):
+        """Edge should be category-scaled fraction of the price move percentage.
+
+        Politics category uses 0.30 reversion factor (M-9), so a ~15-20% move
+        produces ~4.5-6% edge.
+        """
         strategy = MeanReversionStrategy(None, tmp_db)
         market = _make_market(yes_price=0.60)
         # ~15-20% move depending on snapshot timing
@@ -201,8 +205,8 @@ class TestSignalDetails:
 
         signals = strategy.generate_signals([market])
         assert len(signals) == 1
-        # Edge is half of measured move, move ~15-20% → edge ~7.5-10%
-        assert 0.05 <= signals[0].edge <= 0.12
+        # Politics reversion factor = 0.30, move ~15-20% → edge ~4.5-6%
+        assert 0.03 <= signals[0].edge <= 0.08
 
     def test_signal_reasoning_contains_move_info(self, tmp_db):
         strategy = MeanReversionStrategy(None, tmp_db)

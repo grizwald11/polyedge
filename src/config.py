@@ -15,6 +15,8 @@ class KalshiConfig(BaseModel):
     host: str = "https://api.elections.kalshi.com/trade-api/v2"
     demo_host: str = "https://demo-api.kalshi.co/trade-api/v2"
     use_demo: bool = True
+    rate_limit_per_second: float = 8.0  # M-3: Configurable rate limiter (was hardcoded)
+    burst_capacity: float = 10.0  # M-3: Configurable burst capacity
 
     @property
     def active_host(self) -> str:
@@ -37,6 +39,27 @@ class ScanningConfig(BaseModel):
     max_markets: int = 200
     target_categories: list[str] = Field(default_factory=lambda: ["Politics", "Geopolitics", "Fed", "AI", "Tech"])
     exclude_categories: list[str] = Field(default_factory=lambda: ["Crypto Prices", "Sports"])
+
+    @field_validator("interval_seconds")
+    @classmethod
+    def interval_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("interval_seconds must be > 0")
+        return v
+
+    @field_validator("min_volume_24h", "min_liquidity")
+    @classmethod
+    def volume_non_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("volume/liquidity thresholds must be >= 0")
+        return v
+
+    @field_validator("max_markets")
+    @classmethod
+    def max_markets_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_markets must be > 0")
+        return v
 
 
 class TradingConfig(BaseModel):
@@ -64,7 +87,7 @@ class TradingConfig(BaseModel):
     max_trades_per_cycle: int = 5  # Max trades per scan cycle to prevent overtrading
     max_concurrent_positions: int = 6  # H-2: Hard cap on simultaneous open positions
     allow_position_additions: bool = True  # If False, block all trades on markets where a position already exists
-    min_confidence: float = 0.55  # Minimum signal confidence required to trade
+    min_confidence: float = 0.60  # M-8: Raised from 0.55 to reduce noise trades
 
     @field_validator("mode")
     @classmethod
@@ -144,6 +167,27 @@ class ClaudeConfig(BaseModel):
     daily_token_budget: int = 1_000_000  # Soft daily token budget warning threshold
     max_concurrent_assessments: int = 5  # Max parallel Claude API calls per scan cycle
 
+    @field_validator("temperature")
+    @classmethod
+    def temperature_valid(cls, v: float) -> float:
+        if v < 0 or v > 2:
+            raise ValueError("temperature must be in [0, 2]")
+        return v
+
+    @field_validator("max_tokens", "max_assessments_per_cycle", "api_timeout_seconds", "max_concurrent_assessments")
+    @classmethod
+    def positive_int_fields(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("must be > 0")
+        return v
+
+    @field_validator("ensemble_weight")
+    @classmethod
+    def ensemble_weight_valid(cls, v: float) -> float:
+        if v <= 0 or v > 1:
+            raise ValueError("ensemble_weight must be in (0, 1]")
+        return v
+
 
 class NewsConfig(BaseModel):
     rss_feeds: list[str] = Field(default_factory=lambda: [
@@ -161,6 +205,20 @@ class NewsConfig(BaseModel):
         "Politics": 14,
         "Culture": 30,
     })
+
+    @field_validator("poll_interval_seconds")
+    @classmethod
+    def poll_interval_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("poll_interval_seconds must be > 0")
+        return v
+
+    @field_validator("min_relevance")
+    @classmethod
+    def min_relevance_valid(cls, v: float) -> float:
+        if v < 0 or v > 1:
+            raise ValueError("min_relevance must be in [0, 1]")
+        return v
 
 
 class WhaleConfig(BaseModel):

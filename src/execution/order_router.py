@@ -489,6 +489,11 @@ class OrderRouter:
                         self.kalshi.get_open_orders(),
                         timeout=10.0,
                     )
+                    # C-1 FIX: Add timestamp-based matching to avoid recovering
+                    # the wrong order when multiple identical orders exist at
+                    # the same price. Orders created within 30s of our attempt
+                    # are candidates; prefer the most recent.
+                    candidates = []
                     for oo in open_orders:
                         # H-3: Compare in integer cents to avoid float tolerance issues
                         # on low-priced markets where 0.01 tolerance could be 50% of price.
@@ -503,13 +508,29 @@ class OrderRouter:
                         ):
                             recovered_id = (oo.get("order_id") or "").strip()
                             if recovered_id:
-                                kalshi_order_id = recovered_id
-                                logger.warning(
-                                    f"Orphaned order recovery succeeded: matched order_id={kalshi_order_id} "
-                                    f"for {order.market_id} via open orders list"
-                                )
-                                result = oo
-                                break
+                                # Score by timestamp proximity to our order creation time
+                                oo_created = oo.get("created_time") or oo.get("created_at") or ""
+                                time_score = 0
+                                if oo_created and hasattr(order, "created_at") and order.created_at:
+                                    try:
+                                        oo_dt = datetime.fromisoformat(oo_created.replace("Z", "+00:00"))
+                                        time_diff = abs((oo_dt - order.created_at).total_seconds())
+                                        if time_diff <= 30:  # Only match orders within 30s
+                                            time_score = 30 - time_diff  # Higher = more recent
+                                        else:
+                                            continue  # Too old to be our order
+                                    except (ValueError, TypeError):
+                                        time_score = 0  # Can't parse, use as fallback
+                                candidates.append((time_score, recovered_id, oo))
+                    # Pick the best candidate (highest time_score = closest match)
+                    if candidates:
+                        candidates.sort(key=lambda c: c[0], reverse=True)
+                        _, kalshi_order_id, result = candidates[0]
+                        logger.warning(
+                            f"Orphaned order recovery succeeded: matched order_id={kalshi_order_id} "
+                            f"for {order.market_id} via open orders list "
+                            f"({len(candidates)} candidate(s), best time_score={candidates[0][0]:.1f})"
+                        )
                 except Exception as rec_err:
                     logger.error(f"Orphaned order recovery failed: {rec_err}", exc_info=True)
 

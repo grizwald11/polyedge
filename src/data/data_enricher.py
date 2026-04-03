@@ -42,7 +42,7 @@ class DataEnricher:
         # trading; breaking news can move markets within minutes),
         # economic data (60 min), community forecasts (30 min).
         from src.data.cache import TTLCache
-        self._news_cache = TTLCache(ttl_seconds=120)       # 2 min (M-3)
+        self._news_cache = TTLCache(ttl_seconds=60)        # M-11: 1 min (was 2 min) for faster news-reactive trading
         self._econ_cache = TTLCache(ttl_seconds=3600)       # 60 min
         self._community_cache = TTLCache(ttl_seconds=1800)  # 30 min
         self.news_researcher = NewsResearcher(

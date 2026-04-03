@@ -256,6 +256,12 @@ class KellySizer:
             contracts = int(max_position / cost_price)
             logger.debug(f"Kelly: clamped contracts to {contracts} (position cap ${max_position:.2f})")
 
+        # C-4 FIX: Always use worst-case taker fee (0.07) as safety margin,
+        # even for currently fee-free event markets. If Kalshi changes fee
+        # structures (as they did for crypto/sports), positions won't exceed
+        # the 5% cap. The actual fee_rate is used if higher.
+        safety_fee_rate = max(fee_rate, 0.07)
+
         # Account for estimated fee so total cost stays within cap.
         # Fee formula returns cents: ceil(fee_rate * contracts * price * (1 - price))
         # Convert to dollars before comparing.  Loop because removing one
@@ -266,7 +272,7 @@ class KellySizer:
             lo, hi, best = 0, contracts, 0
             while lo <= hi:
                 mid = (lo + hi) // 2
-                fee_cents = math.ceil(fee_rate * mid * cost_price * (1.0 - cost_price))
+                fee_cents = math.ceil(safety_fee_rate * mid * cost_price * (1.0 - cost_price))
                 fee_dollars = fee_cents / 100.0
                 if mid * cost_price + fee_dollars <= kelly_dollars:
                     best = mid

@@ -19,7 +19,7 @@ from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-WASH_TRADE_COOLDOWN_SECONDS = 1800
+WASH_TRADE_COOLDOWN_SECONDS = 14400  # M-4: Extended from 30min to 4 hours
 
 
 class RiskEngine:
@@ -163,11 +163,13 @@ class RiskEngine:
         The scanner already filters excluded categories, but this check ensures
         that no excluded market can reach execution even if it bypasses the scanner.
         """
+        market_cat = market.category.value if hasattr(market.category, 'value') else str(market.category)
+        cat_lower = market_cat.lower()
+
+        # Exclusion check — reject markets in excluded categories (defense-in-depth)
         excluded = self.settings.scanning.exclude_categories
         if not excluded:
             return
-        market_cat = market.category.value if hasattr(market.category, 'value') else str(market.category)
-        cat_lower = market_cat.lower()
         # Check category name — match in both directions (e.g., "Crypto" in "Crypto Prices"
         # or "Crypto Prices" in "Crypto Price Markets")
         for exc in excluded:
@@ -238,11 +240,16 @@ class RiskEngine:
         """4. Correlated exposure (max 20% — keyword+event if available, else strategy-based)."""
         max_correlated = bankroll * self.settings.trading.max_correlated_exposure_pct
 
+        # H-5 FIX: Log which correlation method is used for transparency.
+        # Three implementations exist: CorrelationDetector > PortfolioRisk > strategy-based.
         # Primary: use CorrelationDetector (keyword + event_ticker matching)
         if self.correlation_detector is not None:
             try:
                 result = self.correlation_detector.check_correlation(
                     signal.market_id, proposed_cost, bankroll,
+                )
+                logger.debug(
+                    f"Correlation check used: CorrelationDetector for {signal.market_id}"
                 )
                 if not result.allowed:
                     failed.append(
@@ -257,10 +264,15 @@ class RiskEngine:
                     )
                 return
             except Exception as e:
-                logger.warning(f"CorrelationDetector failed for {signal.market_id}: {e}")
-                # Fall through to portfolio_risk or strategy-based fallback
+                logger.warning(
+                    f"CorrelationDetector failed for {signal.market_id}: {e} — "
+                    f"falling through to {'PortfolioRisk' if self.portfolio_risk else 'strategy-based'} fallback"
+                )
 
         if self.portfolio_risk is not None:
+            logger.debug(
+                f"Correlation check used: PortfolioRisk (event-based) for {signal.market_id}"
+            )
             correlated_exposure = self.portfolio_risk.get_correlated_exposure(signal.market_id)
             logger.debug(
                 "Correlated exposure check (event-based): %s = $%.2f",
@@ -278,6 +290,9 @@ class RiskEngine:
         else:
             # Strategy-based fallback: not all trades in one strategy are correlated,
             # so use 50% of strategy exposure as effective correlated exposure.
+            logger.debug(
+                f"Correlation check used: strategy-based fallback for {signal.market_id}"
+            )
             strategy_exposure = self.positions.get_strategy_exposure(signal.strategy)
             effective_correlated = strategy_exposure * 0.5
             logger.info(
@@ -418,7 +433,12 @@ class RiskEngine:
                 self.db.delete_cooldown(market_id)
 
     def _check_wash_trade(self, market_id: str, failed: list[str]) -> None:
-        """H-6: Block re-entry within 30 minutes of exiting a market."""
+        """M-4: Block re-entry within 4 hours of exiting a market.
+
+        Previously 30 minutes (WASH_TRADE_COOLDOWN_SECONDS=1800), which was
+        too short. Extended to 4 hours to reduce rapid entry-exit cycles that
+        could trigger exchange-side monitoring.
+        """
         if self.db is None:
             return
         try:
@@ -438,7 +458,7 @@ class RiskEngine:
             if elapsed < WASH_TRADE_COOLDOWN_SECONDS:
                 minutes = (WASH_TRADE_COOLDOWN_SECONDS - elapsed) / 60.0
                 failed.append(
-                    f"Wash trading prevention: exited {market_id} {minutes:.0f} min ago (30-min cooldown)"
+                    f"Wash trading prevention: exited {market_id} {minutes:.0f} min ago ({WASH_TRADE_COOLDOWN_SECONDS // 3600}h cooldown)"
                 )
         except Exception as e:
             logger.warning(f"Wash trade check failed for {market_id}: {e}")

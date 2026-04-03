@@ -1077,6 +1077,25 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_skipped_signals_for_date(self, date_str: str | None = None) -> list[dict]:
+        """H-6: Get signals that were generated but risk-gated for a specific date.
+
+        Returns list of dicts with edge, market_id, risk_failed_checks.
+        """
+        from datetime import date as date_type
+        from datetime import timedelta
+        if date_str is None:
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        next_date_str = (date_type.fromisoformat(date_str) + timedelta(days=1)).isoformat()
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT market_id, edge, risk_failed_checks FROM signals "
+            "WHERE timestamp >= ? AND timestamp < ? AND status = 'risk_gated' "
+            "ORDER BY timestamp DESC",
+            (date_str, next_date_str),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_strategy_pnl(self, date_str: str | None = None) -> dict[str, dict]:
         """Get P&L breakdown by strategy for a date.
 

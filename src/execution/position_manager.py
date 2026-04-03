@@ -419,6 +419,16 @@ class PositionManager:
 
         cost_basis = position.cost_basis
         if cost_basis <= 0:
+            return True, "Invalid cost basis (<=0) — closing position"
+
+        # H-1 FIX: Skip exit evaluation when price data is stale.
+        # Stale prices can trigger false stop-losses or edge-gone exits
+        # on illiquid markets where the data feed stopped updating.
+        if getattr(position, "_price_stale", False):
+            logger.warning(
+                f"Exit evaluation skipped for {position.market_id}: "
+                f"price data is stale — waiting for fresh update"
+            )
             return False, ""
 
         # 1. Stop-loss check

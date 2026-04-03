@@ -615,6 +615,11 @@ class AIProbabilityStrategy:
                 market_efficiency=market_eff,
             )
 
+        # C-3 FIX: Post-adjustment divergence cap. Track raw Claude probability
+        # before any adjustments so we can clamp total drift from compounding
+        # Platt + bias + consensus + base rate adjustments.
+        raw_claude_prob = forecast.probability
+
         # Apply calibration adjustment to the ensemble final probability.
         # M-4: When consensus sources are present (multi-model ensemble), dampen
         # the adjustment to avoid double-counting bias that consensus already corrects.
@@ -648,6 +653,29 @@ class AIProbabilityStrategy:
             logger.debug(
                 f"Calibration adjustment for {category.value}: "
                 f"{original_prob:.3f} → {adjusted_prob:.3f} (adj={adjustment:+.3f})"
+            )
+
+        # C-3 FIX: Clamp total adjustment drift. If the final ensemble probability
+        # has drifted more than 15% from the raw Claude estimate, the compounding
+        # adjustments are likely amplifying noise rather than correcting bias.
+        MAX_ADJUSTMENT_DRIFT = 0.15
+        total_drift = ensemble.final_probability - raw_claude_prob
+        if abs(total_drift) > MAX_ADJUSTMENT_DRIFT:
+            clamped_prob = raw_claude_prob + (MAX_ADJUSTMENT_DRIFT if total_drift > 0 else -MAX_ADJUSTMENT_DRIFT)
+            clamped_prob = max(0.01, min(0.99, clamped_prob))
+            logger.warning(
+                f"C-3 divergence cap: {market.ticker} total drift {total_drift:+.3f} "
+                f"exceeds {MAX_ADJUSTMENT_DRIFT:.0%} — clamping from "
+                f"{ensemble.final_probability:.3f} to {clamped_prob:.3f} "
+                f"(raw Claude={raw_claude_prob:.3f})"
+            )
+            from src.core.models import EnsembleForecast as EnsembleForecastModel
+            ensemble = EnsembleForecastModel(
+                final_probability=clamped_prob,
+                individual_forecasts=ensemble.individual_forecasts,
+                market_price=ensemble.market_price,
+                edge=clamped_prob - market.yes_price,
+                confidence=ensemble.confidence,
             )
 
         # Calculate edge
