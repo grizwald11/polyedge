@@ -1,4 +1,4 @@
-"""Tests for database write lock timeout — M-2: increased from 10s to 30s."""
+"""Tests for database write lock timeout — H-4: increased from 30s to 60s."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from src.storage.database import Database
 
 
 class TestWriteLockTimeout:
-    """M-2: Verify all write lock acquisitions use 30-second timeout."""
+    """H-4: Verify all write lock acquisitions use 60-second timeout."""
 
     def _get_all_mro_source(self):
         """M-10: Get combined source from Database and all its mixin bases."""
@@ -25,8 +25,8 @@ class TestWriteLockTimeout:
                 pass
         return "\n".join(sources)
 
-    def test_write_lock_timeout_is_30_seconds(self):
-        """Inspect the source to confirm all lock timeouts are 30s, not 10s."""
+    def test_write_lock_timeout_is_60_seconds(self):
+        """Inspect the source to confirm all lock timeouts are 60s."""
         source = self._get_all_mro_source()
 
         # Find all acquire(timeout=N) calls
@@ -35,23 +35,26 @@ class TestWriteLockTimeout:
             f"Expected at least 4 write lock acquisitions, found {len(timeouts)}"
         )
         for t in timeouts:
-            assert t == "30", (
-                f"Write lock timeout should be 30s, found {t}s"
+            assert t == "60", (
+                f"Write lock timeout should be 60s, found {t}s"
             )
 
     def test_no_10_second_timeouts_remain(self):
         """Ensure no 10-second timeouts remain in database module."""
         source = self._get_all_mro_source()
         assert "timeout=10" not in source, (
-            "Found residual timeout=10 in database.py — should be 30"
+            "Found residual timeout=10 in database.py — should be 60"
         )
 
-    def test_error_messages_reference_30s(self):
+    def test_error_messages_reference_60s(self):
         """Error messages should reference the correct timeout value."""
         source = self._get_all_mro_source()
-        # Should not mention 10s in timeout error messages
+        # Should not mention 10s or 30s in timeout error messages
         assert "timeout (10s)" not in source, (
-            "Error message still references 10s timeout — should be 30s"
+            "Error message still references 10s timeout — should be 60s"
+        )
+        assert "timeout (30s)" not in source, (
+            "Error message still references 30s timeout — should be 60s"
         )
 
     def test_log_trade_uses_write_lock(self, tmp_db):

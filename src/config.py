@@ -71,7 +71,7 @@ class TradingConfig(BaseModel):
     min_edge_ai: float = 0.05
     min_edge_arb: float = 0.02
     min_edge_obvious_no: float = 0.01
-    min_edge_news: float = 0.03  # Lower threshold: news edges are fast/temporary
+    min_edge_news: float = 0.04  # News edges are fast/temporary but 3% was too noisy
     min_edge_mean_reversion: float = 0.05  # Mean reversion: moderate edge required
     min_edge_late_resolution: float = 0.10  # Late resolution: high edge (speed advantage)
     kelly_fraction: float = 0.25

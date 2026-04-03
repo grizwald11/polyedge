@@ -101,23 +101,13 @@ class FillTracker:
                 logger.error(f"Fill check failed for {order_id}: {e}", exc_info=True)
                 return (order_id, order, None)
 
-        # Wrap all concurrent polls with a cumulative timeout (5 minutes max).
-        # Without this, a hung API connection could block the fill-check loop
-        # indefinitely, causing missed fills for all other tracked orders.
-        try:
-            poll_results = await asyncio.wait_for(
-                asyncio.gather(
-                    *[_poll_one(oid, o) for oid, o in order_snapshot],
-                    return_exceptions=True,
-                ),
-                timeout=300,  # 5-minute cumulative timeout for all polls
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Fill check cumulative timeout (300s) exceeded for "
-                f"{len(order_snapshot)} orders — returning any fills found so far"
-            )
-            return []
+        # Each _poll_one has its own per-order timeout (self._poll_timeout),
+        # so individual hung connections won't block other orders. Using
+        # return_exceptions=True ensures one failure doesn't abort the batch.
+        poll_results = await asyncio.gather(
+            *[_poll_one(oid, o) for oid, o in order_snapshot],
+            return_exceptions=True,
+        )
 
         fills: list[Trade] = []
         resolved: list[str] = []

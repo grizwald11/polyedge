@@ -416,6 +416,35 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
         except Exception as e:
             logger.info(f"Could not check for orphaned orders: {e}")
 
+        # H-5: Reconcile DB pending orders against Kalshi actual order states.
+        # Orders may have filled, cancelled, or expired while we were offline.
+        try:
+            db_pending = c.db.load_pending_orders()
+            if db_pending:
+                logger.info(f"Reconciling {len(db_pending)} DB pending orders against Kalshi...")
+                reconciled = 0
+                for order_id, cost in list(db_pending.items()):
+                    try:
+                        status = await asyncio.wait_for(
+                            c.kalshi.get_order(order_id), timeout=10.0
+                        )
+                        if status is None:
+                            continue
+                        kalshi_status = status.get("status", "").lower()
+                        if kalshi_status in ("executed", "canceled", "cancelled"):
+                            c.db.delete_pending_order(order_id)
+                            reconciled += 1
+                            logger.info(
+                                f"  Reconciled order {order_id}: {kalshi_status} "
+                                f"(removed from pending)"
+                            )
+                    except Exception as e:
+                        logger.warning(f"  Failed to reconcile order {order_id}: {e}")
+                if reconciled:
+                    logger.info(f"Fill reconciliation: resolved {reconciled}/{len(db_pending)} stale pending orders")
+        except Exception as e:
+            logger.warning(f"Fill reconciliation failed (non-fatal): {e}")
+
     # Alerts
     c.alert_manager = AlertManager()
     c.alert_manager.register(LogBackend())

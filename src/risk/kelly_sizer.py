@@ -314,10 +314,12 @@ class KellySizer:
         half_kelly = kelly_fraction * self.dynamic_kelly_fraction
         kelly_dollars = half_kelly * bankroll
 
-        # Confidence adjustment: confidence^1.5 penalizes low-confidence more
-        # aggressively (0.9→0.89x, 0.7→0.67x, 0.5→0.48x)
+        # Confidence adjustment: confidence^1.2 gives a gentler curve that
+        # doesn't over-penalize medium-confidence trades (0.6-0.7 range).
+        # Previous exponent of 1.5 cut sizing nearly in half at 0.6 confidence.
+        # New curve: 0.9→0.88x, 0.7→0.64x, 0.5→0.44x
         if confidence is not None and 0.0 < confidence <= 1.0:
-            kelly_dollars *= max(0.2, confidence ** 1.5)
+            kelly_dollars *= max(0.2, confidence ** 1.2)
 
         # Use the higher of market_price and order_price for contract conversion
         cost_price = max(market_price, order_price) if order_price and order_price > 0 else market_price
@@ -426,11 +428,11 @@ class KellySizer:
         average 5%, the multiplier is 0.5 — Kelly will use half the
         predicted edge for sizing.
         """
-        # Floor at 0.7: below this, predicted edges are so unreliable that
+        # Floor at 0.8: below this, predicted edges are so unreliable that
         # reduced sizing is better than trading weak edges. Previous floor
-        # of 0.5 allowed trading when realized edges were half of predicted,
-        # which still passed too much noise through as signal.
-        multiplier = max(0.7, min(multiplier, 1.0))
+        # of 0.7 still allowed too much noise through as signal when
+        # realized edges were significantly below predicted.
+        multiplier = max(0.8, min(multiplier, 1.0))
         if multiplier != self._edge_multiplier:
             logger.info(
                 f"Kelly: edge multiplier {self._edge_multiplier:.2f} → {multiplier:.2f}"

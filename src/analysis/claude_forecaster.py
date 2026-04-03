@@ -3,6 +3,9 @@
 Calls Claude with structured prompts, parses JSON responses into
 ForecastResult models. Selects model based on position size:
 sonnet for routine, opus for high-stakes.
+
+Prompt construction is delegated to prompt_builder and response parsing
+to forecast_parser (M-1 audit refactor).
 """
 
 from __future__ import annotations
@@ -15,10 +18,21 @@ from typing import Optional
 
 import anthropic
 
+from src.analysis.forecast_parser import (
+    build_forecast as _build_forecast,
+    extract_text as _extract_text,
+    parse_response as _parse_response,
+)
 from src.analysis.market_classifier import classify_market
 from src.analysis.news_researcher import NewsResearcher
 from src.analysis.prompt_ab_testing import PromptVariantManager
-from src.analysis.prompt_templates import SYSTEM_PROMPT, build_prompt, get_template
+from src.analysis.prompt_builder import (
+    build_forecaster_prompt,
+    select_model as _select_model_func,
+    select_temperature as _select_temperature_func,
+    validate_resolution_criteria as _validate_resolution_criteria,
+)
+from src.analysis.prompt_templates import SYSTEM_PROMPT
 from src.config import Settings
 from src.core.models import ForecastResult, Market, MarketCategory
 
@@ -84,20 +98,19 @@ class ClaudeForecaster:
     EDGE_HIGHSTAKES_THRESHOLD = 0.15
 
     def _select_model(self, position_value: float = 0.0, edge: float = 0.0) -> str:
-        """Select model based on position value or edge size.
-
-        Uses opus for high-stakes positions or large detected edges,
-        since opus catches more nuances in resolution criteria and temporal reasoning.
-        """
-        if position_value > self.settings.claude.highstakes_threshold:
-            return self.settings.claude.model_highstakes
+        """Select model based on position value or edge size."""
         edge_threshold = getattr(
             self.settings.claude, "edge_highstakes_threshold",
             self.EDGE_HIGHSTAKES_THRESHOLD,
         )
-        if abs(edge) > edge_threshold:
-            return self.settings.claude.model_highstakes
-        return self.settings.claude.model_primary
+        return _select_model_func(
+            position_value,
+            edge,
+            highstakes_threshold=self.settings.claude.highstakes_threshold,
+            model_highstakes=self.settings.claude.model_highstakes,
+            model_primary=self.settings.claude.model_primary,
+            edge_highstakes_threshold=edge_threshold,
+        )
 
     async def health_check(self) -> None:
         """Validate API key with a minimal Claude call.
@@ -115,11 +128,11 @@ class ClaudeForecaster:
 
     def _select_temperature(self, category: MarketCategory) -> float:
         """Select temperature based on market category, falling back to default."""
-        temp = self.settings.claude.category_temperatures.get(category.value)
-        if temp is None:
-            logger.debug(f"Using default temperature for unmapped category {category.value}")
-            return self.settings.claude.temperature
-        return temp
+        return _select_temperature_func(
+            category,
+            self.settings.claude.category_temperatures,
+            self.settings.claude.temperature,
+        )
 
     def _estimate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
         """Estimate USD cost for a Claude API call."""
@@ -191,23 +204,11 @@ class ClaudeForecaster:
     @staticmethod
     def _extract_text(response) -> str | None:
         """Safely extract text from Claude API response. Returns None if empty."""
-        if not response.content:
-            return None
-        return response.content[0].text
+        return _extract_text(response)
 
     def _validate_resolution_criteria(self, description: str) -> str:
         """Validate and enhance resolution criteria if missing or too short."""
-        if not description or len(description.strip()) < 20:
-            logger.warning("Resolution criteria missing or too short — adding caution")
-            caution = (
-                "WARNING: No detailed resolution criteria available for this market. "
-                "Resolution rules may be ambiguous. Widen your confidence interval "
-                "to account for possible resolution surprises."
-            )
-            if description and description.strip():
-                return f"{description.strip()}\n\n{caution}"
-            return caution
-        return description
+        return _validate_resolution_criteria(description)
 
     def _check_preconditions(
         self, market: Market,
@@ -304,49 +305,26 @@ class ClaudeForecaster:
         Returns:
             Tuple of (prompt, model, category, temperature)
         """
-        model = self._select_model(position_value)
-        category = classify_market(market)
-        temperature = self._select_temperature(category)
-
-        # Enrich with news research if no context was provided
-        if not news_context:
-            news_context = await self.news_researcher.get_context(market.question)
-            if news_context:
-                logger.info(
-                    f"News research found context for '{market.question[:50]}...'"
-                )
-            else:
-                logger.debug(f"No news context for '{market.question[:50]}...'")
-
-        # Build the prompt
-        close_date = ""
-        if market.end_date:
-            close_date = market.end_date.strftime("%Y-%m-%d %H:%M UTC")
-
-        resolution_criteria = self._validate_resolution_criteria(market.description)
-
-        # Compute temporal context
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        days_str = str(int(market.days_to_resolution)) if market.days_to_resolution is not None else "Unknown"
-
-        prompt = build_prompt(
-            question=market.question,
-            resolution_criteria=resolution_criteria,
-            market_price=market.yes_price,
-            close_date=close_date,
-            category=category,
-            news_context=news_context or "No additional context available.",
-            base_rate_context=base_rate_context,
-            accuracy_context=accuracy_context,
-            current_date=today,
-            days_to_resolution=days_str,
+        edge_threshold = getattr(
+            self.settings.claude, "edge_highstakes_threshold",
+            self.EDGE_HIGHSTAKES_THRESHOLD,
         )
-
-        # Apply A/B testing variant modifier to the prompt
-        variant_name, prompt = self.variant_manager.select_variant(category, prompt)
+        prompt, model, category, temperature, variant_name = await build_forecaster_prompt(
+            market,
+            news_context,
+            base_rate_context,
+            position_value,
+            self.news_researcher,
+            self.variant_manager,
+            highstakes_threshold=self.settings.claude.highstakes_threshold,
+            model_highstakes=self.settings.claude.model_highstakes,
+            model_primary=self.settings.claude.model_primary,
+            edge_highstakes_threshold=edge_threshold,
+            category_temperatures=self.settings.claude.category_temperatures,
+            default_temperature=self.settings.claude.temperature,
+            accuracy_context=accuracy_context,
+        )
         self._last_variant_name = variant_name  # Store for downstream tracking
-
         return prompt, model, category, temperature
 
     async def _call_claude(
@@ -449,7 +427,7 @@ class ClaudeForecaster:
             ForecastResult with all metadata populated
         """
         latency_ms = int((time.monotonic() - start_time) * 1000)
-        raw_text = self._extract_text(response)
+        raw_text = _extract_text(response)
         if raw_text is None:
             logger.warning("Claude API returned empty content for assess_market")
             return ForecastResult(
@@ -465,7 +443,7 @@ class ClaudeForecaster:
         )
 
         # Parse JSON response
-        forecast = self._parse_response(raw_text)
+        forecast = _parse_response(raw_text)
         forecast.model_used = model
         forecast.tokens_used = tokens_used
         forecast.latency_ms = latency_ms
@@ -652,7 +630,7 @@ class ClaudeForecaster:
             )
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
-            raw_text = self._extract_text(response)
+            raw_text = _extract_text(response)
             if raw_text is None:
                 logger.warning("Claude API returned empty content for assess_market_with_prompt")
                 return ForecastResult(
@@ -661,7 +639,7 @@ class ClaudeForecaster:
                 )
             tokens_used = response.usage.input_tokens + response.usage.output_tokens
 
-            forecast = self._parse_response(raw_text)
+            forecast = _parse_response(raw_text)
             forecast.model_used = model
             forecast.tokens_used = tokens_used
             forecast.latency_ms = latency_ms
@@ -731,7 +709,7 @@ class ClaudeForecaster:
                 timeout=self.settings.claude.api_timeout_seconds,
             )
             latency_ms = int((time.monotonic() - start) * 1000)
-            raw_text = self._extract_text(response)
+            raw_text = _extract_text(response)
             if raw_text is None:
                 logger.warning("Claude API returned empty content for cross_check_assess")
                 return ForecastResult(
@@ -739,7 +717,7 @@ class ClaudeForecaster:
                     parse_failed=True, model_used=model, latency_ms=latency_ms,
                 )
             tokens_used = response.usage.input_tokens + response.usage.output_tokens
-            forecast = self._parse_response(raw_text)
+            forecast = _parse_response(raw_text)
             forecast.model_used = model
             forecast.tokens_used = tokens_used
             forecast.latency_ms = latency_ms
@@ -807,172 +785,23 @@ class ClaudeForecaster:
     def _parse_response(self, raw_text: str) -> ForecastResult:
         """Parse Claude's JSON response into a ForecastResult.
 
-        Tries multiple strategies to extract JSON:
-        1. Direct parse of the full response
-        2. Extract from markdown code blocks (```json ... ```)
-        3. Find first { and last } and parse that substring
-        4. Fall back to 0.5 only as last resort
+        Delegates to forecast_parser.parse_response. Kept as instance method
+        for backward compatibility with any subclasses.
         """
-        import re
-
-        text = raw_text.strip()
-
-        # Strategy 1: Direct parse
-        try:
-            data = json.loads(text)
-            return self._build_forecast(data)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.debug(f"JSON direct parse failed, trying fallbacks: {e}")
-
-        # Strategy 2: Extract from markdown code blocks
-        code_block_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
-        if code_block_match:
-            try:
-                data = json.loads(code_block_match.group(1).strip())
-                return self._build_forecast(data)
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.debug(f"JSON code block parse failed: {e}")
-
-        # Strategy 3: Find first { and last } and try to parse
-        first_brace = text.find("{")
-        last_brace = text.rfind("}")
-        if first_brace != -1 and last_brace > first_brace:
-            try:
-                data = json.loads(text[first_brace:last_brace + 1])
-                return self._build_forecast(data)
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.debug(f"JSON brace extraction parse failed: {e}")
-
-        # Strategy 4: Try to extract probability from prose as last resort.
-        # Use findall + take LAST match to avoid picking up stale references
-        # like "probability shifted from 0.73 to 0.85" (we want 0.85, not 0.73).
-        prob_matches = re.findall(
-            r'(?:probability|prob)["\'\s:=]+\s*([01]?\.\d+|0|1(?:\.0+)?)', text, re.IGNORECASE
-        )
-        if not prob_matches:
-            # Try percentage format: "probability: 65%"
-            pct_matches = re.findall(r'(?:probability|prob)["\'\s:=]+\s*(\d{1,3})%', text, re.IGNORECASE)
-            if pct_matches:
-                prob = float(pct_matches[-1]) / 100.0
-                parse_failed = True
-                # M-2: Validate extraction context — check surrounding sentence
-                parse_failed = self._validate_prose_extraction(text, prob, parse_failed)
-                # M-2: Check for ambiguous numbers (large spread among extracted values)
-                all_vals = [float(v) / 100.0 for v in pct_matches]
-                if len(all_vals) > 1 and (max(all_vals) - min(all_vals)) > 0.30:
-                    logger.warning(
-                        f"Ambiguous prose extraction: values span {min(all_vals):.2f}–{max(all_vals):.2f} "
-                        f"(delta {max(all_vals) - min(all_vals):.2f} > 0.30)"
-                    )
-                    parse_failed = True
-                logger.warning(f"Extracted probability {prob} from percentage in prose (last of {len(pct_matches)} matches)")
-                return ForecastResult(
-                    probability=max(0.01, min(0.99, prob)),
-                    reasoning=f"Parsed probability from prose (%). Raw: {raw_text[:200]}",
-                    parse_failed=parse_failed,
-                )
-        if prob_matches:
-            prob = float(prob_matches[-1])
-            parse_failed = True
-            # M-2: Validate extraction context — check surrounding sentence
-            parse_failed = self._validate_prose_extraction(text, prob, parse_failed)
-            # M-2: Check for ambiguous numbers (large spread among extracted values)
-            all_vals = [float(v) for v in prob_matches]
-            if len(all_vals) > 1 and (max(all_vals) - min(all_vals)) > 0.30:
-                logger.warning(
-                    f"Ambiguous prose extraction: values span {min(all_vals):.2f}–{max(all_vals):.2f} "
-                    f"(delta {max(all_vals) - min(all_vals):.2f} > 0.30)"
-                )
-                parse_failed = True
-            logger.warning(f"Extracted probability {prob} from prose response (last of {len(prob_matches)} matches)")
-            return ForecastResult(
-                probability=max(0.01, min(0.99, prob)),
-                reasoning=f"Parsed probability from prose. Raw: {raw_text[:200]}",
-                parse_failed=parse_failed,
-            )
-
-        logger.warning(f"Failed to parse Claude response as JSON: {raw_text[:200]}")
-        return ForecastResult(
-            probability=0.5,
-            reasoning=f"JSON parse failed, raw: {raw_text[:200]}",
-            parse_failed=True,
-        )
+        return _parse_response(raw_text)
 
     @staticmethod
     def _validate_prose_extraction(text: str, prob: float, parse_failed: bool) -> bool:
         """M-2: Validate that extracted probability appears in a forecasting context.
 
-        Returns updated parse_failed flag (may be set to True if context is suspect).
+        Delegates to forecast_parser._validate_prose_extraction.
         """
-        # Check if the extracted value appears near forecasting-related words
-        context_words = {"probability", "estimate", "likely", "chance", "forecast", "predict", "assessment"}
-        # Search for any sentence containing the extracted number
-        # Build a pattern matching the number as decimal or percentage
-        text_lower = text.lower()
-        has_context = any(word in text_lower for word in context_words)
-        if not has_context:
-            logger.warning(
-                f"Prose extraction lacks forecasting context words — "
-                f"extracted {prob} may not be a probability estimate"
-            )
-            parse_failed = True
-        return parse_failed
+        from src.analysis.forecast_parser import _validate_prose_extraction
+        return _validate_prose_extraction(text, prob, parse_failed)
 
     def _build_forecast(self, data: dict) -> ForecastResult:
-        """Build a ForecastResult from parsed JSON data."""
-        # H-11: Validate that a probability key exists; check common alternatives
-        if "probability" not in data:
-            alt_keys = {"prob": None, "p": None, "forecast": None, "prediction": None}
-            found_key = None
-            for alt in alt_keys:
-                if alt in data:
-                    found_key = alt
-                    break
-            if found_key is not None:
-                logger.warning(
-                    f"JSON schema validation: 'probability' key missing, "
-                    f"using alternative key '{found_key}' = {data[found_key]}"
-                )
-                data["probability"] = data[found_key]
-            else:
-                logger.warning(
-                    "JSON schema validation: 'probability' key missing and no "
-                    f"known alternatives found in keys: {list(data.keys())}"
-                )
-                return ForecastResult(
-                    probability=0.5,
-                    reasoning=f"Missing 'probability' key in JSON. Keys: {list(data.keys())}",
-                    parse_failed=True,
-                )
+        """Build a ForecastResult from parsed JSON data.
 
-        raw_probability = float(data.get("probability", 0.5))
-        probability = max(0.01, min(0.99, raw_probability))
-
-        if raw_probability != probability:
-            logger.debug(
-                f"Clamped probability from {raw_probability:.6f} to {probability:.2f}"
-            )
-
-        # Safe CI extraction with fallback defaults
-        def _safe_float(value, default: float) -> float:
-            """Safely convert to float, returning default on failure."""
-            if value is None:
-                return default
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                logger.warning(f"Non-numeric CI value: {value!r} — using default {default}")
-                return default
-
-        ci_low_raw = _safe_float(data.get("confidence_low"), max(0, probability - 0.20))
-        ci_high_raw = _safe_float(data.get("confidence_high"), min(1, probability + 0.20))
-
-        return ForecastResult(
-            probability=probability,
-            confidence_low=max(0.0, min(1.0, ci_low_raw)),
-            confidence_high=max(0.0, min(1.0, ci_high_raw)),
-            key_factors_for=data.get("key_factors_for", []),
-            key_factors_against=data.get("key_factors_against", []),
-            uncertainties=data.get("uncertainties", []),
-            reasoning=data.get("reasoning", ""),
-        )
+        Delegates to forecast_parser.build_forecast.
+        """
+        return _build_forecast(data)

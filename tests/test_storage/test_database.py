@@ -888,8 +888,8 @@ class TestEdgeCases:
 
 class TestWriteLockConstant:
 
-    def test_write_lock_timeouts_are_30_seconds(self):
-        """Verify lock timeout is 30s by inspecting source (no actual wait)."""
+    def test_write_lock_timeouts_are_60_seconds(self):
+        """Verify lock timeout is 60s by inspecting source (H-4: raised from 30s)."""
         import inspect
         import re
         # M-10: Lock acquisitions moved to mixin classes; inspect all MRO sources
@@ -905,7 +905,7 @@ class TestWriteLockConstant:
         timeouts = re.findall(r"acquire\(timeout=(\d+)\)", combined)
         assert len(timeouts) >= 3, f"Expected >=3 lock acquisitions, found {len(timeouts)}"
         for t in timeouts:
-            assert t == "30", f"Lock timeout should be 30s, found {t}s"
+            assert t == "60", f"Lock timeout should be 60s, found {t}s"
 
 
 # ===================================================================
