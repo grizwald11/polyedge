@@ -892,8 +892,17 @@ class TestWriteLockConstant:
         """Verify lock timeout is 30s by inspecting source (no actual wait)."""
         import inspect
         import re
-        source = inspect.getsource(Database)
-        timeouts = re.findall(r"acquire\(timeout=(\d+)\)", source)
+        # M-10: Lock acquisitions moved to mixin classes; inspect all MRO sources
+        sources = []
+        for cls in Database.__mro__:
+            if cls is object:
+                continue
+            try:
+                sources.append(inspect.getsource(cls))
+            except (OSError, TypeError):
+                pass
+        combined = "\n".join(sources)
+        timeouts = re.findall(r"acquire\(timeout=(\d+)\)", combined)
         assert len(timeouts) >= 3, f"Expected >=3 lock acquisitions, found {len(timeouts)}"
         for t in timeouts:
             assert t == "30", f"Lock timeout should be 30s, found {t}s"

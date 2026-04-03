@@ -67,6 +67,35 @@ class NewsIngestion:
         self._feed_failures: dict[str, int] = {}  # feed_url -> consecutive failure count
         self._feed_last_retry_cycle: dict[str, int] = {}  # feed_url -> cycle number of last retry attempt
 
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """Normalize URL for deduplication by stripping tracking params and www prefix."""
+        from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+
+        _TRACKING_PARAMS = {"utm_source", "utm_medium", "utm_campaign", "utm_term",
+                            "utm_content", "fbclid", "gclid", "gclsrc", "msclkid"}
+
+        parsed = urlparse(url)
+
+        # Strip www. prefix from hostname
+        hostname = parsed.hostname or ""
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+
+        # Filter out tracking query params
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        filtered = {k: v for k, v in params.items() if k.lower() not in _TRACKING_PARAMS}
+        clean_query = urlencode(filtered, doseq=True)
+
+        return urlunparse((
+            parsed.scheme,
+            hostname + (f":{parsed.port}" if parsed.port else ""),
+            parsed.path,
+            parsed.params,
+            clean_query,
+            "",  # drop fragment
+        ))
+
     async def poll_feeds(self) -> list[NewsItem]:
         """Poll all configured RSS feeds for new articles.
 
@@ -100,12 +129,13 @@ class NewsIngestion:
                 feed = feedparser.parse(feed_url)
                 for entry in feed.entries[:10]:
                     url = entry.get("link", "")
-                    if url in self._seen_urls:
+                    normalized = self._normalize_url(url)
+                    if normalized in self._seen_urls:
                         continue
                     # Evict oldest entries (FIFO) when cap reached
                     while len(self._seen_urls) >= self._max_seen_urls:
                         self._seen_urls.popitem(last=False)  # Remove oldest
-                    self._seen_urls[url] = None
+                    self._seen_urls[normalized] = None
 
                     published = self._parse_date(entry)
                     item = NewsItem(

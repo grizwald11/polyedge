@@ -307,6 +307,17 @@ class MarketDiscovery:
                 events_targeted += 1
                 nested_markets = event.get("markets", [])
                 for m in nested_markets:
+                    # H-4: Validate that market has a ticker and at least one non-zero price
+                    ticker = m.get("ticker", "")
+                    yes_bid = _parse_dollar_str(m.get("yes_bid_dollars") or m.get("yes_bid"))
+                    yes_ask = _parse_dollar_str(m.get("yes_ask_dollars") or m.get("yes_ask"))
+                    last_price = _parse_dollar_str(m.get("last_price_dollars") or m.get("last_price"))
+                    if not ticker or (yes_bid == 0 and yes_ask == 0 and last_price == 0):
+                        logger.debug(
+                            f"Skipping market without valid ticker/prices: "
+                            f"{m.get('title', 'unknown')[:80]}"
+                        )
+                        continue
                     m["_event_category"] = event_category
                     all_markets.append(m)
 

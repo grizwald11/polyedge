@@ -164,7 +164,7 @@ class TestProcessExits:
 
         mocks["order_router"].route_order.assert_awaited_once()
         mocks["position_manager"].update_from_trade.assert_called_once()
-        mocks["risk_engine"].record_exit.assert_called_once_with("FED-RATE-CUT-MAY26")
+        mocks["risk_engine"].record_exit.assert_called_once_with("FED-RATE-CUT-MAY26", pnl=0.4)
         mocks["position_manager"].clear_pending_exit.assert_called_once_with("FED-RATE-CUT-MAY26")
 
     @pytest.mark.asyncio

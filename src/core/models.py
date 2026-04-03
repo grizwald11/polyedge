@@ -146,31 +146,10 @@ class MarketCategory(str, Enum):
     OTHER = "Other"
 
 
-class LiquidityTier(str, Enum):
-    HIGH = "high"       # >$50K depth
-    MEDIUM = "medium"   # $10K-$50K depth
-    LOW = "low"         # <$10K depth
-
-
 class TokenOutcome(str, Enum):
     YES = "Yes"
     NO = "No"
 
-
-class MarketStatus(str, Enum):
-    """Canonical market status set (M-3).
-
-    Unifies statuses from REST API ("active", "closed", "settled", "finalized",
-    "determined") and WebSocket lifecycle channel ("open", "closed", "determined").
-    Use this enum as the single source of truth for status comparisons.
-    """
-    OPEN = "open"
-    ACTIVE = "active"
-    CLOSED = "closed"
-    HALTED = "halted"
-    SETTLED = "settled"
-    FINALIZED = "finalized"
-    DETERMINED = "determined"
 
 
 # ──────────────────────────────────────────────

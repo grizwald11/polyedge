@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,6 +15,7 @@ from scripts.backtest_engine import (
     BacktestResult,
     BacktestTrade,
     MockForecaster,
+    export_csv,
     format_result,
     format_sweep,
     format_validation,
@@ -749,3 +751,180 @@ class TestFormatting:
         text = format_validation(checks)
         assert "FAIL" in text
         assert "NOT READY" in text
+
+
+# ──────────────────────────────────────────────
+# H-1: Baseline Brier Score
+# ──────────────────────────────────────────────
+
+class TestBaselineBrierScore:
+    def _make_result_from_trades(self, trades, bankroll=500.0,
+                                  trade_forecasts=None, trade_market_prices=None):
+        """Helper to compute a BacktestResult with new fields."""
+        equity_curve = [bankroll]
+        for t in trades:
+            equity_curve.append(equity_curve[-1] + t.pnl)
+        edges_p = [0.10] * len(trades)
+        edges_r = [t.pnl / (t.size * t.price) if t.size > 0 and t.price > 0 else 0 for t in trades]
+
+        engine = BacktestEngine.__new__(BacktestEngine)
+        return engine._compute_result(
+            "test", trades, equity_curve, edges_p, edges_r, bankroll,
+            trade_forecasts=trade_forecasts,
+            trade_market_prices=trade_market_prices,
+        )
+
+    def test_baseline_brier_matches_manual(self):
+        """H-1: Baseline Brier = mean((market_price - outcome)^2) over resolved trades."""
+        trades = [
+            BacktestTrade("M1", Direction.BUY_YES, "ai", 0.40, 10, "t1", pnl=6.0, resolved=True, outcome=True),
+            BacktestTrade("M2", Direction.BUY_YES, "ai", 0.60, 10, "t2", pnl=-6.0, resolved=True, outcome=False),
+            BacktestTrade("M3", Direction.BUY_YES, "ai", 0.80, 10, "t3", pnl=2.0, resolved=True, outcome=True),
+        ]
+        market_prices = {"M1": 0.40, "M2": 0.60, "M3": 0.80}
+        result = self._make_result_from_trades(trades, trade_market_prices=market_prices)
+
+        # Manual: (0.40-1)^2=0.36, (0.60-0)^2=0.36, (0.80-1)^2=0.04 => mean=0.2533..
+        expected = ((0.40 - 1.0)**2 + (0.60 - 0.0)**2 + (0.80 - 1.0)**2) / 3
+        assert result.baseline_brier_score == pytest.approx(expected)
+
+    def test_baseline_brier_none_without_prices(self):
+        """H-1: baseline_brier_score is None when no market prices provided."""
+        trades = [
+            BacktestTrade("M1", Direction.BUY_YES, "ai", 0.40, 10, "t1", pnl=6.0, resolved=True, outcome=True),
+        ]
+        result = self._make_result_from_trades(trades, trade_market_prices=None)
+        assert result.baseline_brier_score is None
+
+    def test_baseline_brier_default_field(self):
+        """H-1: baseline_brier_score defaults to None in BacktestResult."""
+        result = BacktestResult(strategy="test")
+        assert result.baseline_brier_score is None
+
+    def test_baseline_in_format_result(self):
+        """H-1: format_result includes baseline Brier when present."""
+        result = BacktestResult(
+            strategy="test", total_trades=3, brier_score=0.20,
+            baseline_brier_score=0.25,
+        )
+        text = format_result(result)
+        assert "Baseline Brier" in text
+        assert "market-price-as-predictor" in text
+        assert "better" in text
+
+
+# ──────────────────────────────────────────────
+# M-3: CI Coverage Rate
+# ──────────────────────────────────────────────
+
+class TestCICoverageRate:
+    def _make_result_from_trades(self, trades, bankroll=500.0,
+                                  trade_forecasts=None, trade_market_prices=None):
+        equity_curve = [bankroll]
+        for t in trades:
+            equity_curve.append(equity_curve[-1] + t.pnl)
+        edges_p = [0.10] * len(trades)
+        edges_r = [t.pnl / (t.size * t.price) if t.size > 0 and t.price > 0 else 0 for t in trades]
+
+        engine = BacktestEngine.__new__(BacktestEngine)
+        return engine._compute_result(
+            "test", trades, equity_curve, edges_p, edges_r, bankroll,
+            trade_forecasts=trade_forecasts,
+            trade_market_prices=trade_market_prices,
+        )
+
+    def test_ci_coverage_computation(self):
+        """M-3: CI coverage = fraction of resolved trades where outcome in [low, high]."""
+        trades = [
+            BacktestTrade("M1", Direction.BUY_YES, "ai", 0.40, 10, "t1", pnl=6.0, resolved=True, outcome=True),
+            BacktestTrade("M2", Direction.BUY_YES, "ai", 0.60, 10, "t2", pnl=-6.0, resolved=True, outcome=False),
+            BacktestTrade("M3", Direction.BUY_YES, "ai", 0.80, 10, "t3", pnl=2.0, resolved=True, outcome=True),
+        ]
+        forecasts = {
+            # M1: outcome=1.0, CI=[0.4, 1.0] => 1.0 in range => hit
+            "M1": ForecastResult(probability=0.65, confidence_low=0.4, confidence_high=1.0,
+                                 reasoning="test", model_used="test"),
+            # M2: outcome=0.0, CI=[0.3, 0.7] => 0.0 < 0.3 => miss
+            "M2": ForecastResult(probability=0.50, confidence_low=0.3, confidence_high=0.7,
+                                 reasoning="test", model_used="test"),
+            # M3: outcome=1.0, CI=[0.6, 1.0] => 1.0 in range => hit
+            "M3": ForecastResult(probability=0.80, confidence_low=0.6, confidence_high=1.0,
+                                 reasoning="test", model_used="test"),
+        }
+        result = self._make_result_from_trades(trades, trade_forecasts=forecasts)
+        assert result.ci_total_checked == 3
+        assert result.ci_coverage_rate == pytest.approx(2 / 3)
+
+    def test_ci_coverage_none_without_forecasts(self):
+        """M-3: ci_coverage_rate is None when no forecasts provided."""
+        trades = [
+            BacktestTrade("M1", Direction.BUY_YES, "ai", 0.40, 10, "t1", pnl=6.0, resolved=True, outcome=True),
+        ]
+        result = self._make_result_from_trades(trades, trade_forecasts=None)
+        assert result.ci_coverage_rate is None
+        assert result.ci_total_checked == 0
+
+    def test_ci_default_fields(self):
+        """M-3: CI fields default correctly in BacktestResult."""
+        result = BacktestResult(strategy="test")
+        assert result.ci_coverage_rate is None
+        assert result.ci_total_checked == 0
+
+
+# ──────────────────────────────────────────────
+# L-1: CSV Export
+# ──────────────────────────────────────────────
+
+class TestCSVExport:
+    def test_csv_file_written(self, tmp_path):
+        """L-1: export_csv creates a file with expected content."""
+        result = BacktestResult(
+            strategy="ai_probability",
+            total_trades=2,
+            winning_trades=1,
+            losing_trades=1,
+            total_pnl=5.0,
+            win_rate=0.50,
+            brier_score=0.20,
+            baseline_brier_score=0.25,
+            ci_coverage_rate=0.75,
+            ci_total_checked=4,
+            stale_price_warnings=2,
+            trades=[
+                BacktestTrade("M1", Direction.BUY_YES, "ai", 0.40, 10, "2026-01-01T00:00:00",
+                              pnl=10.0, resolved=True, outcome=True, category="Politics"),
+                BacktestTrade("M2", Direction.BUY_NO, "ai", 0.60, 5, "2026-01-02T00:00:00",
+                              pnl=-5.0, resolved=True, outcome=True, category="Tech"),
+            ],
+        )
+        csv_path = str(tmp_path / "backtest.csv")
+        export_csv(result, csv_path)
+
+        assert Path(csv_path).exists()
+        content = Path(csv_path).read_text()
+
+        # Check summary headers
+        assert "# Summary" in content
+        assert "strategy,ai_probability" in content
+        assert "total_trades,2" in content
+        assert "baseline_brier_score,0.2500" in content
+        assert "ci_coverage_rate,0.7500" in content
+        assert "stale_price_warnings,2" in content
+
+        # Check trades section headers
+        assert "# Trades" in content
+        assert "market_id,direction,strategy,price,size,timestamp,pnl,resolved,outcome,category" in content
+        assert "M1" in content
+        assert "M2" in content
+        assert "Politics" in content
+
+    def test_csv_empty_trades(self, tmp_path):
+        """L-1: export_csv handles empty trade list."""
+        result = BacktestResult(strategy="test", total_trades=0)
+        csv_path = str(tmp_path / "empty.csv")
+        export_csv(result, csv_path)
+
+        assert Path(csv_path).exists()
+        content = Path(csv_path).read_text()
+        assert "# Summary" in content
+        assert "# Trades" in content

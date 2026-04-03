@@ -117,8 +117,9 @@ class CircuitBreaker:
                 return False
 
         # M-3: Hard gate — halt if unrealized losses alone exceed 15% of bankroll.
-        # This catches scenarios where realized P&L looks fine but open positions
-        # are deeply underwater, indicating imminent large realized losses.
+        # Uses 100% of unrealized P&L (no discount) because this is flash-crash
+        # protection — immediate halt when open positions are deeply underwater.
+        # Compare with daily loss check below which uses 75% weighting.
         if unrealized_pnl < 0 and bankroll > 0:
             unrealized_loss_pct = abs(unrealized_pnl) / bankroll
             if unrealized_loss_pct >= MAX_UNREALIZED_LOSS_PCT:
@@ -132,9 +133,9 @@ class CircuitBreaker:
                 return False
 
         # Check daily loss limit (realized + discounted unrealized).
-        # Weight unrealized losses at 75% — balances between being too aggressive
-        # (100%, which would halt on normal intraday fluctuations) and too lenient
-        # (50%, which delays halt when positions are deeply underwater).
+        # Weight unrealized losses at 75% (vs 100% for the hard gate above) because
+        # this is a softer daily measure — unrealized losses are temporary and may
+        # recover. The hard gate (M-3 above) uses 100% for immediate flash-crash halt.
         daily_pnl = self.db.get_daily_pnl()
         daily_pnl += unrealized_pnl * 0.75
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
@@ -282,6 +283,9 @@ class CircuitBreaker:
         self._halted = bool(state["halted"])
         self._halt_reason = state["halt_reason"]
         self._last_recorded_day = state.get("last_recorded_day")
+        # H-5: Restore peak equity for accurate drawdown tracking across restarts
+        if state.get("high_water_mark") is not None:
+            self._high_water_mark = float(state["high_water_mark"])
         if state["halt_time"]:
             self._halt_time = datetime.fromisoformat(state["halt_time"])
         if self._halted or self._consecutive_losing_days > 0 or self._reduced_sizing:
@@ -306,6 +310,7 @@ class CircuitBreaker:
             halt_reason=self._halt_reason,
             halt_time=self._halt_time.isoformat() if self._halt_time else None,
             last_recorded_day=self._last_recorded_day,
+            high_water_mark=self._high_water_mark,
         )
 
     def _update_consecutive_losses(self) -> None:

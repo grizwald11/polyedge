@@ -1,4 +1,4 @@
-"""Shared retry logic for external API calls (M-3 audit fix).
+"""Shared retry logic for external API calls (M-3 / M-12 audit fix).
 
 Provides a reusable async retry wrapper with exponential backoff, jitter,
 and configurable exception handling. Replaces duplicated retry patterns
@@ -23,6 +23,7 @@ async def retry_with_backoff(
     max_delay: float = 10.0,
     retryable_exceptions: tuple[Type[BaseException], ...] = (Exception,),
     on_retry: Optional[Callable[[int, BaseException], None]] = None,
+    abort_check: Optional[Callable[[], bool]] = None,
     **kwargs: Any,
 ) -> Any:
     """Execute an async function with exponential backoff retry.
@@ -34,12 +35,15 @@ async def retry_with_backoff(
         max_delay: Maximum delay cap in seconds.
         retryable_exceptions: Tuple of exception types that trigger a retry.
         on_retry: Optional callback(attempt, exception) called before each retry sleep.
+        abort_check: Optional callable returning True to abort retries early.
+            Checked after on_retry but before sleeping. Useful for budget limits
+            or external circuit breakers.
 
     Returns:
         The return value of func.
 
     Raises:
-        The last exception if all retries are exhausted.
+        The last exception if all retries are exhausted or aborted.
     """
     last_exception: Optional[BaseException] = None
 
@@ -58,6 +62,8 @@ async def retry_with_backoff(
                     f"Retry {attempt + 1}/{max_retries} after {type(e).__name__}: {e} "
                     f"(waiting {delay:.1f}s)"
                 )
+            if abort_check and abort_check():
+                break
             await asyncio.sleep(delay)
 
     raise last_exception  # type: ignore[misc]

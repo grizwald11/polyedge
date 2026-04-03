@@ -327,6 +327,11 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
 
     # Polymarket integration (conditional)
     if settings.polymarket.enabled:
+        logger.warning(
+            "LEGAL WARNING: Polymarket is not available to US residents per Terms of Service. "
+            "Ensure you are eligible before enabling Polymarket trading. "
+            "Set polymarket.enabled=false in settings.yaml if you are a US resident."
+        )
         try:
             from src.core.polymarket_client import PolymarketClient
             from src.core.polymarket_discovery import PolymarketDiscovery

@@ -274,14 +274,15 @@ class AIProbabilityStrategy:
     ) -> Optional[Signal]:
         """Assess a single market and return a signal if edge is sufficient.
 
-        L-2: This is a long method (~255 lines) with the following logical stages:
+        Orchestrates these stages via helper methods:
         1. Staleness check — skip if recent prediction is still fresh
         2. Classification — determine market category, apply accuracy gating
-        3. Forecasting — get Claude's probability estimate (with optional cross-check)
-        4. Divergence & confidence gates — reject hallucinations and wide CIs
-        5. Ensemble — combine Claude + community forecasts + calibration adjustments
-        6. Edge calculation — compute edge, check significance and minimum threshold
-        7. Signal generation — build and return Signal if edge is sufficient
+        3. Context gathering — build base rate, accuracy, resolution contexts
+        4. Forecasting — get Claude's probability estimate (with optional cross-check)
+        5. Divergence & confidence gates — reject hallucinations and wide CIs
+        6. Ensemble — combine Claude + community forecasts + calibration adjustments
+        7. Edge calculation — compute edge, check significance and minimum threshold
+        8. Signal generation — build and return Signal if edge is sufficient
         """
         # Cheap contract filter: contracts under 12¢ are structural losers.
         # Research on 300K+ Kalshi contracts shows <10¢ contracts lose 60%+.
@@ -292,41 +293,114 @@ class AIProbabilityStrategy:
                 f"(YES={market.yes_price:.0%}, NO={market.no_price:.0%})"
             )
             return None
-        # Reject buying the cheap side — only the expensive side has structural edge
-        # (This is checked post-forecast when direction is known, but we can
-        # pre-reject markets where both sides are cheap)
 
-        # Staleness check: skip re-assessment if recent prediction is still fresh
-        if self.db:
+        # 1. Staleness check
+        if self._check_staleness(market):
+            return None
+
+        # 2. Classification and accuracy gating
+        classify_result = self._classify_and_gate(market, min_edge)
+        if classify_result is None:
+            return None
+        category, min_edge = classify_result
+
+        # 3. Gather context (base rate, accuracy, resolution, analogues, news)
+        context = await self._gather_context(market, category, news_context)
+        if context is None:
+            return None  # Resolution criteria too ambiguous
+
+        # 4. Run forecast (decomposition, cross-check, or regular)
+        forecast = await self._run_forecast(
+            market, context, use_cross_check,
+        )
+        if forecast is None:
+            return None
+
+        # 4b. Pre-mortem adversarial analysis: force counterargument reasoning
+        # Only run when edge is significant and CI is tight (avoid wasting API calls)
+        preliminary_edge = abs(forecast.probability - market.yes_price)
+        ci_width_pre = forecast.confidence_high - forecast.confidence_low
+        if self.adversarial_analyzer.should_run(preliminary_edge, ci_width_pre):
             try:
-                latest = self.db.get_latest_prediction(market.ticker)
-                if latest:
-                    predicted_at = datetime.fromisoformat(latest["predicted_at"])
-                    age = datetime.now(timezone.utc) - predicted_at
-                    price_move = abs(market.yes_price - latest["market_price_at_prediction"])
-                    staleness_hours = self.settings.claude.reassessment_interval_hours
-                    staleness_price_move = self.settings.claude.reassessment_price_move
-                    # Use relative price move to be context-sensitive across all price ranges
-                    cached_price = latest["market_price_at_prediction"]
-                    relative_move = price_move / max(cached_price, 0.01) if cached_price > 0 else price_move
-                    if age < timedelta(hours=staleness_hours) and relative_move < staleness_price_move:
-                        # Also check if volume changed significantly — a volume spike
-                        # can signal new information even without a price move
-                        volume_changed = False
-                        cached_volume = latest.get("volume_at_prediction")
-                        if cached_volume and cached_volume > 0 and market.volume_24h > 0:
-                            volume_ratio = market.volume_24h / cached_volume
-                            volume_changed = volume_ratio > 1.5 or volume_ratio < 0.5
-                        if not volume_changed:
-                            logger.debug(
-                                f"Skipping {market.ticker}: recent prediction "
-                                f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f} "
-                                f"({relative_move:.0%} relative), volume stable)"
-                            )
-                            return None
+                adversarial = await self.adversarial_analyzer.run_premortem(market, forecast)
+                if adversarial.plausibility > 0.5:
+                    forecast = self.adversarial_analyzer.apply_adjustment(forecast, adversarial)
             except Exception as e:
-                logger.debug(f"Staleness check failed for {market.ticker}: {e}")
+                logger.debug(f"Adversarial analysis failed for {market.ticker}: {e}")
 
+        # 5. Divergence and confidence gates
+        if not self._apply_divergence_gates(market, forecast, category):
+            return None
+
+        # 6. Ensemble: combine Claude + community forecasts + calibration adjustments
+        ci_width = forecast.confidence_high - forecast.confidence_low
+        ensemble, consensus_forecasts, market_eff, cat_brier_dict = await self._compute_ensemble(
+            market, forecast, category,
+        )
+
+        # 7. Edge calculation, significance check, and signal generation
+        return await self._calculate_edge_and_signal(
+            market=market,
+            forecast=forecast,
+            ensemble=ensemble,
+            category=category,
+            ci_width=ci_width,
+            min_edge=min_edge,
+            news_context=context["news_context"],
+            base_rate_context=context["base_rate_context"],
+            accuracy_context=context["accuracy_context"],
+            consensus_forecasts=consensus_forecasts,
+            market_eff=market_eff,
+            cat_brier_dict=cat_brier_dict,
+        )
+
+    # ------------------------------------------------------------------
+    # Stage 1: Staleness check
+    # ------------------------------------------------------------------
+
+    def _check_staleness(self, market: Market) -> bool:
+        """Return True if market should be skipped due to a recent fresh prediction."""
+        if not self.db:
+            return False
+        try:
+            latest = self.db.get_latest_prediction(market.ticker)
+            if latest:
+                predicted_at = datetime.fromisoformat(latest["predicted_at"])
+                age = datetime.now(timezone.utc) - predicted_at
+                price_move = abs(market.yes_price - latest["market_price_at_prediction"])
+                staleness_hours = self.settings.claude.reassessment_interval_hours
+                staleness_price_move = self.settings.claude.reassessment_price_move
+                # Use relative price move to be context-sensitive across all price ranges
+                cached_price = latest["market_price_at_prediction"]
+                relative_move = price_move / max(cached_price, 0.01) if cached_price > 0 else price_move
+                if age < timedelta(hours=staleness_hours) and relative_move < staleness_price_move:
+                    # Also check if volume changed significantly — a volume spike
+                    # can signal new information even without a price move
+                    volume_changed = False
+                    cached_volume = latest.get("volume_at_prediction")
+                    if cached_volume and cached_volume > 0 and market.volume_24h > 0:
+                        volume_ratio = market.volume_24h / cached_volume
+                        volume_changed = volume_ratio > 1.5 or volume_ratio < 0.5
+                    if not volume_changed:
+                        logger.debug(
+                            f"Skipping {market.ticker}: recent prediction "
+                            f"({age.total_seconds()/3600:.0f}h old, price moved {price_move:.2f} "
+                            f"({relative_move:.0%} relative), volume stable)"
+                        )
+                        return True
+        except Exception as e:
+            logger.debug(f"Staleness check failed for {market.ticker}: {e}")
+        return False
+
+    # ------------------------------------------------------------------
+    # Stage 2: Classification and accuracy gating
+    # ------------------------------------------------------------------
+
+    def _classify_and_gate(self, market: Market, min_edge: float) -> Optional[tuple]:
+        """Classify market and apply accuracy gating.
+
+        Returns (category, min_edge) on success, or None to skip this market.
+        """
         category = classify_market(market)
 
         # M-8: Defense-in-depth — skip excluded categories even if scanner missed them.
@@ -350,6 +424,23 @@ class AIProbabilityStrategy:
         if cat_brier is not None and cat_brier > 0.20:
             min_edge = max(min_edge, 0.08)  # Require 8% edge instead of 5%
 
+        return category, min_edge
+
+    # ------------------------------------------------------------------
+    # Stage 3: Context gathering
+    # ------------------------------------------------------------------
+
+    async def _gather_context(
+        self,
+        market: Market,
+        category,
+        news_context: str,
+    ) -> Optional[dict]:
+        """Gather all context needed for forecasting.
+
+        Returns a dict with keys: base_rate_context, accuracy_context, news_context.
+        Returns None if the market should be skipped (e.g. ambiguous resolution).
+        """
         base_rate_context = self._build_base_rate_context(category.value)
 
         # Build historical accuracy context for this category
@@ -397,7 +488,32 @@ class AIProbabilityStrategy:
             except Exception as e:
                 logger.warning(f"Data enricher failed for {market.ticker}, using news_context: {e}")
 
+        return {
+            "base_rate_context": base_rate_context,
+            "accuracy_context": accuracy_context,
+            "news_context": news_context,
+        }
+
+    # ------------------------------------------------------------------
+    # Stage 4: Forecasting
+    # ------------------------------------------------------------------
+
+    async def _run_forecast(
+        self,
+        market: Market,
+        context: dict,
+        use_cross_check: bool,
+    ) -> Optional[ForecastResult]:
+        """Run Claude forecast (decomposition, cross-check, or regular).
+
+        Returns ForecastResult on success, or None to skip this market.
+        """
+        news_context = context["news_context"]
+        base_rate_context = context["base_rate_context"]
+        accuracy_context = context["accuracy_context"]
+
         # Try decomposition for compound questions (multi-step reasoning)
+        forecast: Optional[ForecastResult] = None
         decomposition_enabled = getattr(self.settings.claude, 'decomposition_enabled', True)
         if decomposition_enabled and is_compound_question(market.question):
             try:
@@ -412,19 +528,11 @@ class AIProbabilityStrategy:
                         f"{decomposed.probability:.0%} ({decomposed.reasoning[:80]}...)"
                     )
                     forecast = decomposed
-                    # Skip the regular Claude call — jump to divergence gate
-                    # by setting a flag; the forecast variable is already set
-                    _used_decomposition = True
-                else:
-                    _used_decomposition = False
             except Exception as e:
                 logger.warning(f"Decomposition failed for {market.ticker}: {e}")
-                _used_decomposition = False
-        else:
-            _used_decomposition = False
 
         # Get Claude's forecast (cross-check or regular) — skip if decomposition succeeded
-        if _used_decomposition:
+        if forecast is not None:
             pass  # forecast already set by decomposer
         elif use_cross_check:
             try:
@@ -465,6 +573,14 @@ class AIProbabilityStrategy:
                     f"Platt calibration: {market.ticker} {raw_prob:.3f} → {forecast.probability:.3f}"
                 )
 
+        return forecast
+
+    # ------------------------------------------------------------------
+    # Stage 5: Divergence and confidence gates
+    # ------------------------------------------------------------------
+
+    def _apply_divergence_gates(self, market: Market, forecast: ForecastResult, category) -> bool:
+        """Apply divergence and confidence gates. Return True if forecast passes all gates."""
         # Record Claude-vs-market divergence for contrarian accuracy tracking
         if self.contrarian_tracker:
             try:
@@ -476,18 +592,6 @@ class AIProbabilityStrategy:
                 )
             except Exception as e:
                 logger.debug(f"Contrarian tracking failed for {market.ticker}: {e}")
-
-        # Pre-mortem adversarial analysis: force counterargument reasoning
-        # Only run when edge is significant and CI is tight (avoid wasting API calls)
-        preliminary_edge = abs(forecast.probability - market.yes_price)
-        ci_width_pre = forecast.confidence_high - forecast.confidence_low
-        if self.adversarial_analyzer.should_run(preliminary_edge, ci_width_pre):
-            try:
-                adversarial = await self.adversarial_analyzer.run_premortem(market, forecast)
-                if adversarial.plausibility > 0.5:
-                    forecast = self.adversarial_analyzer.apply_adjustment(forecast, adversarial)
-            except Exception as e:
-                logger.debug(f"Adversarial analysis failed for {market.ticker}: {e}")
 
         # Divergence gate: reject extreme disagreement with the market.
         # When Claude diverges by >40% from the market price, it's far more
@@ -543,13 +647,13 @@ class AIProbabilityStrategy:
                     f"Rejecting {market.ticker}: relative divergence {relative_div:.1f}x "
                     f"on extreme-price market ({market.yes_price:.0%})"
                 )
-                return None
+                return False
         if divergence > max_div:
             logger.warning(
                 f"Rejecting {market.ticker}: Claude ({forecast.probability:.0%}) diverges "
                 f"{divergence:.0%} from market ({market.yes_price:.0%}) — exceeds max {max_div:.0%}"
             )
-            return None
+            return False
 
         # Confidence gate: skip if confidence interval is too wide.
         # Category-specific thresholds: data-rich categories (Politics, Fed)
@@ -567,8 +671,24 @@ class AIProbabilityStrategy:
                 f"Skipping {market.ticker}: confidence interval too wide "
                 f"({ci_width:.2f} > {max_ci:.2f} for {category.value})"
             )
-            return None
+            return False
 
+        return True
+
+    # ------------------------------------------------------------------
+    # Stage 6: Ensemble computation
+    # ------------------------------------------------------------------
+
+    async def _compute_ensemble(
+        self,
+        market: Market,
+        forecast: ForecastResult,
+        category,
+    ) -> tuple:
+        """Combine Claude + community forecasts + calibration adjustments.
+
+        Returns (ensemble, consensus_forecasts, market_eff, cat_brier_dict).
+        """
         # Collect cross-platform consensus forecasts (Polymarket, Manifold, Metaculus)
         consensus_forecasts: list[ForecastResult] = []
         if self.consensus_aggregator:
@@ -678,6 +798,28 @@ class AIProbabilityStrategy:
                 confidence=ensemble.confidence,
             )
 
+        return ensemble, consensus_forecasts, market_eff, cat_brier_dict
+
+    # ------------------------------------------------------------------
+    # Stage 7: Edge calculation and signal generation
+    # ------------------------------------------------------------------
+
+    async def _calculate_edge_and_signal(
+        self,
+        market: Market,
+        forecast: ForecastResult,
+        ensemble,
+        category,
+        ci_width: float,
+        min_edge: float,
+        news_context: str,
+        base_rate_context: str,
+        accuracy_context: str,
+        consensus_forecasts: list,
+        market_eff: float,
+        cat_brier_dict: Optional[dict],
+    ) -> Optional[Signal]:
+        """Calculate edge, apply temporal/significance checks, and build Signal if sufficient."""
         # Calculate edge
         edge = ensemble.edge  # positive = YES underpriced, negative = NO underpriced
 

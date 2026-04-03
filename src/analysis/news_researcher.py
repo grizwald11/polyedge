@@ -9,95 +9,39 @@ from __future__ import annotations
 
 import logging
 import re
-import warnings
-from dataclasses import dataclass
-from html.parser import HTMLParser
-from typing import Optional
-
 import time
+from typing import Optional
 
 import httpx
 
+from src.analysis.news_fetcher import (
+    _ArticleTextExtractor,
+    _extract_source,
+    _extract_text_from_html,
+    _normalize_url,
+    _truncate_at_sentence,
+    enrich_with_article_text,
+    fetch_article_text,
+    MAX_ARTICLE_CHARS,
+    MAX_ARTICLE_FETCH,
+    ARTICLE_FETCH_TIMEOUT,
+)
+from src.analysis.news_search import (
+    DDG_AVAILABLE,
+    NewsResult,
+    SERPER_SEARCH_URL,
+    MAX_RESULTS_PER_QUERY,
+    _SerperNonRetryable,
+    search_ddg,
+    search_serper,
+    parse_serper_response,
+)
+
 logger = logging.getLogger(__name__)
 
-
-class _ArticleTextExtractor(HTMLParser):
-    """Extract visible text from HTML, skipping script/style/nav/header/footer."""
-
-    _SKIP_TAGS = frozenset({"script", "style", "nav", "header", "footer", "noscript", "svg"})
-
-    def __init__(self):
-        super().__init__()
-        self._pieces: list[str] = []
-        self._skip_depth: int = 0
-        self._in_paragraph: bool = False
-
-    def handle_starttag(self, tag: str, attrs):
-        tag_lower = tag.lower()
-        if tag_lower in self._SKIP_TAGS:
-            self._skip_depth += 1
-        if tag_lower in ("p", "div", "article", "section", "h1", "h2", "h3", "li", "blockquote"):
-            self._pieces.append("\n")
-
-    def handle_endtag(self, tag: str):
-        if tag.lower() in self._SKIP_TAGS and self._skip_depth > 0:
-            self._skip_depth -= 1
-        if tag.lower() in ("p", "div", "article", "section", "li", "blockquote"):
-            self._pieces.append("\n")
-
-    def handle_data(self, data: str):
-        if self._skip_depth == 0:
-            self._pieces.append(data)
-
-    def get_text(self) -> str:
-        raw = "".join(self._pieces)
-        # Collapse runs of whitespace but preserve paragraph breaks
-        lines = raw.split("\n")
-        cleaned = []
-        for line in lines:
-            line = re.sub(r"[ \t]+", " ", line).strip()
-            if line:
-                cleaned.append(line)
-        return " ".join(cleaned)
-
-
-def _extract_text_from_html(html: str) -> str:
-    """Extract visible text from HTML using stdlib parser."""
-    parser = _ArticleTextExtractor()
-    try:
-        parser.feed(html)
-    except Exception:
-        # Fallback: strip tags with regex if parser fails on malformed HTML
-        text = re.sub(r"<[^>]+>", " ", html)
-        return re.sub(r"\s+", " ", text).strip()
-    return parser.get_text()
-
-
-def _truncate_at_sentence(text: str, max_chars: int) -> str:
-    """Truncate text at the last sentence boundary before max_chars."""
-    if len(text) <= max_chars:
-        return text
-    # Find last sentence-ending punctuation before limit
-    truncated = text[:max_chars]
-    for end_char in (".!?"):
-        last_pos = truncated.rfind(end_char)
-        if last_pos > max_chars * 0.5:  # Don't truncate too aggressively
-            return truncated[: last_pos + 1]
-    # No good sentence boundary found — cut at last space
-    last_space = truncated.rfind(" ")
-    if last_space > max_chars * 0.5:
-        return truncated[:last_space] + "..."
-    return truncated + "..."
-
-SERPER_SEARCH_URL = "https://google.serper.dev/search"
-
-MAX_RESULTS_PER_QUERY = 5
 MAX_QUERIES = 4
 MAX_CONTEXT_CHARS = 4000  # ~1000 tokens — increased to reduce mid-article truncation
 MAX_RELEVANT_RESULTS = 5
-MAX_ARTICLE_FETCH = 3  # Fetch full text for top N results
-MAX_ARTICLE_CHARS = 3000  # Max chars to extract per article
-ARTICLE_FETCH_TIMEOUT = 5.0  # Seconds per article fetch
 DEDUP_SIMILARITY_THRESHOLD = 0.7
 
 # L-7: Source trust multipliers — higher-trust sources get boosted relevance scores
@@ -134,31 +78,6 @@ _ENTITY_EXPANSIONS = [
     ("CIA ", "Central Intelligence Agency "),
     ("DNI ", "Director of National Intelligence "),
 ]
-
-# Check if ddgs (or legacy duckduckgo_search) is available.
-# The duckduckgo_search package was renamed to ddgs — suppress the rename warning.
-DDG_AVAILABLE = False
-try:
-    from ddgs import DDGS
-    DDG_AVAILABLE = True
-except ImportError:
-    try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=".*renamed.*ddgs.*", category=RuntimeWarning)
-            from duckduckgo_search import DDGS  # type: ignore[no-redef]
-        DDG_AVAILABLE = True
-    except ImportError:
-        logger.info("ddgs not installed — DDG search disabled")
-
-
-@dataclass
-class NewsResult:
-    """A single news search result."""
-    title: str
-    snippet: str
-    source: str
-    date: str
-    url: str
 
 
 class NewsResearcher:
@@ -322,165 +241,83 @@ class NewsResearcher:
         return []
 
     async def _search_ddg(self, query: str) -> list[NewsResult]:
-        """Search via DuckDuckGo using duckduckgo-search library.
+        """Search via DuckDuckGo — delegates to news_search module."""
+        return await search_ddg(query)
 
-        Uses the news endpoint for recency, falls back to text search.
-        Runs synchronous DDGS in a thread to avoid blocking the event loop.
-        """
-        import asyncio
-
-        def _do_search() -> list[NewsResult]:
-            results = []
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", RuntimeWarning)
-                    with DDGS() as ddgs:
-                        for item in ddgs.news(query, max_results=MAX_RESULTS_PER_QUERY):
-                            results.append(NewsResult(
-                                title=item.get("title", ""),
-                                snippet=item.get("body", ""),
-                                source=item.get("source", ""),
-                                date=item.get("date", ""),
-                                url=item.get("url", ""),
-                            ))
-            except Exception as e:
-                logger.debug(f"DDG news search failed for '{query}': {e}")
-
-            if not results:
-                # Fall back to text search
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", RuntimeWarning)
-                        with DDGS() as ddgs:
-                            for item in ddgs.text(query, max_results=MAX_RESULTS_PER_QUERY):
-                                results.append(NewsResult(
-                                    title=item.get("title", ""),
-                                    snippet=item.get("body", ""),
-                                    source=_extract_source(item.get("href", "")),
-                                    date="",
-                                    url=item.get("href", ""),
-                                ))
-                except Exception as e:
-                    logger.debug(f"DDG text search failed for '{query}': {e}")
-
-            return results
-
-        loop = asyncio.get_event_loop()
-        try:
-            return await asyncio.wait_for(
-                loop.run_in_executor(None, _do_search),
-                timeout=8.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"DDG search timed out after 8s for '{query[:50]}'")
-            return []
+    # Keep _SerperNonRetryable as a class attribute for backward compatibility
+    _SerperNonRetryable = _SerperNonRetryable
 
     async def _search_serper(self, query: str) -> list[NewsResult]:
-        """Search via Serper.dev (paid fallback). Retries on 5xx errors."""
-        import asyncio
-        max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.post(
-                        self.serper_url,
-                        json={"q": query, "num": MAX_RESULTS_PER_QUERY},
-                        headers={
-                            "X-API-KEY": self.serper_api_key,
-                            "Content-Type": "application/json",
-                        },
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                # Reset auth failure counter on any successful call
-                if self._serper_auth_failure_count > 0:
-                    logger.info(
-                        f"Serper API call succeeded — resetting auth failure counter "
-                        f"(was {self._serper_auth_failure_count})"
-                    )
-                    self._serper_auth_failure_count = 0
-                break  # Success
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429:
-                    # Rate limit — use exponential backoff, not 1h cooldown
-                    wait = min(30, 2 ** (attempt + 2))
-                    logger.warning(f"Serper rate limited (429), backing off {wait}s")
-                    if attempt < max_retries:
-                        await asyncio.sleep(wait)
-                        continue
-                    return []
-                elif e.response.status_code in (400, 401, 403):
-                    try:
-                        detail = e.response.json().get("message", str(e.response.status_code))
-                    except (ValueError, KeyError, AttributeError):
-                        detail = str(e.response.status_code)
-                    import time as _time
-                    self._serper_auth_failure_count += 1
-                    if self._serper_auth_failure_count >= 3:
-                        # 3 consecutive auth failures → permanently disable Serper.
-                        # This prevents indefinite hourly retry storms on invalid keys.
-                        logger.critical(
-                            f"Serper API PERMANENTLY DISABLED after "
-                            f"{self._serper_auth_failure_count} consecutive auth failures "
-                            f"({e.response.status_code}): {detail}. "
-                            f"News quality degraded — using DuckDuckGo only. "
-                            f"Fix: check SERPER_API_KEY, then call reset_serper() or restart."
-                        )
-                        self._serper_disabled = True
-                        self._serper_disabled_at = float("inf")  # Never re-enable via cooldown
-                        self._serper_key_at_disable = self.serper_api_key  # M-12
-                    elif self._serper_auth_failure_count >= 2:
-                        # M-10: Require 2+ consecutive auth failures before cooldown.
-                        # A single transient failure should not disable Serper for 1 hour.
-                        logger.warning(
-                            f"Serper API auth failure #{self._serper_auth_failure_count} "
-                            f"(1h cooldown): {detail}"
-                        )
-                        self._serper_disabled = True
-                        self._serper_disabled_at = _time.monotonic()
-                    else:
-                        # First auth failure — log but don't disable yet.
-                        logger.warning(
-                            f"Serper API auth failure #{self._serper_auth_failure_count} "
-                            f"(transient, not disabling yet): {detail}"
-                        )
-                    return []
-                elif e.response.status_code >= 500 and attempt < max_retries:
-                    wait = 2 ** attempt
-                    logger.debug(f"Serper 5xx error, retrying in {wait}s (attempt {attempt + 1})")
-                    await asyncio.sleep(wait)
-                    continue
-                else:
-                    logger.warning(f"Serper search failed for '{query}': {e}")
-                    return []
-            except httpx.HTTPError as e:
-                # Sanitize error to avoid leaking API keys in logs
-                safe_err = str(e)
-                if self.serper_api_key and self.serper_api_key in safe_err:
-                    safe_err = safe_err.replace(self.serper_api_key, "***REDACTED***")
-                if attempt < max_retries:
-                    wait = 2 ** attempt
-                    logger.debug(f"Serper network error, retrying in {wait}s: {safe_err}")
-                    await asyncio.sleep(wait)
-                    continue
-                logger.warning(f"Serper search failed for '{query}': {safe_err}")
-                return []
+        """Search via Serper.dev (paid fallback).
 
-        return self._parse_serper_response(data)
+        Wraps news_search.search_serper with the Serper state machine
+        (auth failure tracking, cooldown, permanent disable).
+        """
+        try:
+            results = await search_serper(
+                query,
+                serper_api_key=self.serper_api_key,
+                serper_url=self.serper_url,
+            )
+        except _SerperNonRetryable as wrapper:
+            # Unwrap the original HTTPStatusError for status-specific handling
+            orig: httpx.HTTPStatusError = wrapper.__cause__  # type: ignore[assignment]
+            status = orig.response.status_code
+            if status == 429:
+                logger.warning("Serper rate limited (429) — retries exhausted")
+                return []
+            # Auth errors (400/401/403): apply escalating disable logic
+            try:
+                detail = orig.response.json().get("message", str(status))
+            except (ValueError, KeyError, AttributeError):
+                detail = str(status)
+            import time as _time
+            self._serper_auth_failure_count += 1
+            if self._serper_auth_failure_count >= 3:
+                logger.critical(
+                    f"Serper API PERMANENTLY DISABLED after "
+                    f"{self._serper_auth_failure_count} consecutive auth failures "
+                    f"({status}): {detail}. "
+                    f"News quality degraded — using DuckDuckGo only. "
+                    f"Fix: check SERPER_API_KEY, then call reset_serper() or restart."
+                )
+                self._serper_disabled = True
+                self._serper_disabled_at = float("inf")
+                self._serper_key_at_disable = self.serper_api_key
+            elif self._serper_auth_failure_count >= 2:
+                logger.warning(
+                    f"Serper API auth failure #{self._serper_auth_failure_count} "
+                    f"(1h cooldown): {detail}"
+                )
+                self._serper_disabled = True
+                self._serper_disabled_at = _time.monotonic()
+            else:
+                logger.warning(
+                    f"Serper API auth failure #{self._serper_auth_failure_count} "
+                    f"(transient, not disabling yet): {detail}"
+                )
+            return []
+        except (httpx.HTTPStatusError, httpx.HTTPError) as e:
+            safe_err = str(e)
+            if self.serper_api_key and self.serper_api_key in safe_err:
+                safe_err = safe_err.replace(self.serper_api_key, "***REDACTED***")
+            logger.warning(f"Serper search failed for '{query}': {safe_err}")
+            return []
+
+        # Success — reset auth failure counter
+        if self._serper_auth_failure_count > 0:
+            logger.info(
+                f"Serper API call succeeded — resetting auth failure counter "
+                f"(was {self._serper_auth_failure_count})"
+            )
+            self._serper_auth_failure_count = 0
+
+        return results
 
     @staticmethod
     def _parse_serper_response(data: dict) -> list[NewsResult]:
         """Parse Serper API JSON response into NewsResult objects."""
-        results = []
-        for item in data.get("organic", [])[:MAX_RESULTS_PER_QUERY]:
-            results.append(NewsResult(
-                title=item.get("title", ""),
-                snippet=item.get("snippet", ""),
-                source=_extract_source(item.get("link", "")),
-                date=item.get("date", ""),
-                url=item.get("link", ""),
-            ))
-        return results
+        return parse_serper_response(data)
 
     def _is_stale(
         self,
@@ -528,7 +365,6 @@ class NewsResearcher:
             return False  # No date — can't determine staleness, keep it
         date_lower = result.date.lower()
         # Check for obviously old relative dates
-        import re
         weeks_match = re.search(r"(\d+)\s*week", date_lower)
         if weeks_match:
             weeks = int(weeks_match.group(1))
@@ -654,83 +490,12 @@ class NewsResearcher:
         return unique
 
     async def _fetch_article_text(self, url: str) -> str:
-        """Fetch and extract main text content from an article URL.
-
-        Uses a lightweight approach: fetch HTML, strip tags, extract the
-        largest text block. Returns empty string on failure.
-        """
-        if not url:
-            return ""
-        try:
-            async with httpx.AsyncClient(
-                timeout=ARTICLE_FETCH_TIMEOUT,
-                follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; PolyEdge/1.0)"},
-            ) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                content_type = resp.headers.get("content-type", "")
-                if not any(ct in content_type for ct in ("text/html", "application/xhtml", "application/json")):
-                    return ""
-                raw_text = resp.text
-                content_type_lower = content_type.lower()
-        except (httpx.HTTPError, httpx.TimeoutException, OSError) as e:
-            logger.debug(f"Article fetch failed for {url}: {e}", exc_info=True)
-            return ""
-        except Exception as e:
-            logger.warning(f"Unexpected error fetching article {url}: {e}", exc_info=True)
-            return ""
-
-        # Try JSON-LD articleBody extraction first (AMP / structured data)
-        if "application/json" in content_type_lower:
-            try:
-                import json
-                data = json.loads(raw_text)
-                article_body = data.get("articleBody", "")
-                if article_body:
-                    return _truncate_at_sentence(article_body, MAX_ARTICLE_CHARS)
-            except (json.JSONDecodeError, AttributeError):
-                pass
-            return ""
-
-        html = raw_text
-
-        # Extract text using stdlib HTML parser (robust, not regex)
-        text = _extract_text_from_html(html)
-        if not text:
-            return ""
-
-        # M-12: Reject articles with fewer than 50 words (likely nav/ad fragments)
-        if len(text.split()) < 50:
-            logger.debug(f"Article too short ({len(text.split())} words): {url[:80]}")
-            return ""
-
-        # Extract sentences (>40 chars) for quality content
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.strip()) > 40]
-        if not sentences:
-            return ""
-
-        # Include first 2 sentences (headline/lede) + body
-        first_part = " ".join(sentences[:2])
-        start = min(3, len(sentences) // 4)
-        middle_part = " ".join(sentences[start:])
-        combined = first_part + " " + middle_part
-        # Truncate at sentence boundary rather than mid-sentence
-        return _truncate_at_sentence(combined, MAX_ARTICLE_CHARS)
+        """Fetch and extract main text content from an article URL — delegates to news_fetcher."""
+        return await fetch_article_text(url)
 
     async def _enrich_with_article_text(self, results: list[NewsResult]) -> list[NewsResult]:
         """Fetch full article text for top results and append to snippets."""
-        import asyncio
-
-        to_fetch = results[:MAX_ARTICLE_FETCH]
-        tasks = [self._fetch_article_text(r.url) for r in to_fetch]
-        texts = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for i, text in enumerate(texts):
-            if isinstance(text, str) and text and len(text) > len(to_fetch[i].snippet):
-                to_fetch[i].snippet = text
-
-        return results
+        return await enrich_with_article_text(results)
 
     async def get_context(self, market_question: str) -> str:
         """Get formatted news context for a market question.
@@ -824,49 +589,3 @@ class NewsResearcher:
             context = context[:MAX_CONTEXT_CHARS].rsplit("\n", 1)[0] + "\n..."
 
         return context
-
-
-_TRACKING_PARAMS = frozenset({
-    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "fbclid", "gclid", "gclsrc", "dclid", "msclkid",
-    "mc_cid", "mc_eid", "ref", "source",
-})
-
-
-def _normalize_url(url: str) -> str:
-    """Normalize a URL for deduplication — strip tracking params, fragments, www prefix.
-
-    Keeps non-tracking query params so articles distinguished only by query
-    (e.g., ?article=123 vs ?article=456) are not falsely deduplicated.
-    """
-    try:
-        from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        if host.startswith("www."):
-            host = host[4:]
-        # Strip only known tracking params; keep the rest
-        if parsed.query:
-            params = parse_qs(parsed.query, keep_blank_values=True)
-            filtered = {k: v for k, v in params.items() if k.lower() not in _TRACKING_PARAMS}
-            clean_query = urlencode(filtered, doseq=True) if filtered else ""
-        else:
-            clean_query = ""
-        return urlunparse((parsed.scheme, host, parsed.path.rstrip("/"), "", clean_query, ""))
-    except Exception as e:
-        logger.debug(f"URL normalization failed for {url[:80]}: {e}")
-        return url
-
-
-def _extract_source(url: str) -> str:
-    """Extract a readable source name from a URL."""
-    try:
-        from urllib.parse import urlparse
-        host = urlparse(url).hostname or ""
-        # Strip www. prefix
-        if host.startswith("www."):
-            host = host[4:]
-        return host
-    except Exception as e:
-        logger.debug(f"Source extraction failed for {url[:80]}: {e}")
-        return url

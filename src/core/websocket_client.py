@@ -38,6 +38,18 @@ MAX_RECONNECT_CALLBACKS = 50
 
 
 @dataclass
+class ConnectionHealth:
+    """Health metrics for WebSocket connection monitoring."""
+
+    connected_since: float | None = None  # timestamp
+    total_reconnects: int = 0
+    total_messages_received: int = 0
+    last_message_at: float | None = None
+    consecutive_failures: int = 0
+    uptime_seconds: float = 0.0
+
+
+@dataclass
 class TickerUpdate:
     """Parsed ticker channel message."""
 
@@ -120,6 +132,7 @@ class KalshiWebSocket:
         self._fill_callbacks: dict[int, FillCallback] = {}
         self._lifecycle_callbacks: dict[int, LifecycleCallback] = {}
         self._reconnect_callbacks: list[Callable[[], Coroutine[Any, Any, None]]] = []
+        self._health = ConnectionHealth()
 
     # ── Subscription management ────────────────────
 
@@ -246,6 +259,8 @@ class KalshiWebSocket:
                         self._ws = ws
                     backoff = INITIAL_BACKOFF
                     consecutive_failures = 0
+                    self._health.connected_since = time.time()
+                    self._health.consecutive_failures = 0
                     logger.info(f"WebSocket connected to {self.host}")
 
                     # Resubscribe to all tickers with retry (H-2)
@@ -289,6 +304,12 @@ class KalshiWebSocket:
             except Exception as e:
                 async with self._ws_lock:  # H-4
                     self._ws = None
+                # Update health metrics on disconnect
+                if self._health.connected_since is not None:
+                    self._health.uptime_seconds += time.time() - self._health.connected_since
+                    self._health.connected_since = None
+                self._health.total_reconnects += 1
+                self._health.consecutive_failures += 1
                 if not self._running:
                     break
                 consecutive_failures += 1
@@ -334,6 +355,14 @@ class KalshiWebSocket:
     def subscription_count(self) -> int:
         return len(self._subscriptions)
 
+    def get_health(self) -> ConnectionHealth:
+        """Return a copy of connection health metrics with computed uptime."""
+        import copy
+        health = copy.copy(self._health)
+        if health.connected_since is not None:
+            health.uptime_seconds = time.time() - health.connected_since
+        return health
+
     @staticmethod
     def _log_task_exception(task: asyncio.Task):
         """Callback to log exceptions from fire-and-forget tasks."""
@@ -362,6 +391,8 @@ class KalshiWebSocket:
         """Process incoming WebSocket messages."""
         async for raw in ws:
             try:
+                self._health.total_messages_received += 1
+                self._health.last_message_at = time.time()
                 msg = json.loads(raw)
                 await self._dispatch(msg)
             except json.JSONDecodeError:

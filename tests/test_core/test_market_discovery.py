@@ -140,7 +140,10 @@ class TestMarketDiscovery:
             "events": [
                 {
                     "category": "Politics",
-                    "markets": [{"ticker": "TEST-001"}, {"ticker": "TEST-002"}],
+                    "markets": [
+                        {"ticker": "TEST-001", "last_price_dollars": "0.50"},
+                        {"ticker": "TEST-002", "last_price_dollars": "0.30"},
+                    ],
                 },
             ],
             "cursor": None,
@@ -158,7 +161,7 @@ class TestMarketDiscovery:
             "events": [
                 {
                     "category": "Politics",
-                    "markets": [{"ticker": f"M-{i}"} for i in range(200)],
+                    "markets": [{"ticker": f"M-{i}", "last_price_dollars": "0.40"} for i in range(200)],
                 },
             ],
             "cursor": "next_page",
@@ -167,7 +170,7 @@ class TestMarketDiscovery:
             "events": [
                 {
                     "category": "Economics",
-                    "markets": [{"ticker": f"M-{i}"} for i in range(200, 250)],
+                    "markets": [{"ticker": f"M-{i}", "last_price_dollars": "0.40"} for i in range(200, 250)],
                 },
             ],
             "cursor": None,
@@ -199,11 +202,11 @@ class TestMarketDiscovery:
             "events": [
                 {
                     "category": "Health",
-                    "markets": [{"ticker": "HEALTH-001"}],
+                    "markets": [{"ticker": "HEALTH-001", "last_price_dollars": "0.60"}],
                 },
                 {
                     "category": "Politics",
-                    "markets": [{"ticker": "POL-001"}],
+                    "markets": [{"ticker": "POL-001", "last_price_dollars": "0.45"}],
                 },
             ],
             "cursor": None,

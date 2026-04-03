@@ -358,15 +358,41 @@ class ClaudeForecaster:
     ):
         """Call Claude API with retry logic for rate limits and connection errors.
 
+        Uses the shared retry_with_backoff helper (M-12 consolidation).
+
         Returns the raw API response object on success.
 
         Raises:
-            asyncio.TimeoutError: On initial timeout (no retries for timeouts)
+            asyncio.TimeoutError: On timeout (not retried)
             anthropic.AuthenticationError: On auth failure (non-retryable)
-            Exception: On unhandled errors after exhausting retries
+            anthropic.RateLimitError: After exhausting retries
+            anthropic.APIConnectionError: After exhausting retries
         """
-        client = self._get_client()
-        try:
+        from src.core.retry_helper import retry_with_backoff
+
+        def _on_retry(attempt: int, exc: BaseException) -> None:
+            exc_name = type(exc).__name__
+            logger.warning(
+                f"Claude API {exc_name}, retrying "
+                f"(attempt {attempt + 1}/3)"
+            )
+            # M-1: Track estimated tokens for failed attempts. Rate-limited and
+            # connection-error calls may still consume input tokens on the server
+            # side. Use the running average if available, otherwise a conservative
+            # estimate of input-only tokens (half a typical call).
+            estimated = (
+                self._total_tokens_today // self._call_count_today
+                if self._call_count_today > 0
+                else 1500  # Conservative: ~1500 input tokens for a typical prompt
+            )
+            self._total_tokens_today += estimated
+            logger.debug(
+                f"M-1: Estimated {estimated} tokens for failed attempt "
+                f"(total today: {self._total_tokens_today:,})"
+            )
+
+        async def _make_request():
+            client = self._get_client()
             return await asyncio.wait_for(
                 client.messages.create(
                     model=model,
@@ -377,87 +403,27 @@ class ClaudeForecaster:
                 ),
                 timeout=timeout,
             )
-        except anthropic.RateLimitError as orig_exc:
-            # Retry up to 3 times with exponential backoff before falling back
-            last_exc: Exception = orig_exc
-            for retry_attempt in range(1, 4):
-                wait = min(10, 2 ** retry_attempt)  # Cap backoff at 10s
-                logger.warning(
-                    f"Claude API rate limited, retrying in {wait}s "
-                    f"(attempt {retry_attempt}/3)"
-                )
-                await asyncio.sleep(wait)
-                # Check budget before retry to prevent overrun
-                if self.is_budget_exceeded():
-                    logger.warning("Budget exceeded during rate limit retry — aborting")
-                    break
-                try:
-                    client = self._get_client()
-                    response = await asyncio.wait_for(
-                        client.messages.create(
-                            model=model,
-                            max_tokens=self.settings.claude.max_tokens,
-                            temperature=temperature,
-                            system=SYSTEM_PROMPT,
-                            messages=[{"role": "user", "content": prompt}],
-                        ),
-                        timeout=timeout,
-                    )
-                    raw_text = self._extract_text(response)
-                    if raw_text is None:
-                        continue
-                    logger.info(
-                        f"Claude rate limit retry {retry_attempt} succeeded"
-                    )
-                    return response
-                except anthropic.RateLimitError as e:
-                    last_exc = e
-                    continue
-                except Exception as e:
-                    logger.debug(f"Non-rate-limit error during retry: {e}")
-                    last_exc = e
-                    break
 
-            logger.warning("Claude API rate limit retries exhausted, returning market price as fallback")
-            raise last_exc  # Re-raise the last caught exception, not the original
-
-        except anthropic.APIConnectionError as e:
-            # M-11: Retryable connection error — backoff like rate limits
-            for retry_attempt in range(1, 4):
-                wait = min(10, 2 ** retry_attempt)
-                logger.warning(
-                    f"Claude API connection error, retrying in {wait}s "
-                    f"(attempt {retry_attempt}/3): {e}"
-                )
-                await asyncio.sleep(wait)
-                try:
-                    client = self._get_client()
-                    response = await asyncio.wait_for(
-                        client.messages.create(
-                            model=model,
-                            max_tokens=self.settings.claude.max_tokens,
-                            temperature=temperature,
-                            system=SYSTEM_PROMPT,
-                            messages=[{"role": "user", "content": prompt}],
-                        ),
-                        timeout=timeout,
-                    )
-                    raw_text = self._extract_text(response)
-                    if raw_text is None:
-                        continue
-                    logger.info(
-                        f"Claude connection retry {retry_attempt} succeeded"
-                    )
-                    self._consecutive_failures = 0
-                    return response
-                except anthropic.APIConnectionError:
-                    continue
-                except Exception as retry_e:
-                    logger.debug(f"Non-connection error during retry: {retry_e}")
-                    break
-
-            logger.warning("Claude API connection retries exhausted, returning market price as fallback")
-            raise  # Re-raise the original APIConnectionError
+        try:
+            response = await retry_with_backoff(
+                _make_request,
+                max_retries=3,
+                base_delay=2.0,
+                max_delay=10.0,
+                retryable_exceptions=(
+                    anthropic.RateLimitError,
+                    anthropic.APIConnectionError,
+                ),
+                on_retry=_on_retry,
+                abort_check=self.is_budget_exceeded,
+            )
+            self._consecutive_failures = 0
+            return response
+        except (anthropic.RateLimitError, anthropic.APIConnectionError):
+            logger.warning(
+                "Claude API retries exhausted, returning market price as fallback"
+            )
+            raise
 
     def _parse_api_response(
         self,

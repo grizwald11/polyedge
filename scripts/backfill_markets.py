@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -47,7 +50,7 @@ async def backfill(
     total_stored = 0
     cursor = None
 
-    print(f"Fetching {status} markets (limit={limit})...")
+    logger.info(f"Fetching {status} markets (limit={limit})...")
 
     while total_stored < limit:
         batch_size = min(200, limit - total_stored)
@@ -58,7 +61,7 @@ async def backfill(
                 status=status,
             )
         except Exception as e:
-            print(f"API error: {e}")
+            logger.info(f"API error: {e}")
             break
 
         raw_markets = data.get("markets", [])
@@ -76,9 +79,9 @@ async def backfill(
                     total_stored += 1
             except Exception as e:
                 ticker = raw.get("ticker", "unknown")
-                print(f"  Failed to parse {ticker}: {e}")
+                logger.info(f"  Failed to parse {ticker}: {e}")
 
-        print(f"  Stored {total_stored} markets so far...")
+        logger.info(f"  Stored {total_stored} markets so far...")
 
         if not cursor:
             break
@@ -118,7 +121,7 @@ async def backfill_snapshots(
 
     tickers = [r["ticker"] for r in rows]
     if not tickers:
-        print("No settled markets without snapshots found.")
+        logger.info("No settled markets without snapshots found.")
         return 0
 
     total_snapshots = 0
@@ -134,13 +137,13 @@ async def backfill_snapshots(
             total_snapshots += len(snapshots)
 
             if i % 10 == 0:
-                print(f"  Processed {i}/{len(tickers)} markets, {total_snapshots} snapshots...")
+                logger.info(f"  Processed {i}/{len(tickers)} markets, {total_snapshots} snapshots...")
 
         except Exception as e:
-            print(f"  Failed to get history for {ticker}: {e}")
+            logger.info(f"  Failed to get history for {ticker}: {e}")
             continue
 
-    print(f"  Created {total_snapshots} snapshots for {len(tickers)} markets")
+    logger.info(f"  Created {total_snapshots} snapshots for {len(tickers)} markets")
     return total_snapshots
 
 
@@ -240,7 +243,7 @@ def generate_synthetic_snapshots(db: Database, limit: int = 500) -> int:
     """, (limit,)).fetchall()
 
     if not rows:
-        print("No settled markets without snapshots found.")
+        logger.info("No settled markets without snapshots found.")
         return 0
 
     # Stagger markets across a 30-day window so the backtest can cycle capital.
@@ -296,7 +299,7 @@ def generate_synthetic_snapshots(db: Database, limit: int = 500) -> int:
             total += 1
 
     conn.commit()
-    print(f"  Generated {total} synthetic snapshots for {len(rows)} markets")
+    logger.info(f"  Generated {total} synthetic snapshots for {len(rows)} markets")
     return total
 
 
@@ -323,22 +326,22 @@ def main():
 
     async def run():
         count = await backfill(kalshi, db, status=args.status, limit=args.limit)
-        print(f"\nDone: {count} {args.status} markets stored in {args.db}")
+        logger.info(f"Done: {count} {args.status} markets stored in {args.db}")
 
         if args.snapshots:
-            print("\nFetching price snapshots...")
+            logger.info("Fetching price snapshots...")
             snap_count = await backfill_snapshots(kalshi, db, limit=args.limit)
-            print(f"Created {snap_count} price snapshots")
+            logger.info(f"Created {snap_count} price snapshots")
 
     asyncio.run(run())
 
     if args.synthetic:
-        print("\nGenerating synthetic snapshots...")
+        logger.info("Generating synthetic snapshots...")
         snap_count = generate_synthetic_snapshots(db, limit=args.limit)
-        print(f"Generated {snap_count} synthetic snapshots")
+        logger.info(f"Generated {snap_count} synthetic snapshots")
 
     stats = db.get_stats()
-    print(f"DB totals: {stats.get('active_markets', 0)} active markets")
+    logger.info(f"DB totals: {stats.get('active_markets', 0)} active markets")
 
 
 if __name__ == "__main__":

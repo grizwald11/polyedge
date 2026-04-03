@@ -245,6 +245,128 @@ async def _generate_all_signals(
     return all_signals, ai_signals, no_signals
 
 
+async def _periodic_calibration_and_edge(
+    calibration_analyzer, kelly_sizer, circuit_breaker,
+    scanner, alert_manager, kalshi, logger,
+) -> None:
+    """Run calibration report, edge tracker update, and key rotation check.
+
+    Called every 10 cycles (~50 min) for periodic housekeeping.
+    """
+    # Calibration report
+    try:
+        report = calibration_analyzer.generate_report()
+        if report.total_resolved > 0:
+            logger.info(
+                f"Calibration report: "
+                f"Brier={report.overall_brier:.3f}, "
+                f"Win rate={report.overall_win_rate:.1%}, "
+                f"Resolved={report.total_resolved}, "
+                f"Unresolved={report.total_unresolved}"
+            )
+            if report.best_category:
+                logger.info(f"  Best category: {report.best_category}")
+            if report.worst_category and report.worst_category != report.best_category:
+                logger.info(f"  Worst category: {report.worst_category}")
+
+            adjustments = calibration_analyzer.get_category_adjustments()
+            if adjustments:
+                for cat, adj in adjustments.items():
+                    direction = "underestimates" if adj > 0 else "overestimates"
+                    logger.info(f"  Claude {direction} {cat} by {abs(adj):.1%}")
+
+            kelly_sizer.update_calibration_multiplier(report.overall_brier)
+            kelly_sizer.set_circuit_breaker_multiplier(circuit_breaker.get_kelly_multiplier())
+
+            trend_status, trend_delta = calibration_analyzer.check_trend(report.overall_brier)
+            if trend_status == "deteriorating":
+                logger.warning(
+                    f"Calibration DETERIORATING: Brier worsened by {trend_delta:+.3f} "
+                    f"(now {report.overall_brier:.3f})"
+                )
+                await alert_manager.send_error_alert(
+                    error=f"Calibration deteriorating: Brier score worsened by {trend_delta:+.3f} to {report.overall_brier:.3f}",
+                    context="Consider reviewing recent predictions and prompt templates",
+                )
+            elif trend_status == "improving":
+                logger.info(
+                    f"Calibration improving: Brier improved by {trend_delta:+.3f} "
+                    f"(now {report.overall_brier:.3f})"
+                )
+        else:
+            logger.info("Calibration: no resolved predictions yet")
+    except Exception as e:
+        logger.error(f"Calibration report failed: {e}", exc_info=True)
+
+    # Edge tracker: update Kelly edge multiplier based on realized vs predicted edge
+    try:
+        from src.analysis.edge_tracker import EdgeTracker
+        edge_tracker = EdgeTracker(scanner.db)
+        shrinkage = edge_tracker.compute_edge_shrinkage()
+        kelly_sizer.set_edge_multiplier(shrinkage)
+        summary = edge_tracker.get_summary()
+        if summary["count"] > 0:
+            logger.info(
+                f"Edge tracker: {summary['count']} resolved, "
+                f"avg_predicted={summary['avg_predicted']:.3f}, "
+                f"avg_realized={summary['avg_realized']:.3f}, "
+                f"shrinkage={summary['shrinkage']:.2f}, "
+                f"win_rate={summary['win_rate']:.1%}"
+            )
+    except Exception as e:
+        logger.debug(f"Edge tracker update skipped: {e}")
+
+    # Key rotation check — detect rotated credentials
+    try:
+        if not kalshi.check_key_freshness():
+            logger.warning("Kalshi private key was rotated — reloaded automatically")
+    except Exception as e:
+        logger.debug(f"Key freshness check failed: {e}")
+
+
+async def _check_closed_markets(markets, position_manager, alert_manager, logger) -> None:
+    """Check if any position markets have become closed/settled and mark for exit."""
+    market_by_ticker = {m.ticker: m for m in markets}
+    for pos in list(position_manager.get_all_positions()):
+        m = market_by_ticker.get(pos.market_id)
+        if m is not None and not m.active:
+            logger.warning(
+                f"Position market {pos.market_id} is no longer active "
+                f"(status={getattr(m, 'status', 'unknown')}) — marking for exit"
+            )
+            position_manager.mark_pending_exit(pos.market_id)
+            if alert_manager:
+                try:
+                    await alert_manager.send(
+                        f"MARKET CLOSED: {pos.market_id} — position held, marking for exit",
+                        level="warning",
+                    )
+                except Exception as e:
+                    logger.debug(f"Alert delivery failed (best-effort): {e}")
+
+
+async def _sync_positions_live(settings, position_manager, kalshi, circuit_breaker, logger) -> None:
+    """Sync positions with Kalshi in live mode to prevent desync."""
+    if settings.trading.mode != "live":
+        return
+    try:
+        mismatches = await position_manager.sync_with_kalshi(kalshi)
+        if mismatches:
+            logger.warning(f"Position sync found {mismatches} mismatches")
+        position_manager._consecutive_sync_failures = 0
+    except Exception as e:
+        logger.error(f"Position sync failed: {e}", exc_info=True)
+        position_manager._consecutive_sync_failures = getattr(
+            position_manager, "_consecutive_sync_failures", 0
+        ) + 1
+        if position_manager._consecutive_sync_failures >= 3:
+            logger.critical(
+                "Position sync failed 3+ consecutive times — halting trading. "
+                "Positions may be desynced with Kalshi."
+            )
+            circuit_breaker.trigger_halt("Position sync failed 3+ times")
+
+
 async def scan_and_trade(
     scanner,
     kalshi,
@@ -453,116 +575,13 @@ async def scan_and_trade(
     except Exception as e:
         logger.error(f"Resolution check failed: {e}", exc_info=True)
 
-    # Every 10 cycles (~50 min), generate and log calibration report
+    # Periodic housekeeping every 10 cycles (~50 min)
     if cycle_count > 0 and cycle_count % 10 == 0:
-        try:
-            report = calibration_analyzer.generate_report()
-            if report.total_resolved > 0:
-                logger.info(
-                    f"Calibration report: "
-                    f"Brier={report.overall_brier:.3f}, "
-                    f"Win rate={report.overall_win_rate:.1%}, "
-                    f"Resolved={report.total_resolved}, "
-                    f"Unresolved={report.total_unresolved}"
-                )
-                if report.best_category:
-                    logger.info(f"  Best category: {report.best_category}")
-                if report.worst_category and report.worst_category != report.best_category:
-                    logger.info(f"  Worst category: {report.worst_category}")
+        await _periodic_calibration_and_edge(
+            calibration_analyzer, kelly_sizer, circuit_breaker,
+            scanner, alert_manager, kalshi, logger,
+        )
 
-                adjustments = calibration_analyzer.get_category_adjustments()
-                if adjustments:
-                    for cat, adj in adjustments.items():
-                        direction = "underestimates" if adj > 0 else "overestimates"
-                        logger.info(f"  Claude {direction} {cat} by {abs(adj):.1%}")
-
-                kelly_sizer.update_calibration_multiplier(report.overall_brier)
-                kelly_sizer.set_circuit_breaker_multiplier(circuit_breaker.get_kelly_multiplier())
-
-                trend_status, trend_delta = calibration_analyzer.check_trend(report.overall_brier)
-                if trend_status == "deteriorating":
-                    logger.warning(
-                        f"Calibration DETERIORATING: Brier worsened by {trend_delta:+.3f} "
-                        f"(now {report.overall_brier:.3f})"
-                    )
-                    await alert_manager.send_error_alert(
-                        error=f"Calibration deteriorating: Brier score worsened by {trend_delta:+.3f} to {report.overall_brier:.3f}",
-                        context="Consider reviewing recent predictions and prompt templates",
-                    )
-                elif trend_status == "improving":
-                    logger.info(
-                        f"Calibration improving: Brier improved by {trend_delta:+.3f} "
-                        f"(now {report.overall_brier:.3f})"
-                    )
-            else:
-                logger.info("Calibration: no resolved predictions yet")
-        except Exception as e:
-            logger.error(f"Calibration report failed: {e}", exc_info=True)
-
-    # Edge tracker: update Kelly edge multiplier based on realized vs predicted edge
-    if cycle_count > 0 and cycle_count % 10 == 0:
-        try:
-            from src.analysis.edge_tracker import EdgeTracker
-            edge_tracker = EdgeTracker(scanner.db)
-            shrinkage = edge_tracker.compute_edge_shrinkage()
-            kelly_sizer.set_edge_multiplier(shrinkage)
-            summary = edge_tracker.get_summary()
-            if summary["count"] > 0:
-                logger.info(
-                    f"Edge tracker: {summary['count']} resolved, "
-                    f"avg_predicted={summary['avg_predicted']:.3f}, "
-                    f"avg_realized={summary['avg_realized']:.3f}, "
-                    f"shrinkage={summary['shrinkage']:.2f}, "
-                    f"win_rate={summary['win_rate']:.1%}"
-                )
-        except Exception as e:
-            logger.debug(f"Edge tracker update skipped: {e}")
-
-    # Key rotation check every 10 cycles (~50 min) — detect rotated credentials
-    if cycle_count > 0 and cycle_count % 10 == 0:
-        try:
-            if not kalshi.check_key_freshness():
-                logger.warning("Kalshi private key was rotated — reloaded automatically")
-        except Exception as e:
-            logger.debug(f"Key freshness check failed: {e}")
-
-    # Check if any position markets have become closed/settled (M-13).
-    # If a market closes while we hold a position, alert and mark for exit.
-    market_by_ticker = {m.ticker: m for m in markets}
-    for pos in list(position_manager.get_all_positions()):
-        m = market_by_ticker.get(pos.market_id)
-        if m is not None and not m.active:
-            logger.warning(
-                f"Position market {pos.market_id} is no longer active "
-                f"(status={getattr(m, 'status', 'unknown')}) — marking for exit"
-            )
-            position_manager.mark_pending_exit(pos.market_id)
-            if alert_manager:
-                try:
-                    await alert_manager.send(
-                        f"MARKET CLOSED: {pos.market_id} — position held, marking for exit",
-                        level="warning",
-                    )
-                except Exception as e:
-                    logger.debug(f"Alert delivery failed (best-effort): {e}")
-
-    # Position sync with Kalshi every cycle in live mode to prevent desync.
-    # Previously every 10 cycles (50 min gap) — too long, risks naked shorts
-    # or double entries if fills arrive between syncs.
-    if settings.trading.mode == "live":
-        try:
-            mismatches = await position_manager.sync_with_kalshi(kalshi)
-            if mismatches:
-                logger.warning(f"Position sync found {mismatches} mismatches")
-            position_manager._consecutive_sync_failures = 0
-        except Exception as e:
-            logger.error(f"Position sync failed: {e}", exc_info=True)
-            position_manager._consecutive_sync_failures = getattr(
-                position_manager, "_consecutive_sync_failures", 0
-            ) + 1
-            if position_manager._consecutive_sync_failures >= 3:
-                logger.critical(
-                    "Position sync failed 3+ consecutive times — halting trading. "
-                    "Positions may be desynced with Kalshi."
-                )
-                circuit_breaker.trigger_halt("Position sync failed 3+ times")
+    # Check for closed/settled position markets and sync with Kalshi
+    await _check_closed_markets(markets, position_manager, alert_manager, logger)
+    await _sync_positions_live(settings, position_manager, kalshi, circuit_breaker, logger)

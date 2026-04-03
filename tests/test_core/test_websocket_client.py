@@ -10,6 +10,7 @@ import pytest
 
 from src.core.websocket_client import (
     MAX_CONSECUTIVE_FAILURES,
+    ConnectionHealth,
     FillUpdate,
     KalshiWebSocket,
     LifecycleUpdate,
@@ -412,3 +413,115 @@ class TestPingParameters:
         assert connect_kwargs.get("ping_timeout") == 30, (
             f"Expected ping_timeout=30, got {connect_kwargs.get('ping_timeout')}"
         )
+
+
+class TestConnectionHealth:
+    def test_initial_health_defaults(self, ws_client):
+        """Health metrics start at zero/None."""
+        health = ws_client.get_health()
+        assert isinstance(health, ConnectionHealth)
+        assert health.connected_since is None
+        assert health.total_reconnects == 0
+        assert health.total_messages_received == 0
+        assert health.last_message_at is None
+        assert health.consecutive_failures == 0
+        assert health.uptime_seconds == 0.0
+
+    def test_health_updates_on_connect(self, ws_client):
+        """connected_since is set and consecutive_failures reset on connect."""
+        import time
+
+        # Simulate what connect() does on successful connection
+        ws_client._health.consecutive_failures = 3
+        ws_client._health.connected_since = time.time()
+        ws_client._health.consecutive_failures = 0
+
+        health = ws_client.get_health()
+        assert health.connected_since is not None
+        assert health.consecutive_failures == 0
+        assert health.uptime_seconds > 0.0  # computed from connected_since
+
+    @pytest.mark.asyncio
+    async def test_health_updates_on_message_received(self, ws_client):
+        """Message counter and last_message_at update on each message."""
+        import time
+
+        assert ws_client._health.total_messages_received == 0
+        assert ws_client._health.last_message_at is None
+
+        # Create a mock websocket that yields two messages then stops
+        messages = [
+            json.dumps({"type": "ticker", "msg": {
+                "market_ticker": "X", "price_dollars": 0.5,
+                "yes_bid_dollars": 0.49, "yes_ask_dollars": 0.51,
+                "volume_fp": 0, "open_interest_fp": 0, "ts": 0,
+            }}),
+            json.dumps({"type": "ticker", "msg": {
+                "market_ticker": "Y", "price_dollars": 0.6,
+                "yes_bid_dollars": 0.59, "yes_ask_dollars": 0.61,
+                "volume_fp": 0, "open_interest_fp": 0, "ts": 0,
+            }}),
+        ]
+
+        class FakeWS:
+            def __init__(self):
+                self._iter = iter(messages)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iter)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        before = time.time()
+        await ws_client._message_loop(FakeWS())
+
+        assert ws_client._health.total_messages_received == 2
+        assert ws_client._health.last_message_at is not None
+        assert ws_client._health.last_message_at >= before
+
+    def test_reconnect_counter_increments(self, ws_client):
+        """total_reconnects and consecutive_failures increment on disconnect."""
+        import time
+
+        assert ws_client._health.total_reconnects == 0
+        assert ws_client._health.consecutive_failures == 0
+
+        # Simulate first disconnect
+        ws_client._health.connected_since = time.time() - 10.0
+        ws_client._health.uptime_seconds += time.time() - ws_client._health.connected_since
+        ws_client._health.connected_since = None
+        ws_client._health.total_reconnects += 1
+        ws_client._health.consecutive_failures += 1
+
+        assert ws_client._health.total_reconnects == 1
+        assert ws_client._health.consecutive_failures == 1
+        assert ws_client._health.uptime_seconds >= 9.0  # ~10s of uptime
+
+        # Simulate second disconnect
+        ws_client._health.connected_since = time.time() - 5.0
+        ws_client._health.uptime_seconds += time.time() - ws_client._health.connected_since
+        ws_client._health.connected_since = None
+        ws_client._health.total_reconnects += 1
+        ws_client._health.consecutive_failures += 1
+
+        assert ws_client._health.total_reconnects == 2
+        assert ws_client._health.consecutive_failures == 2
+
+    def test_get_health_returns_copy(self, ws_client):
+        """get_health() returns a copy, not the internal instance."""
+        health = ws_client.get_health()
+        health.total_reconnects = 999
+        assert ws_client._health.total_reconnects == 0
+
+    def test_get_health_computes_uptime(self, ws_client):
+        """get_health() computes uptime_seconds from connected_since."""
+        import time
+
+        ws_client._health.connected_since = time.time() - 5.0
+        health = ws_client.get_health()
+        assert health.uptime_seconds >= 4.5
+        assert health.uptime_seconds <= 6.0

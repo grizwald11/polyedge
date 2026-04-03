@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
+
+import httpx
 
 from src.core.kalshi_client import KalshiClient
 from src.core.models import (
@@ -94,7 +97,7 @@ class FillTracker:
             except asyncio.TimeoutError:
                 logger.warning(f"Order poll timed out for {order_id}")
                 return (order_id, order, None)
-            except Exception as e:
+            except (httpx.HTTPError, OSError, ValueError) as e:
                 logger.error(f"Fill check failed for {order_id}: {e}", exc_info=True)
                 return (order_id, order, None)
 

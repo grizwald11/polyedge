@@ -4,7 +4,8 @@ Scrapes the Cleveland Fed's inflation nowcasting page for real-time
 CPI and Core CPI estimates. These are published before the official
 BLS release, giving edge on CPI-related markets.
 
-Gracefully degrades on any parsing error.
+Gracefully degrades on any parsing error, with retry logic
+and stale cache fallback.
 """
 
 from __future__ import annotations
@@ -15,45 +16,95 @@ from typing import Optional
 
 import httpx
 
+from src.core.retry_helper import retry_with_backoff
 from src.data.cache import TTLCache
 
 logger = logging.getLogger(__name__)
 
 CLEVELAND_FED_URL = "https://www.clevelandfed.org/indicators-and-data/inflation-nowcasting"
 
+# Validation bounds for CPI values (year-over-year percentage)
+MIN_CPI = -5.0   # Deflation floor (historically rare below -2%)
+MAX_CPI = 50.0   # Hyperinflation ceiling
+
 
 class ClevelandFedNowcast:
     """Fetches inflation nowcast data from the Cleveland Fed."""
 
-    def __init__(self, ttl_seconds: int = 3600, base_url: str | None = None):
+    def __init__(self, ttl_seconds: int = 3600, base_url: str | None = None,
+                 max_retries: int = 2):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
         self._base_url = base_url or CLEVELAND_FED_URL
+        self._max_retries = max_retries
+        # Stale fallback: last successful result, served when fetch + parse fail
+        self._last_good_result: Optional[dict] = None
 
     async def get_nowcast(self) -> Optional[dict]:
         """Fetch the latest inflation nowcast.
 
         Returns dict with 'cpi', 'core_cpi', and 'as_of' keys,
-        or None on failure.
+        or None on failure. Serves stale cache on transient failures.
         """
         cached = self._cache.get("cleveland_fed_nowcast")
         if cached is not None:
+            logger.debug("Cleveland Fed: returning cached nowcast")
             return cached
 
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(
-                    self._base_url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) PolyEdge/1.0"
-                    },
-                )
-                response.raise_for_status()
-                html = response.text
-        except httpx.HTTPError as e:
-            logger.warning(f"Cleveland Fed request failed: {e}")
+        html = await self._fetch_page()
+        if html is None:
+            if self._last_good_result is not None:
+                logger.info("Cleveland Fed: serving stale cached result after fetch failure")
+                return self._last_good_result
             return None
 
-        return self._parse_nowcast(html)
+        result = self._parse_nowcast(html)
+        if result is None and self._last_good_result is not None:
+            logger.info("Cleveland Fed: parse failed, serving stale cached result")
+            return self._last_good_result
+        return result
+
+    async def _fetch_page(self) -> Optional[str]:
+        """Fetch the Cleveland Fed HTML page with retry logic."""
+        try:
+            return await retry_with_backoff(
+                self._do_fetch,
+                max_retries=self._max_retries,
+                base_delay=2.0,
+                max_delay=10.0,
+                retryable_exceptions=(httpx.HTTPError, httpx.TimeoutException),
+                on_retry=lambda attempt, e: logger.warning(
+                    f"Cleveland Fed retry {attempt + 1}/{self._max_retries}: "
+                    f"{type(e).__name__}: {e}"
+                ),
+            )
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            logger.warning(
+                f"Cleveland Fed request failed after {self._max_retries + 1} attempts: {e}"
+            )
+            return None
+
+    async def _do_fetch(self) -> str:
+        """Single HTTP fetch attempt."""
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                self._base_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) PolyEdge/1.0"
+                },
+            )
+            response.raise_for_status()
+            logger.debug(f"Cleveland Fed: fetched {len(response.text)} bytes")
+            return response.text
+
+    def _validate_cpi(self, value: float, label: str) -> Optional[float]:
+        """Validate a CPI value is within plausible bounds."""
+        if value < MIN_CPI or value > MAX_CPI:
+            logger.warning(
+                f"Cleveland Fed: {label} value {value}% outside plausible range "
+                f"[{MIN_CPI}, {MAX_CPI}] — rejecting"
+            )
+            return None
+        return value
 
     def _parse_nowcast(self, html: str) -> Optional[dict]:
         """Parse nowcast values from the HTML page.
@@ -63,7 +114,6 @@ class ClevelandFedNowcast:
         """
         try:
             # Look for CPI nowcast values — patterns like "X.XX percent" or "X.X%"
-            # The page typically contains text like "CPI Nowcast: 3.1%"
             cpi_match = re.search(
                 r"(?:CPI|Consumer\s+Price\s+Index)\s*(?:Nowcast|nowcast|Forecast|forecast)"
                 r"[:\s]*(\d+\.?\d*)\s*%",
@@ -81,7 +131,6 @@ class ClevelandFedNowcast:
 
             # Also try to find values in structured data or table cells
             if not cpi_match:
-                # Try broader pattern: look for percentage values near "CPI" text
                 cpi_match = re.search(
                     r"CPI.*?(\d+\.\d+)\s*(?:%|percent)",
                     html[:5000],
@@ -103,16 +152,33 @@ class ClevelandFedNowcast:
             )
 
             if not cpi_match and not core_match:
-                logger.warning("Cleveland Fed: could not parse nowcast values from page — site format may have changed")
+                logger.warning(
+                    "Cleveland Fed: could not parse nowcast values from page — "
+                    "site format may have changed"
+                )
+                return None
+
+            cpi_val = float(cpi_match.group(1)) if cpi_match else None
+            core_val = float(core_match.group(1)) if core_match else None
+
+            # Validate extracted values
+            if cpi_val is not None:
+                cpi_val = self._validate_cpi(cpi_val, "CPI")
+            if core_val is not None:
+                core_val = self._validate_cpi(core_val, "Core CPI")
+
+            if cpi_val is None and core_val is None:
+                logger.warning("Cleveland Fed: all parsed values failed validation")
                 return None
 
             result = {
-                "cpi": float(cpi_match.group(1)) if cpi_match else None,
-                "core_cpi": float(core_match.group(1)) if core_match else None,
+                "cpi": cpi_val,
+                "core_cpi": core_val,
                 "as_of": date_match.group(1) if date_match else "unknown date",
             }
 
             self._cache.set("cleveland_fed_nowcast", result)
+            self._last_good_result = result
             logger.info(
                 f"Cleveland Fed nowcast: CPI={result['cpi']}, "
                 f"Core CPI={result['core_cpi']}, as of {result['as_of']}"

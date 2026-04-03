@@ -177,7 +177,7 @@ class DataEnricher:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
                 logger.warning(
-                    f"Data enrichment: {len(pending)} sources timed out after 15s, "
+                    f"Data enrichment: {len(pending)} sources timed out after 10s, "
                     f"{len(done)} completed"
                 )
 

@@ -68,6 +68,196 @@ class KellySizer:
         fraction = self.KELLY_MIN + win_rate * (self.KELLY_MAX - self.KELLY_MIN)
         return fraction
 
+    # -- Private helpers for calculate_position_size --
+
+    def _validate_inputs(
+        self, edge: float, probability: float, bankroll: float, current_exposure: float,
+    ) -> bool:
+        """Return False if any input is non-finite or out of valid range."""
+        if (
+            not math.isfinite(edge) or not math.isfinite(probability)
+            or not math.isfinite(bankroll) or not math.isfinite(current_exposure)
+        ):
+            logger.warning(
+                f"Kelly: non-finite input detected (edge={edge}, prob={probability}, "
+                f"bankroll={bankroll}, exposure={current_exposure}) — returning 0"
+            )
+            return False
+        if edge <= 0 or probability <= 0 or probability >= 1 or bankroll <= 0:
+            return False
+        return True
+
+    def _apply_edge_decay(self, edge: float) -> float:
+        """Apply edge decay multiplier to correct for systematic overestimation."""
+        if self._edge_multiplier != 1.0:
+            edge = edge * self._edge_multiplier
+        return edge
+
+    def _check_price_viability(self, market_price: float, edge: float) -> bool:
+        """Return False if the contract price makes it unsuitable for trading.
+
+        Checks:
+        - market_price out of (0, 1) range
+        - Below $0.03: too volatile
+        - $0.03-$0.10: requires 10% edge
+        - Above $0.97: requires 10% edge (asymmetric payoff)
+        """
+        if market_price <= 0 or market_price >= 1.0:
+            logger.debug(
+                f"Kelly: invalid market_price={market_price:.3f} — skipping"
+            )
+            return False
+
+        # Risk-based check for cheap contracts. Blanket rejection at $0.10 was
+        # too aggressive — it excluded valid high-edge trades in the $0.03-$0.10
+        # range. Instead, use tiered rules.
+        # IMPORTANT: Always use the Kelly-derived market_price for this check,
+        # NOT the stale order_price from signal generation.
+        if market_price < 0.03:
+            logger.debug("Price below $0.03 — too volatile for reliable sizing")
+            return False
+        if market_price < 0.10 and edge < 0.10:
+            logger.debug(
+                f"Low-price contract ({market_price:.2f}) requires 10% edge, got {edge:.1%}"
+            )
+            return False
+        # Contracts above $0.97 have tiny upside but full downside if the
+        # market flips — same risk profile as cheap contracts (H-1).
+        if market_price > 0.97 and edge < 0.10:
+            logger.debug(
+                f"High-price contract ({market_price:.2f}) requires 10% edge, got {edge:.1%}"
+            )
+            return False
+        return True
+
+    def _compute_kelly_fraction(self, probability: float, market_price: float) -> float:
+        """Compute raw Kelly fraction from probability and market price.
+
+        Returns the fraction of bankroll to wager (before half-Kelly scaling).
+        Returns 0.0 if Kelly says no bet.
+        """
+        b = (1.0 - market_price) / market_price  # odds
+        q = 1.0 - probability
+        kelly_fraction = (probability * b - q) / b
+        return max(kelly_fraction, 0.0)
+
+    def _apply_liquidity_adjustment(
+        self, kelly_dollars: float, cost_price: float, market_liquidity: float | None,
+    ) -> float:
+        """Reduce dollar budget when order is large relative to book depth."""
+        if market_liquidity is None or market_liquidity <= 0 or kelly_dollars <= 0:
+            return kelly_dollars
+        raw_contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
+        if raw_contracts <= 0:
+            return kelly_dollars
+        order_pct_of_book = (raw_contracts * cost_price) / market_liquidity
+        if order_pct_of_book > 0.10:
+            kelly_dollars *= 0.5
+            logger.info(
+                f"Liquidity adjustment: halving kelly_dollars to ${kelly_dollars:.2f} "
+                f"(order was {order_pct_of_book:.0%} of book)"
+            )
+        elif order_pct_of_book > 0.05:
+            kelly_dollars *= 0.75
+            logger.debug(
+                f"Liquidity adjustment: reducing kelly_dollars to ${kelly_dollars:.2f} "
+                f"(order was {order_pct_of_book:.0%} of book)"
+            )
+        return kelly_dollars
+
+    def _apply_caps(
+        self,
+        kelly_dollars: float,
+        bankroll: float,
+        probability: float,
+        current_exposure: float,
+    ) -> tuple[float, float]:
+        """Apply position and exposure caps.
+
+        Returns (capped_kelly_dollars, max_position). Returns (0, 0) if
+        exposure room is exhausted.
+        """
+        # Cap 1 — Max position percentage
+        max_position = bankroll * self.settings.trading.max_position_pct
+        # High-probability trades (P>0.95, typically obvious-NO) have tiny payoffs
+        # but full downside if the market flips. Cap at 3% of bankroll.
+        if probability > 0.95:
+            high_prob_cap = bankroll * 0.03
+            max_position = min(max_position, high_prob_cap)
+            logger.debug(
+                f"Kelly: high-prob cap applied (P={probability:.2f}), "
+                f"max_position=${max_position:.2f}"
+            )
+        kelly_dollars = min(kelly_dollars, max_position)
+
+        # Cap 2 — Don't exceed remaining exposure room
+        max_total = bankroll * self.settings.trading.max_total_exposure_pct
+        remaining = max_total - current_exposure
+        if remaining <= 0:
+            logger.info(
+                f"Kelly: exposure cap reached (${current_exposure:.2f} / "
+                f"${max_total:.2f}) — no room for new trades"
+            )
+            return 0.0, 0.0
+        kelly_dollars = min(kelly_dollars, remaining)
+
+        return kelly_dollars, max_position
+
+    def _apply_fee_adjustment(
+        self,
+        contracts: int,
+        cost_price: float,
+        kelly_dollars: float,
+        fee_rate: float,
+    ) -> int:
+        """Binary search for max contracts that fit within kelly_dollars after fees.
+
+        Uses worst-case taker fee (0.07) as safety margin even for fee-free
+        markets (C-4 FIX).
+        """
+        if contracts <= 0 or cost_price <= 0 or cost_price >= 1:
+            return contracts
+
+        safety_fee_rate = max(fee_rate, 0.07)
+        lo, hi, best = 0, contracts, 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            fee_cents = math.ceil(safety_fee_rate * mid * cost_price * (1.0 - cost_price))
+            fee_dollars = fee_cents / 100.0
+            if mid * cost_price + fee_dollars <= kelly_dollars:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best
+
+    def _apply_calibration_scaling(
+        self,
+        contracts: int,
+        kelly_fraction: float,
+        remaining: float,
+        cost_price: float,
+    ) -> int:
+        """Scale contracts by calibration/circuit-breaker/regime multipliers.
+
+        Also applies the minimum-1-contract floor when there is edge and room.
+        """
+        effective_multiplier = (
+            self._calibration_multiplier
+            * self._circuit_breaker_multiplier
+            * self._regime_multiplier
+        )
+        if effective_multiplier < 1.0 and contracts > 0:
+            if effective_multiplier <= 0:
+                return 0
+            if effective_multiplier <= 0.25 and contracts == 1:
+                return 0
+            scaled = int(contracts * effective_multiplier)
+            contracts = max(1, scaled)
+        return contracts
+
+    # -- Main orchestrator --
+
     def calculate_position_size(
         self,
         edge: float,
@@ -105,148 +295,42 @@ class KellySizer:
         Returns:
             Number of contracts (integers, minimum 1 if any edge exists)
         """
-        # Validate inputs — NaN/infinity can propagate from upstream division
-        # by zero or malformed API responses and would corrupt sizing.
-        if (
-            not math.isfinite(edge) or not math.isfinite(probability)
-            or not math.isfinite(bankroll) or not math.isfinite(current_exposure)
-        ):
-            logger.warning(
-                f"Kelly: non-finite input detected (edge={edge}, prob={probability}, "
-                f"bankroll={bankroll}, exposure={current_exposure}) — returning 0"
-            )
-            return 0
-        if edge <= 0 or probability <= 0 or probability >= 1 or bankroll <= 0:
+        if not self._validate_inputs(edge, probability, bankroll, current_exposure):
             return 0
 
-        # Apply edge decay multiplier — corrects for systematic overestimation
-        # of edges (common due to vig, adverse selection, information asymmetry).
-        if self._edge_multiplier != 1.0:
-            edge = edge * self._edge_multiplier
-
+        edge = self._apply_edge_decay(edge)
         if edge <= 0:
             return 0
 
-        # Kelly fraction: f = (p * b - q) / b
-        # where p = probability of winning, q = 1-p, b = odds (payout ratio)
-        # For binary markets: b = (1 - market_price) / market_price
-        # market_price = probability - edge (approx)
         market_price = probability - edge
-        if market_price <= 0 or market_price >= 1.0:
-            logger.debug(
-                f"Kelly: invalid market_price={market_price:.3f} "
-                f"(prob={probability:.3f}, edge={edge:.3f}) — skipping"
-            )
+        if not self._check_price_viability(market_price, edge):
             return 0
 
-        # Risk-based check for cheap contracts. Blanket rejection at $0.10 was
-        # too aggressive — it excluded valid high-edge trades in the $0.03-$0.10
-        # range. Instead, use tiered rules:
-        #   < $0.03: always reject (too volatile for reliable sizing)
-        #   $0.03-$0.10: require 10% edge (higher bar to compensate for volatility)
-        #   >= $0.10: normal min-edge checks apply downstream
-        # IMPORTANT: Always use the Kelly-derived market_price for this check,
-        # NOT the stale order_price from signal generation. order_price may be
-        # outdated if the market moved between signal generation and execution,
-        # which can allow massive positions on penny contracts to slip through.
-        cost_price_check = market_price
-        if cost_price_check < 0.03:
-            logger.debug("Price below $0.03 — too volatile for reliable sizing")
-            return 0
-        # For $0.03-$0.10 range, require higher edge (10% instead of 5%)
-        if cost_price_check < 0.10 and edge < 0.10:
-            logger.debug(
-                f"Low-price contract ({cost_price_check:.2f}) requires 10% edge, got {edge:.1%}"
-            )
-            return 0
-        # Contracts above $0.97 have tiny upside but full downside if the
-        # market flips — same risk profile as cheap contracts. Require 10%
-        # edge to compensate for the asymmetric payoff (H-1).
-        if cost_price_check > 0.97 and edge < 0.10:
-            logger.debug(
-                f"High-price contract ({cost_price_check:.2f}) requires 10% edge, got {edge:.1%}"
-            )
-            return 0
-
-        # Payout if win: (1 - market_price) per contract
-        # Risk if lose: market_price per contract
-        b = (1.0 - market_price) / market_price  # odds
-
-        q = 1.0 - probability
-        kelly_fraction = (probability * b - q) / b
-
+        kelly_fraction = self._compute_kelly_fraction(probability, market_price)
         if kelly_fraction <= 0:
             return 0
 
         # Apply dynamic Kelly fraction (scales with rolling win rate)
         half_kelly = kelly_fraction * self.dynamic_kelly_fraction
-
-        # Dollar amount to risk
         kelly_dollars = half_kelly * bankroll
 
-        # Confidence adjustment: uncertain predictions get smaller positions.
-        # Use confidence^1.5 (quadratic-ish) instead of linear — this penalizes
-        # low-confidence predictions more aggressively while barely affecting
-        # high-confidence ones. Linear was too generous to uncertain signals.
-        # confidence=0.9 → 0.89x, confidence=0.7 → 0.67x, confidence=0.5 → 0.48x
+        # Confidence adjustment: confidence^1.5 penalizes low-confidence more
+        # aggressively (0.9→0.89x, 0.7→0.67x, 0.5→0.48x)
         if confidence is not None and 0.0 < confidence <= 1.0:
-            confidence_mult = max(0.2, confidence ** 1.5)
-            kelly_dollars *= confidence_mult
+            kelly_dollars *= max(0.2, confidence ** 1.5)
 
-        # Use the higher of market_price and order_price for contract conversion.
-        # This ensures: (a) Kelly math is consistent with its own odds calculation,
-        # and (b) when order_price is higher (e.g., buying NO at $0.97 while
-        # market_price is $0.94), the cap accounts for the actual execution cost.
-        # Previously always used order_price, which could be stale and produce
-        # wildly inflated contract counts on cheap contracts.
+        # Use the higher of market_price and order_price for contract conversion
         cost_price = max(market_price, order_price) if order_price and order_price > 0 else market_price
 
-        # Step 1: Apply LIQUIDITY adjustment BEFORE position/exposure caps.
-        # This ensures the risk engine sees the true post-liquidity order size
-        # rather than the raw Kelly amount. Without this, the caps are checked
-        # against an inflated figure and the liquidity reduction happens too late.
-        if market_liquidity is not None and market_liquidity > 0 and kelly_dollars > 0:
-            # Estimate raw contract count to compute book impact
-            raw_contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
-            if raw_contracts > 0:
-                order_pct_of_book = (raw_contracts * cost_price) / market_liquidity
-                if order_pct_of_book > 0.10:
-                    kelly_dollars *= 0.5  # Halve dollar budget if >10% of book
-                    logger.info(
-                        f"Liquidity adjustment: halving kelly_dollars to ${kelly_dollars:.2f} "
-                        f"(order was {order_pct_of_book:.0%} of book)"
-                    )
-                elif order_pct_of_book > 0.05:
-                    kelly_dollars *= 0.75
-                    logger.debug(
-                        f"Liquidity adjustment: reducing kelly_dollars to ${kelly_dollars:.2f} "
-                        f"(order was {order_pct_of_book:.0%} of book)"
-                    )
+        kelly_dollars = self._apply_liquidity_adjustment(kelly_dollars, cost_price, market_liquidity)
 
-        # Step 2: Cap 1 — Max position percentage
-        max_position = bankroll * self.settings.trading.max_position_pct
-        # High-probability trades (P>0.95, typically obvious-NO) have tiny payoffs
-        # but full downside if the market flips. Cap these at 3% of bankroll
-        # instead of the normal 5% to limit black-swan exposure.
-        if probability > 0.95:
-            high_prob_cap = bankroll * 0.03
-            max_position = min(max_position, high_prob_cap)
-            logger.debug(
-                f"Kelly: high-prob cap applied (P={probability:.2f}), "
-                f"max_position=${max_position:.2f}"
-            )
-        kelly_dollars = min(kelly_dollars, max_position)
+        kelly_dollars, max_position = self._apply_caps(kelly_dollars, bankroll, probability, current_exposure)
+        if kelly_dollars == 0:
+            return 0
 
-        # Step 3: Cap 2 — Don't exceed remaining exposure room
+        # Remaining exposure room (needed for min-1-contract check)
         max_total = bankroll * self.settings.trading.max_total_exposure_pct
         remaining = max_total - current_exposure
-        if remaining <= 0:
-            logger.info(
-                f"Kelly: exposure cap reached (${current_exposure:.2f} / "
-                f"${max_total:.2f}) — no room for new trades"
-            )
-            return 0
-        kelly_dollars = min(kelly_dollars, remaining)
 
         # Convert dollars to contracts
         contracts = int(kelly_dollars / cost_price) if cost_price > 0 else 0
@@ -256,52 +340,16 @@ class KellySizer:
             contracts = int(max_position / cost_price)
             logger.debug(f"Kelly: clamped contracts to {contracts} (position cap ${max_position:.2f})")
 
-        # C-4 FIX: Always use worst-case taker fee (0.07) as safety margin,
-        # even for currently fee-free event markets. If Kalshi changes fee
-        # structures (as they did for crypto/sports), positions won't exceed
-        # the 5% cap. The actual fee_rate is used if higher.
-        safety_fee_rate = max(fee_rate, 0.07)
+        contracts = self._apply_fee_adjustment(contracts, cost_price, kelly_dollars, fee_rate)
 
-        # Account for estimated fee so total cost stays within cap.
-        # Fee formula returns cents: ceil(fee_rate * contracts * price * (1 - price))
-        # Convert to dollars before comparing.  Loop because removing one
-        # contract changes the fee, and a single decrement may not suffice
-        # for high-fee expensive contracts.
-        if contracts > 0 and 0 < cost_price < 1:
-            # Binary search for max contracts that fit within kelly_dollars after fees.
-            lo, hi, best = 0, contracts, 0
-            while lo <= hi:
-                mid = (lo + hi) // 2
-                fee_cents = math.ceil(safety_fee_rate * mid * cost_price * (1.0 - cost_price))
-                fee_dollars = fee_cents / 100.0
-                if mid * cost_price + fee_dollars <= kelly_dollars:
-                    best = mid
-                    lo = mid + 1
-                else:
-                    hi = mid - 1
-            contracts = best
-
-        # Minimum 1 contract if we have any edge and room,
-        # but only if the single contract cost + fee stays within kelly_dollars.
+        # Minimum 1 contract if we have any edge and room
         if contracts == 0 and kelly_fraction > 0 and remaining >= cost_price:
             fee_cents = math.ceil(fee_rate * 1 * cost_price * (1.0 - cost_price)) if 0 < cost_price < 1 else 0
             fee_dollars = fee_cents / 100.0
             if cost_price + fee_dollars <= kelly_dollars:
                 contracts = 1
 
-        # Apply calibration-based multiplier — reduce sizing when forecasting is poor.
-        # Zero multiplier = halt all trading (Brier worse than random).
-        # For multi-contract positions, scale down but floor at 1 contract.
-        effective_multiplier = self._calibration_multiplier * self._circuit_breaker_multiplier * self._regime_multiplier
-        if effective_multiplier < 1.0 and contracts > 0:
-            if effective_multiplier <= 0:
-                # Calibration or circuit breaker says halt all trading
-                return 0
-            if effective_multiplier <= 0.25 and contracts == 1:
-                # Very poor calibration on a minimal-conviction trade — don't trade
-                return 0
-            scaled = int(contracts * effective_multiplier)
-            contracts = max(1, scaled)
+        contracts = self._apply_calibration_scaling(contracts, kelly_fraction, remaining, cost_price)
 
         logger.debug(
             f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "
@@ -378,11 +426,11 @@ class KellySizer:
         average 5%, the multiplier is 0.5 — Kelly will use half the
         predicted edge for sizing.
         """
-        # Floor at 0.5: if realized edges are less than half of predicted,
-        # the model is too unreliable to trade — better to skip entirely.
-        # Previous floor of 0.3 allowed trading with 70% edge shrinkage,
-        # which means most "edges" were noise.
-        multiplier = max(0.5, min(multiplier, 1.0))
+        # Floor at 0.7: below this, predicted edges are so unreliable that
+        # reduced sizing is better than trading weak edges. Previous floor
+        # of 0.5 allowed trading when realized edges were half of predicted,
+        # which still passed too much noise through as signal.
+        multiplier = max(0.7, min(multiplier, 1.0))
         if multiplier != self._edge_multiplier:
             logger.info(
                 f"Kelly: edge multiplier {self._edge_multiplier:.2f} → {multiplier:.2f}"

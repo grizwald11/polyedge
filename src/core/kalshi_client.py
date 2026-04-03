@@ -583,6 +583,15 @@ class KalshiClient:
             order_type: "limit" or "market"
             action: "buy" or "sell"
         """
+        if not (1 <= yes_price <= 99):
+            raise ValueError("yes_price must be 1-99 cents")
+        if count <= 0:
+            raise ValueError("count must be > 0")
+        if side not in ("yes", "no"):
+            raise ValueError(f"side must be 'yes' or 'no', got '{side}'")
+        if action not in ("buy", "sell"):
+            raise ValueError(f"action must be 'buy' or 'sell', got '{action}'")
+
         try:
             body = {
                 "ticker": ticker,

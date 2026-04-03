@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 from src.config import Settings
@@ -72,7 +73,7 @@ class OrderBuilder:
         side, token_id, k_side = resolved
         price = self._clamp_price(price)
         fee_dollars = self._calculate_fee(market.platform, size, price, maker=True)
-        cost = round(price * size + fee_dollars, 4)
+        cost = float((Decimal(str(price)) * Decimal(str(size)) + Decimal(str(fee_dollars))).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
         fee_bps = 0 if market.platform == Platform.POLYMARKET else 175
 
         order = Order(
@@ -148,7 +149,7 @@ class OrderBuilder:
 
         price = self._clamp_price(price)
         fee_dollars = self._calculate_fee(market.platform, size, price, maker=False)
-        cost = round(price * size + fee_dollars, 4)
+        cost = float((Decimal(str(price)) * Decimal(str(size)) + Decimal(str(fee_dollars))).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
         fee_bps = 0 if market.platform == Platform.POLYMARKET else 700
 
         order = Order(

@@ -23,10 +23,12 @@ Remaining limitations (acknowledged in results):
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Optional
 
@@ -111,6 +113,13 @@ class BacktestResult:
     unresolved_positions: int = 0
     # C-3: total fees deducted from P&L during simulation
     total_fees: float = 0.0
+    # H-1: Baseline Brier score — "always predict market price" as probability
+    baseline_brier_score: float | None = None
+    # M-2: Count of stale price warnings (snapshot gap > 1 hour for same market)
+    stale_price_warnings: int = 0
+    # M-3: Confidence interval calibration coverage
+    ci_coverage_rate: float | None = None
+    ci_total_checked: int = 0
     # M-8: Category-level breakdown of P&L, win rate, and trade count
     category_metrics: dict[str, dict] = field(default_factory=dict)
     equity_curve: list[float] = field(default_factory=list)
@@ -126,17 +135,21 @@ class MockForecaster:
     """Implements ClaudeForecaster interface using cached data or synthetic forecasts.
 
     Modes:
-    1. Cached: Uses calibration_records from DB (predictions already made)
+    1. Cached (default): Uses calibration_records from DB (predictions already made).
+       This is the default to avoid lookahead bias.
     2. Outcome-derived: If we know the outcome, generate synthetic forecasts
        with configurable noise to simulate different accuracy levels.
+       Must be explicitly enabled with cached_only=False. WARNING: this mode
+       uses known outcomes to generate forecasts, introducing lookahead bias.
 
-    H-4: When cached_only=True, outcome-derived (synthetic) forecasts are
-    disabled entirely. Only cached predictions from the database are used.
+    H-4/H-6: cached_only defaults to True. Outcome-derived (synthetic) forecasts
+    are disabled by default. Only cached predictions from the database are used.
     Markets without cached predictions are skipped. This eliminates
-    lookahead bias from outcome-derived forecasts.
+    lookahead bias from outcome-derived forecasts. Set cached_only=False
+    explicitly if you understand the bias implications.
     """
 
-    def __init__(self, db: Database, noise: float = 0.1, cached_only: bool = False):
+    def __init__(self, db: Database, noise: float = 0.1, cached_only: bool = True):
         self.db = db
         self.noise = noise
         self.cached_only = cached_only
@@ -421,6 +434,10 @@ class BacktestEngine:
         # C-2: Track the last-seen price per market for marking open positions at end
         last_known_prices: dict[str, tuple[float, float]] = {}  # market_id -> (yes_price, no_price)
 
+        # M-2: Track last snapshot timestamp per market for staleness detection
+        last_snapshot_ts: dict[str, str] = {}
+        stale_price_warnings = 0
+
         # Build end_date lookup for resolving positions mid-replay
         end_dates: dict[str, str] = {}
         for ticker, mdata in market_lookup.items():
@@ -430,6 +447,10 @@ class BacktestEngine:
 
         # Process snapshots chronologically
         trades: list[BacktestTrade] = []
+        # M-3: Track forecasts per market for CI coverage computation
+        trade_forecasts: dict[str, ForecastResult] = {}
+        # H-1: Track market prices at prediction time for baseline Brier
+        trade_market_prices: dict[str, float] = {}
         edges_predicted: list[float] = []
         edges_realized: list[float] = []
         equity_curve = [bankroll]
@@ -450,6 +471,22 @@ class BacktestEngine:
 
             # C-2: keep rolling track of the most recent price for each market
             last_known_prices[market_id] = (yes_price, no_price)
+
+            # M-2: Check for stale prices — gap > 1 hour between snapshots
+            if market_id in last_snapshot_ts:
+                try:
+                    prev_dt = datetime.fromisoformat(last_snapshot_ts[market_id].replace("Z", "+00:00"))
+                    curr_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    gap = curr_dt - prev_dt
+                    if gap > timedelta(hours=1):
+                        stale_price_warnings += 1
+                        logger.warning(
+                            f"M-2: Stale price for {market_id} — {gap} gap between snapshots "
+                            f"(prev: {last_snapshot_ts[market_id]}, curr: {timestamp})"
+                        )
+                except (ValueError, AttributeError):
+                    pass
+            last_snapshot_ts[market_id] = timestamp
 
             # Resolve any positions whose end_date has passed
             resolved_ids = []
@@ -556,6 +593,9 @@ class BacktestEngine:
                 slipped_price = max(0.01, order_price - slippage)
             portfolio.open_position(market_id, direction, contracts, slipped_price, strategy)
             edges_predicted.append(abs_edge)
+            # M-3 / H-1: Store forecast and market price for post-hoc analysis
+            trade_forecasts[market_id] = forecast
+            trade_market_prices[market_id] = yes_price
 
             # M-8: Attach market category to trade for category-level metrics
             trade_category = (market_lookup.get(market_id, {}).get("category") or "Unknown")
@@ -656,10 +696,13 @@ class BacktestEngine:
         result = self._compute_result(
             "all" if not self.strategy_filter else self.strategy_filter,
             trades, equity_curve, edges_predicted, edges_realized, bankroll,
+            trade_forecasts=trade_forecasts,
+            trade_market_prices=trade_market_prices,
         )
         result.cb_skipped = cb_skipped
         result.unresolved_positions = unresolved_positions
         result.total_fees = portfolio.total_fees
+        result.stale_price_warnings = stale_price_warnings
         # C-1: propagate lookahead flag from forecaster
         result.uses_lookahead = self.forecaster.used_lookahead
         if result.uses_lookahead:
@@ -675,6 +718,8 @@ class BacktestEngine:
         self, strategy: str, trades: list[BacktestTrade],
         equity_curve: list[float], edges_predicted: list[float],
         edges_realized: list[float], bankroll: float,
+        trade_forecasts: dict[str, ForecastResult] | None = None,
+        trade_market_prices: dict[str, float] | None = None,
     ) -> BacktestResult:
         result = BacktestResult(strategy=strategy, equity_curve=equity_curve, trades=trades)
 
@@ -748,6 +793,33 @@ class BacktestEngine:
                 actual = 1.0 if t.outcome else 0.0
                 brier_scores.append((predicted - actual) ** 2)
         result.brier_score = sum(brier_scores) / len(brier_scores) if brier_scores else None
+
+        # H-1: Baseline Brier score — using market price as the probability estimate
+        if trade_market_prices:
+            baseline_scores = []
+            for t in resolved_trades:
+                if t.outcome is not None and t.market_id in trade_market_prices:
+                    mkt_price = trade_market_prices[t.market_id]
+                    actual = 1.0 if t.outcome else 0.0
+                    baseline_scores.append((mkt_price - actual) ** 2)
+            result.baseline_brier_score = (
+                sum(baseline_scores) / len(baseline_scores) if baseline_scores else None
+            )
+
+        # M-3: Confidence interval calibration coverage
+        if trade_forecasts:
+            ci_hits = 0
+            ci_checked = 0
+            for t in resolved_trades:
+                if t.outcome is not None and t.market_id in trade_forecasts:
+                    fc = trade_forecasts[t.market_id]
+                    if fc.confidence_low is not None and fc.confidence_high is not None:
+                        actual = 1.0 if t.outcome else 0.0
+                        ci_checked += 1
+                        if fc.confidence_low <= actual <= fc.confidence_high:
+                            ci_hits += 1
+            result.ci_total_checked = ci_checked
+            result.ci_coverage_rate = ci_hits / ci_checked if ci_checked > 0 else None
 
         # M-8: Category-level metrics — P&L, win rate, and trade count per category
         cat_groups: dict[str, list[BacktestTrade]] = {}
@@ -1026,6 +1098,15 @@ def format_result(result: BacktestResult, bankroll: float = 500.0) -> str:
     ]
     if result.brier_score is not None:
         lines.append(f"  Brier Score:   {result.brier_score:.3f}")
+    if result.baseline_brier_score is not None:
+        lines.append(f"  Baseline Brier:{result.baseline_brier_score:.3f} (market-price-as-predictor)")
+        if result.brier_score is not None:
+            improvement = result.baseline_brier_score - result.brier_score
+            lines.append(f"  Brier Improv:  {improvement:+.3f} vs baseline ({'better' if improvement > 0 else 'worse'})")
+    if result.ci_coverage_rate is not None:
+        lines.append(f"  CI Coverage:   {result.ci_coverage_rate:.1%} ({result.ci_total_checked} trades checked)")
+    if result.stale_price_warnings > 0:
+        lines.append(f"  Stale Prices:  {result.stale_price_warnings} warning(s)")
     if result.sharpe_ratio is not None:
         lines.append(f"  Sharpe Ratio:  {result.sharpe_ratio:.2f}")
     if result.calmar_ratio is not None:
@@ -1073,6 +1154,68 @@ def format_validation(checks: dict) -> str:
 
 
 # ──────────────────────────────────────────────
+# CSV Export
+# ──────────────────────────────────────────────
+
+def export_csv(result: BacktestResult, path: str) -> None:
+    """Export backtest results to CSV with a summary section and a trades section."""
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+
+        # Summary section
+        writer.writerow(["# Summary"])
+        writer.writerow(["metric", "value"])
+        writer.writerow(["strategy", result.strategy])
+        writer.writerow(["total_trades", result.total_trades])
+        writer.writerow(["winning_trades", result.winning_trades])
+        writer.writerow(["losing_trades", result.losing_trades])
+        writer.writerow(["win_rate", f"{result.win_rate:.4f}"])
+        writer.writerow(["total_pnl", f"{result.total_pnl:.4f}"])
+        writer.writerow(["max_drawdown", f"{result.max_drawdown:.4f}"])
+        writer.writerow(["max_drawdown_pct", f"{result.max_drawdown_pct:.4f}"])
+        writer.writerow(["profit_factor", f"{result.profit_factor:.4f}"])
+        writer.writerow(["avg_win", f"{result.avg_win:.4f}"])
+        writer.writerow(["avg_loss", f"{result.avg_loss:.4f}"])
+        writer.writerow(["brier_score", f"{result.brier_score:.4f}" if result.brier_score is not None else ""])
+        writer.writerow(["baseline_brier_score", f"{result.baseline_brier_score:.4f}" if result.baseline_brier_score is not None else ""])
+        writer.writerow(["ci_coverage_rate", f"{result.ci_coverage_rate:.4f}" if result.ci_coverage_rate is not None else ""])
+        writer.writerow(["ci_total_checked", result.ci_total_checked])
+        writer.writerow(["stale_price_warnings", result.stale_price_warnings])
+        writer.writerow(["sharpe_ratio", f"{result.sharpe_ratio:.4f}" if result.sharpe_ratio is not None else ""])
+        writer.writerow(["calmar_ratio", f"{result.calmar_ratio:.4f}" if result.calmar_ratio is not None else ""])
+        writer.writerow(["total_fees", f"{result.total_fees:.4f}"])
+        writer.writerow(["unresolved_positions", result.unresolved_positions])
+        writer.writerow(["uses_lookahead", result.uses_lookahead])
+        writer.writerow(["cb_skipped", result.cb_skipped])
+
+        # Blank line separator
+        writer.writerow([])
+
+        # Trades section
+        writer.writerow(["# Trades"])
+        trade_headers = [
+            "market_id", "direction", "strategy", "price", "size",
+            "timestamp", "pnl", "resolved", "outcome", "category",
+        ]
+        writer.writerow(trade_headers)
+        for t in result.trades:
+            writer.writerow([
+                t.market_id,
+                t.direction.value if hasattr(t.direction, "value") else str(t.direction),
+                t.strategy,
+                f"{t.price:.4f}",
+                t.size,
+                t.timestamp,
+                f"{t.pnl:.4f}",
+                t.resolved,
+                t.outcome if t.outcome is not None else "",
+                t.category,
+            ])
+
+    logger.info(f"L-1: Exported backtest results to {path}")
+
+
+# ──────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────
 
@@ -1084,6 +1227,8 @@ def main():
     parser.add_argument("--validate", action="store_true", help="Run Phase 3 exit criteria check")
     parser.add_argument("--sweep", default=None,
                         help="Parameter sweep: param_name=v1,v2,v3 (e.g. kelly_fraction=0.25,0.5,0.75)")
+    parser.add_argument("--csv", default=None, metavar="PATH",
+                        help="Export results to CSV file")
     args = parser.parse_args()
 
     logger.warning(
@@ -1117,6 +1262,10 @@ def main():
     for r in results:
         print(format_result(r, args.bankroll))
         print()
+
+    if args.csv and results:
+        export_csv(results[0], args.csv)
+        print(f"Results exported to {args.csv}")
 
     if args.validate and results:
         checks = validate_backtest(results[0])

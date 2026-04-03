@@ -72,9 +72,9 @@ class TestSettingsValidation:
             Settings(trading={"kelly_fraction": 1.5})
 
     def test_pct_fields_range(self):
-        with pytest.raises(ValueError, match="percentage"):
+        with pytest.raises(ValueError, match="max_position_pct"):
             Settings(trading={"max_position_pct": 0})
-        with pytest.raises(ValueError, match="percentage"):
+        with pytest.raises(ValueError, match="daily_loss_limit_pct"):
             Settings(trading={"daily_loss_limit_pct": 1.5})
 
     def test_valid_settings_accepted(self):

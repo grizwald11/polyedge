@@ -1,13 +1,19 @@
-"""Order router — routes orders through paper or live execution.
+"""Order router -- routes orders through paper or live execution.
 
 Paper mode simulates fills at the order price.
 Live mode submits to Kalshi or Polymarket API based on order platform.
+
+Platform-specific logic is delegated to:
+  - router_paper.py     (paper trading simulation)
+  - router_kalshi.py    (Kalshi live execution)
+  - router_polymarket.py (Polymarket live execution)
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
@@ -51,7 +57,19 @@ class OrderResult:
 
 
 class OrderRouter:
-    """Routes orders to paper or live execution."""
+    """Routes orders to paper or live execution.
+
+    Platform-specific fill logic is delegated to submodules:
+      - router_paper.paper_fill() for paper trading
+      - router_kalshi.live_fill() for Kalshi live execution
+      - router_polymarket.poly_live_fill() for Polymarket live execution
+    """
+
+    # Paper trading simulation constants (kept for backward compat with tests
+    # that reference these as class attributes)
+    PAPER_LIMIT_ORDER_MISS_RATE = 0.15  # 15% of limit orders don't fill
+    PAPER_MAX_SLIPPAGE = 0.01           # 0-1 cent adverse slippage
+    GATE3_CONFIRMATION_TTL_SECONDS = 3600  # Gate 3 expires after 1 hour
 
     def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager: Optional[PositionManager] = None, polymarket: Optional[PolymarketClient] = None):
         self.settings = settings
@@ -146,11 +164,11 @@ class OrderRouter:
         live_enabled = self.settings.live_enabled
         if mode == "live" and not live_enabled:
             logger.warning(
-                "Live mode configured but POLYEDGE_LIVE_ENABLED env var is not set — "
+                "Live mode configured but POLYEDGE_LIVE_ENABLED env var is not set -- "
                 "live trades will be rejected until the env var is set to 'true'"
             )
         elif mode == "live" and live_enabled:
-            logger.warning("LIVE TRADING ENABLED — all gates passed at startup")
+            logger.warning("LIVE TRADING ENABLED -- all gates passed at startup")
         else:
             logger.info(f"Trading mode: {mode} (live gates not required)")
 
@@ -158,7 +176,7 @@ class OrderRouter:
         """Route an order based on current trading mode.
 
         Paper mode: simulates immediate fill at order price.
-        Live mode: submits to Kalshi API.
+        Live mode: submits to Kalshi or Polymarket API.
         """
         # M-5: Clean up stale pending orders at the start of each routing cycle
         await self._cleanup_stale_pending_orders()
@@ -197,113 +215,36 @@ class OrderRouter:
         else:
             return await self._live_fill(order)
 
-    # Paper trading simulation constants
-    PAPER_LIMIT_ORDER_MISS_RATE = 0.15  # 15% of limit orders don't fill
-    PAPER_MAX_SLIPPAGE = 0.01           # 0-1 cent adverse slippage
-    GATE3_CONFIRMATION_TTL_SECONDS = 3600  # Gate 3 expires after 1 hour
+    # ------------------------------------------------------------------ #
+    # Delegation to platform-specific routers                             #
+    # ------------------------------------------------------------------ #
 
     def _simulate_slippage(self, order: Order) -> tuple[bool, float]:
         """Simulate realistic fill behavior for paper trading.
 
-        Returns (filled, fill_price). ~15% of limit orders miss entirely.
-        Fills include 0-1 cent adverse slippage.
-        Uses non-deterministic randomness for realistic variance.
+        Delegates to router_paper module.
         """
-        import random as _random
-
-        # Use non-deterministic randomness for realistic paper trading variance.
-        # Previously used deterministic PRNG seeded from order attributes,
-        # but this biased paper trading results by producing identical
-        # slippage for the same order parameters across restarts.
-        rng = _random.Random()
-
-        if rng.random() < self.PAPER_LIMIT_ORDER_MISS_RATE:
-            return False, order.price
-
-        # Adverse slippage: 0 to PAPER_MAX_SLIPPAGE
-        slippage = rng.random() * self.PAPER_MAX_SLIPPAGE
-        if order.side == Side.BUY:
-            fill_price = order.price + slippage
-        else:
-            fill_price = order.price - slippage
-
-        # L-3: Clamp fill price to valid range [0.01, 0.99]
-        fill_price = max(0.01, min(0.99, fill_price))
-
-        return True, round(fill_price, 2)
+        from src.execution.router_paper import simulate_slippage
+        return simulate_slippage(order)
 
     async def _paper_fill(self, order: Order) -> OrderResult:
         """Simulate a fill in paper trading mode."""
-        # L-4: Apply Polymarket jurisdiction gate even in paper mode,
-        # so paper trading results are realistic about which markets are tradeable.
-        if order.platform == Platform.POLYMARKET and not self._polymarket_residency_confirmed:
-            import os
-            if os.environ.get("CONFIRM_NON_US_POLYMARKET", "").lower() != "true":
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = (
-                    "Polymarket residency gate: set CONFIRM_NON_US_POLYMARKET=true "
-                    "to confirm you are not a US resident (applies to paper trading too — L-4)"
-                )
-                self._log_order(order)
-                return OrderResult(success=False, order=order, error=order.rejection_reason)
-            self._polymarket_residency_confirmed = True
+        from src.execution.router_paper import paper_fill
+        return await paper_fill(self, order)
 
-        now = datetime.now(timezone.utc)
+    async def _live_fill(self, order: Order) -> OrderResult:
+        """Submit order to Kalshi API for live execution."""
+        from src.execution.router_kalshi import live_fill
+        return await live_fill(self, order)
 
-        # Simulate realistic fill with possible slippage/miss
-        filled, fill_price = self._simulate_slippage(order)
-        if not filled:
-            order.status = OrderStatus.CANCELLED
-            logger.info(
-                f"[PAPER] Missed fill: {order.side.value} {int(order.size)}x "
-                f"{order.token_id} @ ${order.price:.2f} (simulated no-fill)"
-            )
-            self._log_order(order)
-            return OrderResult(success=False, order=order, error="Paper order missed fill")
+    async def _poly_live_fill(self, order: Order) -> OrderResult:
+        """Submit order to Polymarket CLOB API for live execution."""
+        from src.execution.router_polymarket import poly_live_fill
+        return await poly_live_fill(self, order)
 
-        order.status = OrderStatus.FILLED
-        order.filled_at = now
-        order.fill_price = fill_price
-
-        # Calculate fee using fill_price (not order.price) for accuracy
-        # when slippage causes the fill to differ from the submitted price
-        if order.platform == Platform.POLYMARKET:
-            fee_dollars = 0.0  # Event markets are fee-free
-        else:
-            fill_price_cents = dollars_to_cents(fill_price)
-            if order.order_type == OrderType.GTC:
-                fee_cents = kalshi_maker_fee(int(order.size), fill_price_cents)
-            else:
-                fee_cents = kalshi_taker_fee(int(order.size), fill_price_cents)
-            fee_dollars = fee_cents / 100.0
-
-        # Create trade record (use fill_price for accurate P&L)
-        trade = Trade(
-            order_id=order.id,
-            market_id=order.market_id,
-            platform=order.platform,
-            token_id=order.token_id,
-            side=order.side,
-            price=fill_price,
-            size=order.size,
-            fee=fee_dollars,
-            realized_pnl=0.0,  # P&L calculated on position close
-            strategy=order.strategy,
-            paper=True,
-            timestamp=now,
-        )
-
-        # Persist to database
-        self._log_order(order)
-        self.db.log_trade(trade)
-
-        logger.info(
-            f"[PAPER] Filled: {order.side.value} {int(order.size)}x "
-            f"{order.token_id} @ ${order.price:.2f} "
-            f"(cost=${order.cost:.2f}, fee=${fee_dollars:.2f})"
-        )
-
-        return OrderResult(success=True, order=order, trade=trade)
+    # ------------------------------------------------------------------ #
+    # Gate checking (shared across platforms)                              #
+    # ------------------------------------------------------------------ #
 
     async def _check_gate3(self, order: Order) -> Optional[OrderResult]:
         """Check Gate 3 (interactive session confirmation) with TTL expiry.
@@ -314,7 +255,7 @@ class OrderRouter:
         import time as _time
         if self._session_confirmed and self._session_confirm_time is not None:
             if _time.time() - self._session_confirm_time > self._session_confirm_ttl:
-                logger.info("Gate 3 confirmation expired — re-prompting")
+                logger.info("Gate 3 confirmation expired -- re-prompting")
                 self._session_confirmed = False
 
         if not self._session_confirmed:
@@ -331,537 +272,6 @@ class OrderRouter:
             self._session_confirm_time = _time.time()
 
         return None  # Gate passed
-
-    async def _live_fill(self, order: Order) -> OrderResult:
-        """Submit order to Kalshi API for live execution."""
-        # C-3: Reject orders on closed/settled/halted markets before hitting the API.
-        market_row = self.db.get_market(order.market_id)
-        if market_row is not None:
-            mkt_closed = market_row.get("closed") or market_row.get("active") == 0
-            mkt_status = str(market_row.get("status", "")).lower()
-            if mkt_closed or mkt_status in ("closed", "settled", "halted", "determined"):
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = f"Market is {mkt_status or 'closed'} — cannot trade"
-                self._log_order(order)
-                logger.warning(f"Order {order.id} rejected: {order.rejection_reason}")
-                return OrderResult(success=False, order=order, error=order.rejection_reason)
-
-        # Three-gate safety check
-        if not self._live_gates_passed():
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = "Live trading gates not passed"
-            self._log_order(order)
-            return OrderResult(
-                success=False, order=order,
-                error="Live trading gates not passed"
-            )
-
-        # Gate 3: Interactive confirmation with TTL
-        gate3_result = await self._check_gate3(order)
-        if gate3_result is not None:
-            return gate3_result
-
-        # Determine Kalshi side and order type.
-        # kalshi_side is set explicitly by order_builder from the Direction enum,
-        # avoiding fragile string matching on token_id.
-        kalshi_side = order.kalshi_side
-        if kalshi_side is None:
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = "Missing kalshi_side — order_builder must set this explicitly"
-            self._log_order(order)
-            logger.error(
-                f"Order {order.id} missing kalshi_side — rejected to prevent side mismatch. "
-                f"Ensure order_builder sets kalshi_side from Direction enum."
-            )
-            return OrderResult(success=False, order=order, error="Missing kalshi_side")
-        kalshi_type = "limit" if order.order_type == OrderType.GTC else "market"
-        # Kalshi API always expects yes_price regardless of which side we buy.
-        # For BUY_NO: order.price is the NO price, so yes_price = 1 - order.price.
-        if kalshi_side == "no":
-            yes_price = dollars_to_cents(1.0 - order.price)
-        else:
-            yes_price = dollars_to_cents(order.price)
-
-        # C-3: Validate cents are in Kalshi's valid range after conversion.
-        if not (1 <= yes_price <= 99):
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = f"Price converts to {yes_price} cents — outside Kalshi range [1, 99]"
-            self._log_order(order)
-            logger.error(
-                f"Order {order.id} rejected: yes_price={yes_price} cents "
-                f"(from order.price=${order.price:.4f}, side={kalshi_side})"
-            )
-            return OrderResult(success=False, order=order, error=order.rejection_reason)
-
-        # M-14: Balance pre-flight check — verify sufficient funds before submitting.
-        # Catches stale bankroll state that would result in a rejected API call.
-        # H-1: For large orders (>10% bankroll), the check is BLOCKING with retries.
-        large_order_threshold = self.settings.trading.bankroll * 0.10
-        is_large_order = order.cost > large_order_threshold
-        balance_retries = 3 if is_large_order else 1
-        balance_checked = False
-        for _bal_attempt in range(balance_retries):
-            try:
-                balance = await asyncio.wait_for(self.kalshi.get_balance(), timeout=5.0)
-                if balance is not None and order.cost > balance:
-                    order.status = OrderStatus.REJECTED
-                    order.rejection_reason = (
-                        f"Insufficient balance: order cost ${order.cost:.2f} > "
-                        f"available ${balance:.2f}"
-                    )
-                    self._log_order(order)
-                    logger.warning(f"Balance pre-flight failed: {order.rejection_reason}")
-                    return OrderResult(success=False, order=order, error=order.rejection_reason)
-                balance_checked = True
-                break
-            except (asyncio.TimeoutError, Exception) as e:
-                if is_large_order and _bal_attempt < balance_retries - 1:
-                    logger.warning(
-                        f"Balance pre-flight retry {_bal_attempt + 1}/{balance_retries} "
-                        f"for large order (${order.cost:.2f}): {e}"
-                    )
-                    await asyncio.sleep(1.0)
-                else:
-                    logger.debug(f"Balance pre-flight check skipped: {e}")
-        if is_large_order and not balance_checked:
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = (
-                f"Balance pre-flight failed after {balance_retries} retries — "
-                f"blocking large order (${order.cost:.2f} > 10% bankroll)"
-            )
-            self._log_order(order)
-            logger.error(f"H-1: {order.rejection_reason}")
-            return OrderResult(success=False, order=order, error=order.rejection_reason)
-
-        try:
-            # Hard timeout on order creation to prevent hanging indefinitely.
-            # If this times out, the order may have been placed on Kalshi —
-            # we reconcile by checking open orders below.
-            try:
-                result = await asyncio.wait_for(
-                    self.kalshi.create_order(
-                        ticker=order.market_id,
-                        side=kalshi_side,
-                        yes_price=yes_price,
-                        count=int(order.size),
-                        order_type=kalshi_type,
-                        action=order.side.value.lower(),
-                    ),
-                    timeout=15.0,
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    f"Order creation timed out for {order.market_id} — "
-                    f"order may exist on Kalshi. Checking open orders for reconciliation."
-                )
-                # Reconcile: check if the order was actually placed
-                result = await self._reconcile_after_timeout(order)
-                if result is None:
-                    order.status = OrderStatus.OPEN  # Assume order may exist — safer than REJECTED
-                    order.rejection_reason = "Timeout creating order — may exist on Kalshi (unconfirmed)"
-                    self._log_order(order)
-                    logger.critical(
-                        f"ORPHANED ORDER RISK: order for {order.market_id} timed out and reconciliation "
-                        f"found no match. Order may still be processing on Kalshi. "
-                        f"Manual review required — check Kalshi dashboard."
-                    )
-                    return OrderResult(success=False, order=order, error="Timeout — order status unknown, manual review required")
-
-            if result is None:
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = "Kalshi API returned None"
-                self._log_order(order)
-                return OrderResult(
-                    success=False, order=order, error="Kalshi API returned None"
-                )
-
-            # Validate order_id exists in response — without it we can't
-            # track or poll the order, risking orphaned positions on Kalshi.
-            kalshi_order_id = (result.get("order_id") or "").strip()
-            if not kalshi_order_id:
-                # Recovery attempt: fetch open orders and match by ticker + price + side
-                logger.warning(
-                    f"Kalshi order response missing order_id for {order.market_id} — "
-                    f"attempting recovery via get_open_orders()"
-                )
-                try:
-                    open_orders = await asyncio.wait_for(
-                        self.kalshi.get_open_orders(),
-                        timeout=10.0,
-                    )
-                    # C-1 FIX: Add timestamp-based matching to avoid recovering
-                    # the wrong order when multiple identical orders exist at
-                    # the same price. Orders created within 30s of our attempt
-                    # are candidates; prefer the most recent.
-                    candidates = []
-                    for oo in open_orders:
-                        # H-3: Compare in integer cents to avoid float tolerance issues
-                        # on low-priced markets where 0.01 tolerance could be 50% of price.
-                        price_match = abs(int(oo.get("yes_price", 0)) - dollars_to_cents(order.price)) <= 1
-                        side_match = oo.get("side", "").lower() == (order.kalshi_side or "").lower()
-                        count_match = oo.get("count", 0) == int(order.size)
-                        if (
-                            oo.get("ticker") == order.market_id
-                            and price_match
-                            and side_match
-                            and count_match
-                        ):
-                            recovered_id = (oo.get("order_id") or "").strip()
-                            if recovered_id:
-                                # Score by timestamp proximity to our order creation time
-                                oo_created = oo.get("created_time") or oo.get("created_at") or ""
-                                time_score = 0
-                                if oo_created and hasattr(order, "created_at") and order.created_at:
-                                    try:
-                                        oo_dt = datetime.fromisoformat(oo_created.replace("Z", "+00:00"))
-                                        time_diff = abs((oo_dt - order.created_at).total_seconds())
-                                        if time_diff <= 30:  # Only match orders within 30s
-                                            time_score = 30 - time_diff  # Higher = more recent
-                                        else:
-                                            continue  # Too old to be our order
-                                    except (ValueError, TypeError):
-                                        time_score = 0  # Can't parse, use as fallback
-                                candidates.append((time_score, recovered_id, oo))
-                    # Pick the best candidate (highest time_score = closest match)
-                    if candidates:
-                        candidates.sort(key=lambda c: c[0], reverse=True)
-                        _, kalshi_order_id, result = candidates[0]
-                        logger.warning(
-                            f"Orphaned order recovery succeeded: matched order_id={kalshi_order_id} "
-                            f"for {order.market_id} via open orders list "
-                            f"({len(candidates)} candidate(s), best time_score={candidates[0][0]:.1f})"
-                        )
-                except Exception as rec_err:
-                    logger.error(f"Orphaned order recovery failed: {rec_err}", exc_info=True)
-
-                if not kalshi_order_id:
-                    order.status = OrderStatus.REJECTED
-                    order.rejection_reason = "Kalshi API did not return order_id"
-                    self._log_order(order)
-                    logger.error(
-                        f"Kalshi order response missing order_id and recovery found no match: {result}"
-                    )
-                    return OrderResult(
-                        success=False, order=order,
-                        error="Kalshi API did not return order_id",
-                    )
-
-            # Validate that response contains expected fields
-            if "status" not in result:
-                logger.warning(
-                    f"Kalshi order response missing 'status' field: {result}"
-                )
-
-            # Store exchange order ID for later cancel/lookup operations
-            order.exchange_order_id = kalshi_order_id
-
-            final_status = await self._poll_order_status(kalshi_order_id, result)
-
-            # Capture timestamp once for consistency
-            now = datetime.now(timezone.utc)
-
-            if final_status in ("executed",):
-                order.status = OrderStatus.FILLED
-                order.filled_at = now
-                # Use actual fill price from API if available; fall back to order price
-                api_fill_price = result.get("avg_price")
-                if api_fill_price is not None:
-                    # Validate avg_price is numeric and in valid Kalshi range (1-99 cents)
-                    try:
-                        api_fill_price = float(api_fill_price)
-                        if not (0 < api_fill_price <= 100):
-                            raise ValueError(f"avg_price out of range: {api_fill_price}")
-                        order.fill_price = api_fill_price / 100.0
-                    except (TypeError, ValueError) as e:
-                        logger.error(f"Invalid avg_price from Kalshi: {result.get('avg_price')!r} — using order price")
-                        order.fill_price = order.price
-                else:
-                    order.fill_price = order.price
-            elif final_status == "resting":
-                order.status = OrderStatus.OPEN
-                await self._add_pending(order.id, order.cost)
-                self._log_order(order)
-                logger.info(
-                    f"[LIVE] Order resting: {order.side.value} {int(order.size)}x "
-                    f"{order.token_id} @ ${order.price:.2f} "
-                    f"(pending_cost=${self._pending_order_cost:.2f})"
-                )
-                return OrderResult(success=True, order=order, trade=None)
-            elif final_status in ("canceled", "cancelled"):
-                order.status = OrderStatus.CANCELLED
-                order.cancelled_at = now
-                await self._remove_pending(order.id)
-                self._log_order(order)
-                return OrderResult(
-                    success=False, order=order, error="Order was cancelled"
-                )
-
-            # Create trade record for filled orders — use actual fill price
-            fill_price = order.fill_price if order.fill_price is not None else order.price
-            price_cents = dollars_to_cents(fill_price)
-            if order.order_type == OrderType.GTC:
-                fee_cents = kalshi_maker_fee(int(order.size), price_cents)
-            else:
-                fee_cents = kalshi_taker_fee(int(order.size), price_cents)
-
-            trade = Trade(
-                order_id=order.id,
-                market_id=order.market_id,
-                platform=order.platform,
-                token_id=order.token_id,
-                side=order.side,
-                price=fill_price,
-                size=order.size,
-                fee=fee_cents / 100.0,
-                realized_pnl=0.0,
-                strategy=order.strategy,
-                paper=False,
-                timestamp=now,
-            )
-
-            await self._remove_pending(order.id)
-            self._log_order(order)
-            self.db.log_trade(trade)
-
-            # Post-fill slippage monitoring: warn if actual fill diverges from expected
-            slippage = abs(fill_price - order.price)
-            if slippage > 0.01:
-                logger.warning(
-                    f"[LIVE] Slippage alert: expected ${order.price:.2f}, "
-                    f"filled ${fill_price:.2f} (slippage=${slippage:.3f})"
-                )
-
-            logger.info(
-                f"[LIVE] Filled: {order.side.value} {int(order.size)}x "
-                f"{order.token_id} @ ${fill_price:.2f}"
-            )
-
-            return OrderResult(success=True, order=order, trade=trade)
-
-        except Exception as e:
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = str(e)
-            self._log_order(order)
-            logger.exception(f"Live order failed: {e}")
-            return OrderResult(success=False, order=order, error=str(e))
-
-    async def _poly_live_fill(self, order: Order) -> OrderResult:
-        """Submit order to Polymarket CLOB API for live execution."""
-        # C-3: Reject orders on closed/settled markets.
-        market_row = self.db.get_market(order.market_id)
-        if market_row is not None:
-            mkt_closed = market_row.get("closed") or market_row.get("active") == 0
-            mkt_status = str(market_row.get("status", "")).lower()
-            if mkt_closed or mkt_status in ("closed", "settled", "halted", "determined"):
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = f"Market is {mkt_status or 'closed'} — cannot trade"
-                self._log_order(order)
-                logger.warning(f"Order {order.id} rejected: {order.rejection_reason}")
-                return OrderResult(success=False, order=order, error=order.rejection_reason)
-
-        if self.polymarket is None:
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = "Polymarket client not configured"
-            self._log_order(order)
-            return OrderResult(success=False, order=order, error="Polymarket client not configured")
-
-        # Polymarket residency gate: require explicit non-US confirmation.
-        # Polymarket is not legal for US persons — this gate prevents accidental
-        # live trades without jurisdiction acknowledgment.
-        # NOTE: Intentionally uses env var (not config file) as a safety gate —
-        # env vars are harder to accidentally change and require explicit action.
-        if not self._polymarket_residency_confirmed:
-            import os
-            if os.environ.get("CONFIRM_NON_US_POLYMARKET", "").lower() != "true":
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = (
-                    "Polymarket residency gate: set CONFIRM_NON_US_POLYMARKET=true "
-                    "to confirm you are not a US resident"
-                )
-                self._log_order(order)
-                logger.error(
-                    "Polymarket live trade BLOCKED: CONFIRM_NON_US_POLYMARKET env var not set. "
-                    "Polymarket is not available to US residents."
-                )
-                return OrderResult(success=False, order=order, error=order.rejection_reason)
-            self._polymarket_residency_confirmed = True
-
-        # Three-gate safety check (same gates for both platforms)
-        if not self._live_gates_passed():
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = "Live trading gates not passed"
-            self._log_order(order)
-            return OrderResult(success=False, order=order, error="Live trading gates not passed")
-
-        # Gate 3: Interactive confirmation with TTL (shared logic)
-        gate3_result = await self._check_gate3(order)
-        if gate3_result is not None:
-            return gate3_result
-
-        try:
-            poly_side = order.side.value  # "BUY" or "SELL"
-            poly_order_type = "GTC" if order.order_type == OrderType.GTC else "FOK"
-
-            # Retry up to 2 attempts on transient API failures (network errors, 5xx)
-            result = None
-            last_error: Exception | None = None
-            for _poly_attempt in range(2):
-                try:
-                    result = await self.polymarket.create_and_post_order(
-                        token_id=order.token_id,
-                        side=poly_side,
-                        price=order.price,
-                        size=order.size,
-                        order_type=poly_order_type,
-                    )
-                    break  # Success — exit retry loop
-                except Exception as _poly_err:
-                    last_error = _poly_err
-                    if _poly_attempt == 0:
-                        logger.warning(
-                            f"Polymarket API call failed (attempt 1/2): {_poly_err} — retrying in 1s"
-                        )
-                        await asyncio.sleep(1.0)
-                    else:
-                        raise  # Re-raise on second failure to hit outer except
-
-            now = datetime.now(timezone.utc)
-
-            if result is None:
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = "Polymarket API returned None"
-                self._log_order(order)
-                return OrderResult(success=False, order=order, error="Polymarket API returned None")
-
-            # Check fill status
-            status = result.get("status", "").lower()
-            if status in ("matched", "filled"):
-                order.status = OrderStatus.FILLED
-                order.filled_at = now
-                # C-2: Read actual fill price from API response, fall back to order price.
-                # Polymarket responses may use "price", "avg_price", or omit the field
-                # entirely (None). Check both fields and fall back to order.price.
-                try:
-                    raw_price = result.get("price") or result.get("avg_price")
-                    api_price = float(raw_price) if raw_price is not None else None
-                    order.fill_price = (api_price if api_price is not None and api_price > 0
-                                        else order.price)
-                except (TypeError, ValueError) as e:
-                    logger.warning(
-                        "M-N1: Polymarket fill price parse failed for %s: %s — "
-                        "using order price $%.2f as fallback",
-                        order.id, e, order.price,
-                    )
-                    order.fill_price = order.price
-            elif status in ("live", "resting"):
-                order.status = OrderStatus.OPEN
-                self._log_order(order)
-                logger.info(
-                    f"[POLY LIVE] Order resting: {order.side.value} {int(order.size)}x "
-                    f"{order.token_id} @ ${order.price:.2f}"
-                )
-                return OrderResult(success=True, order=order, trade=None)
-            else:
-                order.status = OrderStatus.REJECTED
-                order.rejection_reason = f"Unexpected status: {status}"
-                self._log_order(order)
-                return OrderResult(success=False, order=order, error=f"Unexpected status: {status}")
-
-            trade = Trade(
-                order_id=order.id,
-                market_id=order.market_id,
-                platform=Platform.POLYMARKET,
-                token_id=order.token_id,
-                side=order.side,
-                price=order.fill_price if order.fill_price is not None else order.price,
-                size=order.size,
-                fee=0.0,  # Event markets are fee-free
-                realized_pnl=0.0,
-                strategy=order.strategy,
-                paper=False,
-                timestamp=now,
-            )
-
-            self._log_order(order)
-            self.db.log_trade(trade)
-
-            fill_logged_price = order.fill_price if order.fill_price is not None else order.price
-            logger.info(
-                f"[POLY LIVE] Filled: {order.side.value} {int(order.size)}x "
-                f"{order.token_id} @ ${fill_logged_price:.2f}"
-            )
-
-            return OrderResult(success=True, order=order, trade=trade)
-
-        except Exception as e:
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = str(e)
-            self._log_order(order)
-            logger.error(f"Polymarket live order failed: {e}", exc_info=True)
-            return OrderResult(success=False, order=order, error=str(e))
-
-    async def _reconcile_after_timeout(self, order: Order) -> Optional[dict]:
-        """After a create_order timeout, check Kalshi for matching recent orders.
-
-        Returns the matching order dict if found, None otherwise.
-        """
-        try:
-            open_orders = await asyncio.wait_for(
-                self.kalshi.get_open_orders(),
-                timeout=10.0,
-            )
-            for oo in open_orders:
-                price_match = abs(oo.get("yes_price", 0) / 100 - order.price) < 0.01
-                # C-3: Also check side to avoid confusing BUY YES with BUY NO
-                side_match = oo.get("side", "").lower() == (order.kalshi_side or "").lower()
-                if (
-                    oo.get("ticker") == order.market_id
-                    and oo.get("count") == int(order.size)
-                    and price_match
-                    and side_match
-                ):
-                    logger.warning(
-                        f"Reconciliation found matching order on Kalshi: {oo.get('order_id')}"
-                    )
-                    return oo
-        except Exception as e:
-            logger.error(f"Reconciliation check failed: {e}", exc_info=True)
-        return None
-
-    async def _poll_order_status(
-        self, kalshi_order_id: str, initial_data: dict
-    ) -> str:
-        """Poll Kalshi for order fill status up to 5 times with 2s delays.
-
-        Returns the final status string.
-        """
-        status = initial_data.get("status", "").lower()
-        if status in ("executed", "canceled", "cancelled", "expired", "rejected", "failed"):
-            return status
-
-        if not kalshi_order_id:
-            return status
-
-        max_attempts = self.settings.execution.max_poll_attempts
-        poll_delay = self.settings.execution.order_poll_delay_seconds
-        poll_timeout = self.settings.execution.order_poll_timeout_seconds
-        for attempt in range(max_attempts):
-            await asyncio.sleep(poll_delay)
-            try:
-                order_data = await asyncio.wait_for(
-                    self.kalshi.get_order(kalshi_order_id),
-                    timeout=poll_timeout,
-                )
-                if order_data:
-                    status = order_data.get("status", "").lower()
-                    if status in ("executed", "canceled", "cancelled", "expired", "rejected", "failed"):
-                        return status
-            except asyncio.TimeoutError:
-                logger.warning(f"Order poll attempt {attempt + 1} timed out after {poll_timeout}s")
-            except Exception as e:
-                logger.warning(f"Order poll attempt {attempt + 1} failed: {e}")
-
-        return status  # Return last known status
 
     async def _request_confirmation(self, order: Order) -> bool:
         """Request interactive confirmation for the first live trade of the session.
@@ -889,12 +299,16 @@ class OrderRouter:
             return response.strip().lower() in ("y", "yes")
         except asyncio.TimeoutError:
             logger.critical(
-                "Gate 3 confirmation timed out after 60s — live trade rejected. "
+                "Gate 3 confirmation timed out after 60s -- live trade rejected. "
                 "Bot may be running unattended without interactive confirmation."
             )
             return False
         except (EOFError, KeyboardInterrupt):
             return False
+
+    # ------------------------------------------------------------------ #
+    # Order cancellation                                                   #
+    # ------------------------------------------------------------------ #
 
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a resting (open) live order.
@@ -938,7 +352,7 @@ class OrderRouter:
         exchange_id = row["exchange_order_id"] if row["exchange_order_id"] else order_id
         if not row["exchange_order_id"]:
             logger.warning(
-                f"No exchange_order_id for {order_id} — using internal ID "
+                f"No exchange_order_id for {order_id} -- using internal ID "
                 f"(cancel may fail if Kalshi doesn't recognize it)"
             )
 
@@ -953,9 +367,9 @@ class OrderRouter:
                         (datetime.now(timezone.utc).isoformat(), order_id),
                     )
                     conn.commit()
-                except Exception as db_err:
+                except (sqlite3.Error, OSError) as db_err:
                     logger.error(
-                        f"Cancel succeeded on exchange but DB update failed — "
+                        f"Cancel succeeded on exchange but DB update failed -- "
                         f"will reconcile on next sync: {db_err}",
                         exc_info=True,
                     )
@@ -1021,7 +435,7 @@ class OrderRouter:
         if not self.settings.live_enabled:
             logger.warning("Gate 2 failed: POLYEDGE_LIVE_ENABLED is not true")
             return False
-        # Gate 3 is interactive confirmation — handled externally
+        # Gate 3 is interactive confirmation -- handled externally
         return True
 
     def _log_order(self, order: Order):

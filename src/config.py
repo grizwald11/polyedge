@@ -49,9 +49,9 @@ class ScanningConfig(BaseModel):
 
     @field_validator("min_volume_24h", "min_liquidity")
     @classmethod
-    def volume_non_negative(cls, v: float) -> float:
+    def volume_non_negative(cls, v: float, info) -> float:
         if v < 0:
-            raise ValueError("volume/liquidity thresholds must be >= 0")
+            raise ValueError(f"{info.field_name} must be >= 0, got {v}")
         return v
 
     @field_validator("max_markets")
@@ -133,9 +133,9 @@ class TradingConfig(BaseModel):
         "max_obvious_no_pct",
     )
     @classmethod
-    def pct_valid(cls, v: float) -> float:
+    def pct_valid(cls, v: float, info) -> float:
         if v <= 0 or v > 1:
-            raise ValueError("percentage fields must be in (0, 1]")
+            raise ValueError(f"{info.field_name} must be in (0, 1], got {v}")
         return v
 
 
@@ -176,9 +176,9 @@ class ClaudeConfig(BaseModel):
 
     @field_validator("max_tokens", "max_assessments_per_cycle", "api_timeout_seconds", "max_concurrent_assessments")
     @classmethod
-    def positive_int_fields(cls, v: int) -> int:
+    def positive_int_fields(cls, v: int, info) -> int:
         if v <= 0:
-            raise ValueError("must be > 0")
+            raise ValueError(f"{info.field_name} must be > 0, got {v}")
         return v
 
     @field_validator("ensemble_weight")
@@ -242,6 +242,20 @@ class ExecutionConfig(BaseModel):
     take_profit_pct: float = 0.80        # Take profit at 80% of max theoretical gain
     capital_rotation_edge: float = 0.40  # When exposure >35%, exit positions with <40% remaining edge
 
+    @field_validator("stale_order_age_seconds", "order_poll_timeout_seconds", "max_poll_attempts", "cycle_timeout_seconds")
+    @classmethod
+    def exec_positive_int(cls, v: int, info) -> int:
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be > 0, got {v}")
+        return v
+
+    @field_validator("order_poll_delay_seconds")
+    @classmethod
+    def poll_delay_non_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("order_poll_delay_seconds must be >= 0")
+        return v
+
 
 class AlertsConfig(BaseModel):
     enabled: bool = True
@@ -251,6 +265,13 @@ class AlertsConfig(BaseModel):
     alert_on_circuit_breaker: bool = True
     daily_report_time: str = "21:00"
     dashboard_port: int = 8080
+
+    @field_validator("dashboard_port")
+    @classmethod
+    def port_valid(cls, v: int) -> int:
+        if v < 1 or v > 65535:
+            raise ValueError("dashboard_port must be in [1, 65535]")
+        return v
 
 
 class DatabaseConfig(BaseModel):

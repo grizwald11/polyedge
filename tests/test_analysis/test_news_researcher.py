@@ -202,8 +202,8 @@ class TestDDGSearch:
             },
         ]
 
-        with patch("src.analysis.news_researcher.DDG_AVAILABLE", True):
-            with patch("src.analysis.news_researcher.DDGS", return_value=mock_ddgs):
+        with patch("src.analysis.news_search.DDG_AVAILABLE", True):
+            with patch("src.analysis.news_search.DDGS", return_value=mock_ddgs):
                 results = await researcher._search_ddg("test query")
 
         assert len(results) == 1
@@ -240,8 +240,8 @@ class TestDDGSearch:
                 return mock_ddgs_news
             return mock_ddgs_text
 
-        with patch("src.analysis.news_researcher.DDG_AVAILABLE", True):
-            with patch("src.analysis.news_researcher.DDGS", side_effect=mock_ddgs_factory):
+        with patch("src.analysis.news_search.DDG_AVAILABLE", True):
+            with patch("src.analysis.news_search.DDGS", side_effect=mock_ddgs_factory):
                 results = await researcher._search_ddg("test query")
 
         assert len(results) == 1
@@ -271,8 +271,8 @@ class TestDDGSearch:
                 return mock_ddgs
             return mock_ddgs_text
 
-        with patch("src.analysis.news_researcher.DDG_AVAILABLE", True):
-            with patch("src.analysis.news_researcher.DDGS", side_effect=mock_ddgs_factory):
+        with patch("src.analysis.news_search.DDG_AVAILABLE", True):
+            with patch("src.analysis.news_search.DDGS", side_effect=mock_ddgs_factory):
                 results = await researcher._search_ddg("test query")
 
         assert results == []

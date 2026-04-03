@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sqlite3
 from datetime import datetime, timezone
 
 from src.config import Settings
@@ -78,7 +79,7 @@ class RiskEngine:
         if self.db is not None:
             try:
                 self.db.save_setting("live_bankroll", str(live_balance))
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.debug(f"Failed to persist bankroll to DB: {e}")
 
     def restore_bankroll(self) -> None:
