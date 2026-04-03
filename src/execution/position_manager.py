@@ -63,6 +63,10 @@ SLIPPAGE_BUFFER = 0.02
 # 2%: Ensures exit orders actually execute at or before the hard threshold after
 # typical market spread and order routing latency.
 
+MIN_HOLD_BEFORE_EDGE_GONE = 86400  # 24 hours in seconds
+# Prediction markets need days/weeks to play out. Edge-gone checks should not
+# fire on normal price noise within the first 24 hours of holding a position.
+
 if __name__ != "__main__":
     from typing import TYPE_CHECKING
     if TYPE_CHECKING:
@@ -499,8 +503,11 @@ class PositionManager:
         # 5. Edge-gone check.
         #    Apply SLIPPAGE_BUFFER: use a slightly higher threshold so we exit
         #    before the edge fully evaporates, accounting for execution slippage.
+        #    Skip for young positions — prediction markets need time to play out
+        #    and normal price noise within the first 24h is not "edge gone."
         effective_edge_gone = edge_gone_threshold + SLIPPAGE_BUFFER
-        if market is not None:
+        hold_seconds = (datetime.now(timezone.utc) - position.opened_at).total_seconds()
+        if market is not None and hold_seconds >= MIN_HOLD_BEFORE_EDGE_GONE:
             remaining_edge = self._calculate_remaining_edge(position, market)
             if remaining_edge < effective_edge_gone:
                 # M-4: Require fresh price data (<2 min) for edge-gone to avoid false exits
@@ -579,11 +586,19 @@ class PositionManager:
             current = market.yes_price
             if current <= 0:
                 return 0.0
-            if current < entry:
-                return 0.0  # underwater
             original_upside = 1.0 - entry
             if original_upside <= 0:
                 return 0.0
+            # Graduated: when underwater, return negative fraction proportional
+            # to how far against us the price moved relative to entry.
+            # e.g. entry=0.80, current=0.78 → (1.0-0.78)/(1.0-0.80) = 1.1 → clamped to 1.0
+            # Wait — remaining upside from current: (1.0 - current) / original_upside
+            # If current < entry, remaining > 1.0 is wrong. Use signed version:
+            # fraction of original edge that remains, allowing negative for underwater.
+            if current < entry:
+                # Underwater: negative remaining edge scaled by how far underwater
+                loss_fraction = (entry - current) / entry
+                return -loss_fraction  # e.g. -0.025 for a 2.5% adverse move
             return max(0.0, min(1.0, (1.0 - current) / original_upside))
 
         elif position.direction == Direction.BUY_NO:
@@ -591,11 +606,12 @@ class PositionManager:
             current = market.no_price
             if current <= 0:
                 return 0.0
-            if current < entry:
-                return 0.0  # underwater
             original_upside = 1.0 - entry
             if original_upside <= 0:
                 return 0.0
+            if current < entry:
+                loss_fraction = (entry - current) / entry
+                return -loss_fraction
             return max(0.0, min(1.0, (1.0 - current) / original_upside))
 
         elif position.direction == Direction.SELL_YES:
@@ -603,11 +619,12 @@ class PositionManager:
             current = market.yes_price
             if current <= 0:
                 return 0.0
-            if current > entry:
-                return 0.0  # underwater — price rose above our sell
             original_upside = entry  # max gain = entry (price drops to 0)
             if original_upside <= 0:
                 return 0.0
+            if current > entry:
+                loss_fraction = (current - entry) / entry
+                return -loss_fraction
             return max(0.0, min(1.0, current / original_upside))
 
         else:  # SELL_NO
@@ -615,11 +632,12 @@ class PositionManager:
             current = market.no_price
             if current <= 0:
                 return 0.0
-            if current > entry:
-                return 0.0  # underwater — price rose above our sell
             original_upside = entry  # max gain = entry (price drops to 0)
             if original_upside <= 0:
                 return 0.0
+            if current > entry:
+                loss_fraction = (current - entry) / entry
+                return -loss_fraction
             return max(0.0, min(1.0, current / original_upside))
 
     async def sync_with_kalshi(self, kalshi, auto_correct: bool = True) -> int:
