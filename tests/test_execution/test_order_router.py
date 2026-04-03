@@ -368,6 +368,9 @@ class TestOrphanedOrderRecovery:
                 "status": "resting",
             }
         ])
+        # get_order is called during polling; must return a dict to avoid
+        # unawaited coroutines from .get().lower() on an AsyncMock.
+        kalshi.get_order = AsyncMock(return_value={"order_id": "recovered-kalshi-456", "status": "resting"})
         router = OrderRouter(live_settings, kalshi, tmp_db)
         router._session_confirmed = True
         order = _make_order(paper=False)
@@ -442,6 +445,9 @@ class TestPendingOrderPersistence:
         """When a live order rests, it is saved to the pending_orders table."""
         kalshi = AsyncMock(spec=KalshiClient)
         kalshi.create_order = AsyncMock(return_value={"order_id": "kalshi-resting", "status": "resting"})
+        # get_order is called during polling; must return a dict to avoid
+        # unawaited coroutines from .get().lower() on an AsyncMock.
+        kalshi.get_order = AsyncMock(return_value={"order_id": "kalshi-resting", "status": "resting"})
         router = OrderRouter(live_settings, kalshi, tmp_db)
         router._session_confirmed = True
         order = _make_order(paper=False)
@@ -782,6 +788,9 @@ class TestTimeoutReconciliation:
                 "status": "resting",
             }
         ])
+        # get_order is called during polling after reconciliation; must return
+        # a dict to avoid unawaited coroutines from .get().lower() on AsyncMock.
+        kalshi.get_order = AsyncMock(return_value={"order_id": "recovered-timeout", "status": "resting"})
         router = OrderRouter(live_settings, kalshi, tmp_db)
         router._session_confirmed = True
         order = _make_order(paper=False)
@@ -1202,6 +1211,9 @@ class TestFillRecording:
         kalshi = AsyncMock(spec=KalshiClient)
         kalshi.get_balance = AsyncMock(return_value=1000.0)
         kalshi.create_order = AsyncMock(return_value={"order_id": "k-rest", "status": "resting"})
+        # get_order is polled during status check; must return a dict (not AsyncMock)
+        # so that .get("status", "").lower() doesn't produce unawaited coroutines.
+        kalshi.get_order = AsyncMock(return_value={"order_id": "k-rest", "status": "resting"})
         router = OrderRouter(live_settings, kalshi, tmp_db)
         router._session_confirmed = True
         order = _make_order(paper=False)

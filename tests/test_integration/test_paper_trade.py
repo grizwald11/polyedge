@@ -177,6 +177,9 @@ class TestFullPaperTradeCycle:
 
         order_builder = OrderBuilder(settings)
         mock_kalshi = AsyncMock()
+        # check_key_freshness is called synchronously (no await) in scan_and_trade,
+        # so it must be a regular MagicMock to avoid unawaited coroutine warnings.
+        mock_kalshi.check_key_freshness = MagicMock(return_value=True)
         order_router = OrderRouter(settings, mock_kalshi, db)
         position_manager = PositionManager(db, settings.trading.bankroll)
         fill_tracker = FillTracker(mock_kalshi, db)
@@ -253,6 +256,9 @@ class TestFullPaperTradeCycle:
 
         order_builder = OrderBuilder(settings)
         mock_kalshi = AsyncMock()
+        # check_key_freshness is called synchronously (no await) in scan_and_trade,
+        # so it must be a regular MagicMock to avoid unawaited coroutine warnings.
+        mock_kalshi.check_key_freshness = MagicMock(return_value=True)
         order_router = OrderRouter(settings, mock_kalshi, db)
         position_manager = PositionManager(db, settings.trading.bankroll)
         fill_tracker = FillTracker(mock_kalshi, db)
@@ -327,6 +333,9 @@ class TestFullPaperTradeCycle:
 
         order_builder = OrderBuilder(settings)
         mock_kalshi = AsyncMock()
+        # check_key_freshness is called synchronously (no await) in scan_and_trade,
+        # so it must be a regular MagicMock to avoid unawaited coroutine warnings.
+        mock_kalshi.check_key_freshness = MagicMock(return_value=True)
         order_router = OrderRouter(settings, mock_kalshi, db)
         position_manager = PositionManager(db, settings.trading.bankroll)
         fill_tracker = FillTracker(mock_kalshi, db)
@@ -409,6 +418,9 @@ class TestFullPaperTradeCycle:
 
         order_builder = OrderBuilder(settings)
         mock_kalshi = AsyncMock()
+        # check_key_freshness is called synchronously (no await) in scan_and_trade,
+        # so it must be a regular MagicMock to avoid unawaited coroutine warnings.
+        mock_kalshi.check_key_freshness = MagicMock(return_value=True)
         order_router = OrderRouter(settings, mock_kalshi, db)
         position_manager = PositionManager(db, settings.trading.bankroll)
         fill_tracker = FillTracker(mock_kalshi, db)
@@ -473,6 +485,9 @@ class TestFullPaperTradeCycle:
 
         order_builder = OrderBuilder(settings)
         mock_kalshi = AsyncMock()
+        # check_key_freshness is called synchronously (no await) in scan_and_trade,
+        # so it must be a regular MagicMock to avoid unawaited coroutine warnings.
+        mock_kalshi.check_key_freshness = MagicMock(return_value=True)
         order_router = OrderRouter(settings, mock_kalshi, db)
         position_manager = PositionManager(db, settings.trading.bankroll)
         fill_tracker = FillTracker(mock_kalshi, db)
@@ -532,6 +547,9 @@ class TestFullPaperTradeCycle:
 
         order_builder = OrderBuilder(settings)
         mock_kalshi = AsyncMock()
+        # check_key_freshness is called synchronously (no await) in scan_and_trade,
+        # so it must be a regular MagicMock to avoid unawaited coroutine warnings.
+        mock_kalshi.check_key_freshness = MagicMock(return_value=True)
         order_router = OrderRouter(settings, mock_kalshi, db)
         position_manager = PositionManager(db, settings.trading.bankroll)
         fill_tracker = FillTracker(mock_kalshi, db)
@@ -625,6 +643,9 @@ class TestFullPaperTradeCycle:
 
         order_builder = OrderBuilder(settings)
         mock_kalshi = AsyncMock()
+        # check_key_freshness is called synchronously (no await) in scan_and_trade,
+        # so it must be a regular MagicMock to avoid unawaited coroutine warnings.
+        mock_kalshi.check_key_freshness = MagicMock(return_value=True)
         order_router = OrderRouter(settings, mock_kalshi, db)
         position_manager = PositionManager(db, settings.trading.bankroll)
         fill_tracker = FillTracker(mock_kalshi, db)

@@ -574,7 +574,10 @@ class TestFillTracker:
         real_gather = asyncio.gather
 
         async def patched_gather(*coros, **kwargs):
-            # Run normally but inject an Exception result
+            # Close the coroutines we're not going to run, to avoid
+            # "coroutine was never awaited" warnings.
+            for c in coros:
+                c.close()
             return [RuntimeError("unexpected gather error")]
 
         with patch("asyncio.gather", patched_gather):

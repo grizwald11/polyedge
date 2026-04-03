@@ -598,7 +598,7 @@ class ClaudeForecaster:
                 latency_ms=int((time.monotonic() - start_time) * 1000),
                 parse_failed=True,
             )
-        except Exception as e:
+        except (anthropic.APIError, asyncio.TimeoutError, json.JSONDecodeError, ValueError, KeyError) as e:
             logger.exception(f"Claude assessment failed: {e}")
             self._record_api_failure()
             return ForecastResult(
@@ -673,7 +673,7 @@ class ClaudeForecaster:
             )
             return forecast
 
-        except Exception as e:
+        except (anthropic.APIError, asyncio.TimeoutError, json.JSONDecodeError, ValueError, KeyError) as e:
             logger.error(f"Custom Claude assessment failed: {e}", exc_info=True)
             return None
 
@@ -751,7 +751,7 @@ class ClaudeForecaster:
                 _call_at_temp(temp_low),
                 _call_at_temp(temp_high),
             )
-        except Exception as e:
+        except (anthropic.APIError, asyncio.TimeoutError, json.JSONDecodeError, ValueError, KeyError) as e:
             logger.warning(f"Cross-check dual-call failed, returning None: {e}")
             return None
 

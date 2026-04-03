@@ -44,7 +44,7 @@ class ScanningConfig(BaseModel):
     @classmethod
     def interval_positive(cls, v: int) -> int:
         if v <= 0:
-            raise ValueError("interval_seconds must be > 0")
+            raise ValueError(f"interval_seconds must be > 0, got {v}")
         return v
 
     @field_validator("min_volume_24h", "min_liquidity")
@@ -58,7 +58,7 @@ class ScanningConfig(BaseModel):
     @classmethod
     def max_markets_positive(cls, v: int) -> int:
         if v <= 0:
-            raise ValueError("max_markets must be > 0")
+            raise ValueError(f"max_markets must be > 0, got {v}")
         return v
 
 
@@ -98,9 +98,9 @@ class TradingConfig(BaseModel):
 
     @field_validator("min_edge_ai", "min_edge_arb", "min_edge_obvious_no", "min_edge_news", "min_edge_mean_reversion", "min_edge_late_resolution")
     @classmethod
-    def min_edge_non_negative(cls, v: float) -> float:
+    def min_edge_non_negative(cls, v: float, info) -> float:
         if v < 0:
-            raise ValueError(f"min_edge must be >= 0, got {v}")
+            raise ValueError(f"{info.field_name} must be >= 0, got {v}")
         return v
 
     @field_validator("obvious_no_probability_multiplier")
@@ -117,14 +117,14 @@ class TradingConfig(BaseModel):
     @classmethod
     def bankroll_positive(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError("bankroll must be > 0")
+            raise ValueError(f"bankroll must be > 0, got {v}")
         return v
 
     @field_validator("kelly_fraction")
     @classmethod
     def kelly_fraction_valid(cls, v: float) -> float:
         if v <= 0 or v > 1:
-            raise ValueError("kelly_fraction must be in (0, 1]")
+            raise ValueError(f"kelly_fraction must be in (0, 1], got {v}")
         return v
 
     @field_validator(
@@ -171,7 +171,7 @@ class ClaudeConfig(BaseModel):
     @classmethod
     def temperature_valid(cls, v: float) -> float:
         if v < 0 or v > 2:
-            raise ValueError("temperature must be in [0, 2]")
+            raise ValueError(f"temperature must be in [0, 2], got {v}")
         return v
 
     @field_validator("max_tokens", "max_assessments_per_cycle", "api_timeout_seconds", "max_concurrent_assessments")
@@ -185,7 +185,7 @@ class ClaudeConfig(BaseModel):
     @classmethod
     def ensemble_weight_valid(cls, v: float) -> float:
         if v <= 0 or v > 1:
-            raise ValueError("ensemble_weight must be in (0, 1]")
+            raise ValueError(f"ensemble_weight must be in (0, 1], got {v}")
         return v
 
 
@@ -253,7 +253,7 @@ class ExecutionConfig(BaseModel):
     @classmethod
     def poll_delay_non_negative(cls, v: float) -> float:
         if v < 0:
-            raise ValueError("order_poll_delay_seconds must be >= 0")
+            raise ValueError(f"order_poll_delay_seconds must be >= 0, got {v}")
         return v
 
 
@@ -270,7 +270,7 @@ class AlertsConfig(BaseModel):
     @classmethod
     def port_valid(cls, v: int) -> int:
         if v < 1 or v > 65535:
-            raise ValueError("dashboard_port must be in [1, 65535]")
+            raise ValueError(f"dashboard_port must be in [1, 65535], got {v}")
         return v
 
 
@@ -283,7 +283,7 @@ class DatabaseConfig(BaseModel):
     @classmethod
     def path_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
-            raise ValueError("Database path cannot be empty")
+            raise ValueError(f"path must not be empty, got {v!r}")
         return v
 
 

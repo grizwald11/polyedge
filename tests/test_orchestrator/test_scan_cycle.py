@@ -239,6 +239,11 @@ class TestScanMarkets:
         # asyncio.gather returns exceptions as values when return_exceptions=True
         # Simulate by having gather return an exception for kalshi
         async def fake_gather(*coros, return_exceptions=False):
+            # Close coroutines we're not going to run to avoid
+            # "coroutine was never awaited" warnings.
+            for c in coros:
+                if hasattr(c, 'close'):
+                    c.close()
             return [Exception("kalshi failed"), []]
 
         metrics = MagicMock()
@@ -271,6 +276,9 @@ class TestScanMarkets:
         poly_scanner.run_scan_cycle = AsyncMock(return_value=RuntimeError("poly down"))
 
         async def fake_gather(*coros, return_exceptions=False):
+            for c in coros:
+                if hasattr(c, 'close'):
+                    c.close()
             return [kalshi_markets, Exception("poly failed")]
 
         metrics = MagicMock()

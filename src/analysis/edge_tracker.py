@@ -13,6 +13,7 @@ for sizing, producing correctly-sized positions.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -52,7 +53,7 @@ class EdgeTracker:
                 ON edge_records(market_id)
             """)
             conn.commit()
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.debug(f"Edge table setup: {e}")
 
     def record_predicted_edge(
@@ -84,7 +85,7 @@ class EdgeTracker:
                 ),
             )
             conn.commit()
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.debug(f"Failed to record edge: {e}")
 
     def record_resolution(
@@ -137,7 +138,7 @@ class EdgeTracker:
                     ),
                 )
             conn.commit()
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.debug(f"Failed to record resolution: {e}")
 
     def compute_edge_shrinkage(self, category: str = "") -> float:
@@ -214,6 +215,6 @@ class EdgeTracker:
                     "SELECT * FROM edge_records WHERE actual_outcome IS NOT NULL",
                 ).fetchall()
             return [dict(r) for r in rows]
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.debug(f"Failed to get edge records: {e}")
             return []

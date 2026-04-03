@@ -1161,7 +1161,14 @@ class TestSetupBackgroundTasks:
         settings.trading.bankroll = 500.0
         logger = logging.getLogger("test")
 
-        with patch("src.orchestrator.lifecycle.KalshiWebSocket") as MockWS:
+        def _close_coro_create_task(coro, **kwargs):
+            """Patch for create_task that closes the coroutine to avoid warnings."""
+            if hasattr(coro, 'close'):
+                coro.close()
+            return MagicMock()
+
+        with patch("src.orchestrator.lifecycle.KalshiWebSocket") as MockWS, \
+             patch("src.orchestrator.lifecycle.asyncio.create_task", side_effect=_close_coro_create_task):
             await _setup_background_tasks(settings, c, logger)
             MockWS.assert_not_called()
 
@@ -1199,9 +1206,13 @@ class TestSetupBackgroundTasks:
         mock_ws.register_reconnect_sync = MagicMock()
         mock_ws.connect = AsyncMock(return_value=None)
 
+        def _close_coro_create_task(coro, **kwargs):
+            if hasattr(coro, 'close'):
+                coro.close()
+            return MagicMock()
+
         with patch("src.orchestrator.lifecycle.KalshiWebSocket", return_value=mock_ws):
-            with patch("src.orchestrator.lifecycle.asyncio.create_task") as mock_create_task:
-                mock_create_task.return_value = MagicMock()
+            with patch("src.orchestrator.lifecycle.asyncio.create_task", side_effect=_close_coro_create_task) as mock_create_task:
                 await _setup_background_tasks(settings, c, logger)
 
         assert c.ws_client is mock_ws
@@ -1229,7 +1240,13 @@ class TestSetupBackgroundTasks:
         settings.trading.bankroll = 500.0
         logger = logging.getLogger("test")
 
-        with patch("src.orchestrator.lifecycle.KalshiWebSocket", side_effect=RuntimeError("ws init fail")):
+        def _close_coro_create_task(coro, **kwargs):
+            if hasattr(coro, 'close'):
+                coro.close()
+            return MagicMock()
+
+        with patch("src.orchestrator.lifecycle.KalshiWebSocket", side_effect=RuntimeError("ws init fail")), \
+             patch("src.orchestrator.lifecycle.asyncio.create_task", side_effect=_close_coro_create_task):
             await _setup_background_tasks(settings, c, logger)
 
         assert c.ws_client is None
@@ -1334,7 +1351,12 @@ class TestWebSocketCallbacks:
         mock_ws.register_reconnect_sync = capture_reconnect
 
         with patch("src.orchestrator.lifecycle.KalshiWebSocket", return_value=mock_ws):
-            with patch("src.orchestrator.lifecycle.asyncio.create_task", return_value=MagicMock()):
+            def _close_coro_create_task(coro, **kwargs):
+                    if hasattr(coro, 'close'):
+                        coro.close()
+                    return MagicMock()
+
+            with patch("src.orchestrator.lifecycle.asyncio.create_task", side_effect=_close_coro_create_task):
                 await _setup_background_tasks(settings, c, logger)
 
         # Simulate a TickerUpdate
@@ -1383,8 +1405,13 @@ class TestWebSocketCallbacks:
         mock_ws.register_reconnect_sync = lambda cb: captured_callbacks.update({"reconnect": cb})
         mock_ws.connect = AsyncMock()
 
+        def _close_coro_create_task(coro, **kwargs):
+            if hasattr(coro, 'close'):
+                coro.close()
+            return MagicMock()
+
         with patch("src.orchestrator.lifecycle.KalshiWebSocket", return_value=mock_ws):
-            with patch("src.orchestrator.lifecycle.asyncio.create_task", return_value=MagicMock()):
+            with patch("src.orchestrator.lifecycle.asyncio.create_task", side_effect=_close_coro_create_task):
                 await _setup_background_tasks(settings, c, logger)
 
         update = MagicMock(spec=LifecycleUpdate)
@@ -1432,8 +1459,13 @@ class TestWebSocketCallbacks:
         mock_ws.register_reconnect_sync = lambda cb: captured_callbacks.update({"reconnect": cb})
         mock_ws.connect = AsyncMock()
 
+        def _close_coro_create_task(coro, **kwargs):
+            if hasattr(coro, 'close'):
+                coro.close()
+            return MagicMock()
+
         with patch("src.orchestrator.lifecycle.KalshiWebSocket", return_value=mock_ws):
-            with patch("src.orchestrator.lifecycle.asyncio.create_task", return_value=MagicMock()):
+            with patch("src.orchestrator.lifecycle.asyncio.create_task", side_effect=_close_coro_create_task):
                 await _setup_background_tasks(settings, c, logger)
 
         update = MagicMock(spec=LifecycleUpdate)

@@ -7,6 +7,7 @@ backward compatibility via the mixin pattern.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class WhalesMixin:
                 (wallet_address, market_id, direction, size, price, detected_at),
             )
             conn.commit()
-        except Exception as e:
+        except (sqlite3.Error, ValueError) as e:
             conn.rollback()
             logger.warning(f"Failed to log whale trade: {e}")
 

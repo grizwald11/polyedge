@@ -133,6 +133,9 @@ def components(sample_markets):
     # Mock kalshi client for position price fetches
     kalshi = AsyncMock()
     kalshi.get_market = AsyncMock(return_value=None)
+    # check_key_freshness is called synchronously (no await) in production code,
+    # so it must be a regular MagicMock to avoid unawaited coroutine warnings.
+    kalshi.check_key_freshness = MagicMock(return_value=True)
 
     # Mock DB dedup check
     scanner.db.has_recent_trade = MagicMock(return_value=False)

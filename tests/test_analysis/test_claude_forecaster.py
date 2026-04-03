@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anthropic
 import pytest
 
 from src.analysis.claude_forecaster import ClaudeForecaster
@@ -136,7 +137,13 @@ class TestClaudeForecaster:
     @pytest.mark.asyncio
     async def test_assess_market_api_error(self, forecaster, sample_market):
         mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(side_effect=Exception("API Error"))
+        mock_client.messages.create = AsyncMock(
+            side_effect=anthropic.APIError(
+                message="API Error",
+                request=MagicMock(),
+                body=None,
+            )
+        )
         forecaster._client = mock_client
 
         result = await forecaster.assess_market(sample_market)
@@ -156,7 +163,13 @@ class TestClaudeForecaster:
     async def test_api_error_sets_parse_failed(self, forecaster, sample_market):
         """Regression: fallback forecasts from API errors should have parse_failed=True."""
         mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(side_effect=Exception("API Error"))
+        mock_client.messages.create = AsyncMock(
+            side_effect=anthropic.APIError(
+                message="API Error",
+                request=MagicMock(),
+                body=None,
+            )
+        )
         forecaster._client = mock_client
 
         result = await forecaster.assess_market(sample_market)
