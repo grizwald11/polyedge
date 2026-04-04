@@ -10,6 +10,19 @@ WAL mode allows concurrent reads during writes.
 # INTEGER cents would eliminate this but requires changes across all callers.
 # Current approach is safe for typical trading volumes (<10K trades).
 #
+# H-3 MIGRATION PLAN (execute when trade volume exceeds 10K or multi-user):
+#   1. Create schema v16 with INTEGER cent columns alongside existing REAL columns
+#   2. Backfill: UPDATE trades SET price_cents = ROUND(price * 100) etc.
+#   3. Update all callers to use dollars_to_cents() / cents_to_dollars() helpers
+#   4. Drop old REAL columns in schema v17 after validation
+#   Affected tables/columns:
+#     - markets: volume_24h, volume_total, liquidity, spread
+#     - market_snapshots: yes_price, no_price, volume_1h, liquidity
+#     - signals: edge, probability_estimate, market_price, confidence
+#     - orders: price, size, cost, fill_price
+#     - trades: price, size, fee, realized_pnl
+#     - calibration_records: predicted_probability, market_price_at_prediction
+#
 # M-10: Domain-specific methods are split into mixin modules for maintainability:
 #   - db_markets.py   — market/snapshot CRUD, cleanup
 #   - db_trades.py    — trade/order/signal/position operations

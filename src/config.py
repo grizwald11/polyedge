@@ -166,6 +166,10 @@ class ClaudeConfig(BaseModel):
     reassessment_price_move: float = 0.03  # Re-assess if relative price move exceeds this (3%)
     daily_token_budget: int = 1_000_000  # Soft daily token budget warning threshold
     max_concurrent_assessments: int = 5  # Max parallel Claude API calls per scan cycle
+    top_p: Optional[float] = Field(
+        default=None,
+        description="Nucleus sampling parameter. None uses API default. Research suggests 0.9 for forecasting.",
+    )
     model_pricing: dict[str, list[float]] = Field(
         default_factory=dict,
         description="Per-model cost overrides: {model_id: [input_cost_per_M, output_cost_per_M]}",
@@ -176,6 +180,13 @@ class ClaudeConfig(BaseModel):
     def temperature_valid(cls, v: float) -> float:
         if v < 0 or v > 2:
             raise ValueError(f"temperature must be in [0, 2], got {v}")
+        return v
+
+    @field_validator("top_p")
+    @classmethod
+    def top_p_valid(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v <= 0 or v > 1):
+            raise ValueError(f"top_p must be in (0, 1], got {v}")
         return v
 
     @field_validator("max_tokens", "max_assessments_per_cycle", "api_timeout_seconds", "max_concurrent_assessments")
@@ -356,6 +367,13 @@ class Settings(BaseModel):
                 warnings.append(
                     f"KALSHI_PRIVATE_KEY_PATH is not readable: {self.kalshi_private_key_path}"
                 )
+
+        # L-5: Warn when Kalshi production host is active in paper mode
+        if not self.kalshi.use_demo and self.trading.mode == "paper":
+            warnings.append(
+                "Kalshi client pointing to PRODUCTION API in paper mode. "
+                "Set kalshi.use_demo=true for full sandbox isolation."
+            )
 
         for w in warnings:
             _logger.warning(w)

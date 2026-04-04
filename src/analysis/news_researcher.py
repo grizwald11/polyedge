@@ -527,14 +527,25 @@ class NewsResearcher:
                         f"Using cached news context ({age:.0f}s old) — "
                         f"all search backends unavailable"
                     )
-                    return self._last_successful_context[cache_key]
+                    # H-2: Inject staleness warning so Claude weights market price more heavily
+                    stale_notice = (
+                        f"[NOTICE: This news context is cached from {age:.0f} seconds ago. "
+                        f"Freshness is unverified — weight current market price more heavily.]\n\n"
+                    )
+                    return stale_notice + self._last_successful_context[cache_key]
             return ""
 
         # Filter stale results, deduplicate, score by relevance, keep top results
         fresh_results = [r for r in all_results if not self._is_stale(r)]
+        all_stale = False
         if fresh_results:
             all_results = fresh_results
-        # else: keep all results if everything is stale (better than nothing)
+        else:
+            # H-2: All results are stale — keep them but flag in context
+            all_stale = True
+            logger.warning(
+                f"All {len(all_results)} news results are stale for '{market_question[:60]}'"
+            )
         all_results = self._deduplicate(all_results)
         all_results.sort(
             key=lambda r: self._score_relevance(r, market_question), reverse=True
@@ -547,7 +558,7 @@ class NewsResearcher:
         except Exception as e:
             logger.debug(f"Article enrichment failed: {e}", exc_info=True)
 
-        context = self._format_context(all_results)
+        context = self._format_context(all_results, all_stale=all_stale)
         logger.info(
             f"News research: {len(all_results)} results for '{market_question[:50]}...'"
         )
@@ -562,9 +573,15 @@ class NewsResearcher:
             del self._last_successful_time[oldest_key]
         return context
 
-    def _format_context(self, results: list[NewsResult]) -> str:
+    def _format_context(self, results: list[NewsResult], *, all_stale: bool = False) -> str:
         """Format news results into a concise context block."""
-        lines = ["RECENT NEWS CONTEXT:"]
+        lines = []
+        if all_stale:
+            lines.append(
+                "[WARNING: All news results may be outdated. "
+                "Assess probability with caution and weight current market price more heavily.]"
+            )
+        lines.append("RECENT NEWS CONTEXT:")
         for i, r in enumerate(results, 1):
             source_date = f"({r.source}"
             if r.date:

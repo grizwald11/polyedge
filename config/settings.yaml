@@ -1,7 +1,7 @@
 kalshi:
   host: "https://api.elections.kalshi.com/trade-api/v2"
   demo_host: "https://demo-api.kalshi.co/trade-api/v2"
-  use_demo: false
+  use_demo: false  # L-5: Production host active. Safe because trading.mode=paper. Set true for full sandbox.
 
 polymarket:
   clob_host: "https://clob.polymarket.com"

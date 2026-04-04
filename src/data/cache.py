@@ -14,9 +14,11 @@ from typing import Any, Optional
 class TTLCache:
     """In-memory cache with per-key TTL expiration.
 
-    H-8: NOT thread-safe. Safe for single-threaded asyncio use only.
-    If thread safety is needed, wrap mutations in an asyncio.Lock or
-    threading.Lock.
+    M-3: NOT thread-safe. Safe for single-threaded asyncio use only.
+    Concurrent get/set from multiple threads may cause lost updates or
+    partial reads of _store. The bot's main loop is single-threaded asyncio,
+    so this is safe in normal operation. If adding threading (e.g., for the
+    dashboard or background workers), wrap mutations in threading.Lock.
     """
 
     def __init__(self, ttl_seconds: int = 3600):

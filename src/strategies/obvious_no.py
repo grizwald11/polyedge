@@ -69,9 +69,10 @@ class ObviousNoStrategy:
         category = getattr(market, "category", None)
         fee_categories = {MarketCategory.CRYPTO.value, MarketCategory.SPORTS.value}
         if category and str(category) in fee_categories:
-            fee_per_contract = 0.0175 * no_price * (1.0 - no_price)
+            # H-1: Round fee calculation to 6dp to limit float drift
+            fee_per_contract = round(0.0175 * no_price * (1.0 - no_price), 6)
 
-        net_profit = 1.0 - no_price - fee_per_contract
+        net_profit = round(1.0 - no_price - fee_per_contract, 6)
         if net_profit <= 0:
             return None
         simple_return = net_profit / no_price

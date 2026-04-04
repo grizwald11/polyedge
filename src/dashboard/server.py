@@ -200,6 +200,9 @@ async def start_dashboard(
 
     try:
         import uvicorn
+        # M-7: Dashboard runs HTTP-only. Acceptable for localhost-only access.
+        # For remote access, use a reverse proxy (nginx/caddy) with TLS termination.
+        # To restrict to localhost only: set host="127.0.0.1" in config.
         config = uvicorn.Config(app, host=host, port=port, log_level="warning")
         server = uvicorn.Server(config)
         logger.info(f"Dashboard starting at http://{host}:{port}")

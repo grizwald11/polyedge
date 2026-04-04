@@ -889,24 +889,24 @@ class TestEdgeCases:
 
 class TestWriteLockConstant:
 
-    def test_write_lock_timeouts_are_60_seconds(self):
-        """Verify lock timeout is 60s by inspecting source (H-4: raised from 30s)."""
+    def test_write_lock_uses_retry_helper(self):
+        """M-4: Verify write operations use _acquire_write_lock helper with 60s timeout."""
         import inspect
         import re
-        # M-10: Lock acquisitions moved to mixin classes; inspect all MRO sources
-        sources = []
-        for cls in Database.__mro__:
-            if cls is object:
-                continue
-            try:
-                sources.append(inspect.getsource(cls))
-            except (OSError, TypeError):
-                pass
-        combined = "\n".join(sources)
-        timeouts = re.findall(r"acquire\(timeout=(\d+)\)", combined)
-        assert len(timeouts) >= 3, f"Expected >=3 lock acquisitions, found {len(timeouts)}"
-        for t in timeouts:
-            assert t == "60", f"Lock timeout should be 60s, found {t}s"
+        from src.storage.db_trades import _acquire_write_lock
+        # Check the helper itself uses 60s default timeout
+        sig = inspect.signature(_acquire_write_lock)
+        assert sig.parameters["timeout"].default == 60
+        # Check that TradesMixin methods use the helper (not raw acquire)
+        from src.storage.db_trades import TradesMixin
+        source = inspect.getsource(TradesMixin)
+        assert "_acquire_write_lock" in source
+        # Verify no raw acquire(timeout=...) calls remain in the mixin
+        raw_acquires = re.findall(r"_write_lock\.acquire\(", source)
+        assert len(raw_acquires) == 0, (
+            f"Found {len(raw_acquires)} raw lock.acquire() calls — "
+            f"should use _acquire_write_lock helper"
+        )
 
 
 # ===================================================================

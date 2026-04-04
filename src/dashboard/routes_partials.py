@@ -36,7 +36,7 @@ def register_partial_routes(app, *, db, position_manager) -> None:
         if position_manager is not None:
             for p in position_manager.get_all_positions():
                 entry = p.avg_entry_price
-                roi = ((p.current_price - entry) / entry * 100) if entry > 0 else 0.0
+                roi = round((p.current_price - entry) / entry * 100, 2) if entry > 0 else 0.0
                 pos_list.append({
                     "market_id": p.market_id, "direction": p.direction.value,
                     "size": int(p.size), "avg_entry": entry,
@@ -56,7 +56,7 @@ def register_partial_routes(app, *, db, position_manager) -> None:
         for p in pos_list:
             pnl_class = "positive" if p["pnl"] >= 0 else "negative"
             roi_class = "positive" if p.get("roi_pct", 0) >= 0 else "negative"
-            cost = p.get("cost_basis", p["avg_entry"] * p["size"])
+            cost = p.get("cost_basis", round(p["avg_entry"] * p["size"], 4))
             rows.append(
                 f'<tr><td>{html.escape(str(p["market_id"])[:30])}</td>'
                 f'<td>{html.escape(str(p["direction"]))}</td>'

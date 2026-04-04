@@ -40,7 +40,7 @@ def _register_portfolio_page(app, *, db, render, position_manager, circuit_break
                     "avg_entry": p.avg_entry_price,
                     "current": p.current_price,
                     "pnl": p.unrealized_pnl,
-                    "roi_pct": ((p.current_price - p.avg_entry_price) / p.avg_entry_price * 100) if p.avg_entry_price > 0 else 0.0,
+                    "roi_pct": round((p.current_price - p.avg_entry_price) / p.avg_entry_price * 100, 2) if p.avg_entry_price > 0 else 0.0,
                     "cost_basis": p.cost_basis,
                     "strategy": p.strategy.value,
                 }
@@ -51,8 +51,8 @@ def _register_portfolio_page(app, *, db, render, position_manager, circuit_break
         else:
             # Fallback: compute from DB when position_manager is unavailable
             positions = db.get_positions_with_pnl()
-            exposure = sum(p["cost_basis"] for p in positions)
-            unrealized_pnl = sum(p["unrealized_pnl"] for p in positions)
+            exposure = round(sum(p["cost_basis"] for p in positions), 4)
+            unrealized_pnl = round(sum(p["unrealized_pnl"] for p in positions), 4)
             for p in positions:
                 p["current"] = p["current_price"]
                 p["pnl"] = p["unrealized_pnl"]

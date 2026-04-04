@@ -16,6 +16,9 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Constants used by fetching logic
+# L-4: Fetching more articles improves context richness but increases latency
+# (each fetch is up to ARTICLE_FETCH_TIMEOUT seconds). Consider increasing to 5
+# for high-stakes markets. Configurable via future settings.news.max_article_fetch.
 MAX_ARTICLE_FETCH = 3  # Fetch full text for top N results
 MAX_ARTICLE_CHARS = 3000  # Max chars to extract per article
 ARTICLE_FETCH_TIMEOUT = 5.0  # Seconds per article fetch

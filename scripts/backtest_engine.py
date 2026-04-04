@@ -1,5 +1,8 @@
 """Strategy replay engine — replays strategies against historical snapshots.
 
+L-1: This is the OFFLINE replay engine (no API calls, uses cached predictions).
+See also src/scripts/backtest.py for the live-API backtester (calls Claude).
+
 Usage:
     python -m scripts.backtest_engine [--db data/markets.db] [--strategy ai_probability]
     python -m scripts.backtest_engine --sweep kelly_fraction=0.25,0.5,0.75
@@ -1113,12 +1116,19 @@ def format_result(result: BacktestResult, bankroll: float = 500.0) -> str:
         lines.append(f"  Calmar Ratio:  {result.calmar_ratio:.2f}")
     if result.uses_lookahead:
         lines.append(
-            "  WARNING: oracle_upper_bound — outcome-derived forecasts used (lookahead bias). "
-            "Apply half degradation factor. Do NOT use for live trading decisions."
+            "  *** WARNING: LOOKAHEAD BIAS DETECTED (oracle_upper_bound) — outcome-derived forecasts used. ***\n"
+            "  Apply half degradation factor. Do NOT use for live trading decisions."
         )
     else:
         lines.append(
             "  NOTE: cached-prediction mode — no lookahead bias from outcome-derived forecasts."
+        )
+    # M-5: Survivorship bias warning
+    if result.unresolved_positions > 0:
+        lines.append(
+            f"  WARNING: Results may exhibit survivorship bias. "
+            f"{result.unresolved_positions} unresolved position(s) are marked-to-last-known-price, "
+            f"which may overstate returns."
         )
     return "\n".join(lines)
 
@@ -1266,6 +1276,17 @@ def main():
     if args.csv and results:
         export_csv(results[0], args.csv)
         print(f"Results exported to {args.csv}")
+
+    # H-4: Check for lookahead bias — exit non-zero for CI enforcement
+    for r in results:
+        if r.uses_lookahead:
+            print(
+                "\n*** H-4 LOOKAHEAD BIAS DETECTED ***\n"
+                "Outcome-derived forecasts were used. Results are oracle_upper_bound.\n"
+                "Use --validate to run exit criteria checks, or re-run with cached_only=True.\n"
+            )
+            if args.validate:
+                sys.exit(1)
 
     if args.validate and results:
         checks = validate_backtest(results[0])

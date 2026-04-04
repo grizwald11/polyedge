@@ -50,6 +50,8 @@ class NewsIngestion:
         max_article_age_minutes: int = 30,
         min_relevance: float = 0.3,
     ):
+        # L-3: These defaults are used when rss_feeds is not passed from config.
+        # Prefer configuring via settings.yaml news.rss_feeds.
         self.rss_feeds = rss_feeds or [
             "https://feeds.reuters.com/reuters/topNews",
             "https://feeds.reuters.com/reuters/businessNews",

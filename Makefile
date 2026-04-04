@@ -42,6 +42,10 @@ stop:
 logs:
 	pm2 logs polyedge
 
+# H-4: Run backtest in validate mode (CI guard against lookahead bias)
+backtest-validate:
+	python -m scripts.backtest_engine --validate
+
 # Check database stats
 stats:
 	python -c "from src.storage.database import Database; db = Database(); print(db.get_stats())"

@@ -1,5 +1,8 @@
 """Backtest Claude against already-resolved Kalshi markets for calibration data.
 
+L-1: This is the LIVE-API backtester (calls Claude on settled markets).
+See also scripts/backtest_engine.py for the offline replay engine (no API calls).
+
 Fetches settled events from Kalshi, runs Claude's assessment pipeline blind
 (without knowing the outcome), then scores predictions against actual results.
 

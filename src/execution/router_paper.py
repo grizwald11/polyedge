@@ -110,7 +110,7 @@ async def paper_fill(router: OrderRouter, order: Order) -> OrderResult:
             fee_cents = kalshi_maker_fee(int(order.size), fill_price_cents)
         else:
             fee_cents = kalshi_taker_fee(int(order.size), fill_price_cents)
-        fee_dollars = fee_cents / 100.0
+        fee_dollars = round(fee_cents / 100.0, 4)
 
     # Create trade record (use fill_price for accurate P&L)
     trade = Trade(

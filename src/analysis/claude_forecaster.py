@@ -377,14 +377,17 @@ class ClaudeForecaster:
 
         async def _make_request():
             client = self._get_client()
+            kwargs: dict = dict(
+                model=model,
+                max_tokens=self.settings.claude.max_tokens,
+                temperature=temperature,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            if self.settings.claude.top_p is not None:
+                kwargs["top_p"] = self.settings.claude.top_p
             return await asyncio.wait_for(
-                client.messages.create(
-                    model=model,
-                    max_tokens=self.settings.claude.max_tokens,
-                    temperature=temperature,
-                    system=SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
-                ),
+                client.messages.create(**kwargs),
                 timeout=timeout,
             )
 
@@ -624,14 +627,17 @@ class ClaudeForecaster:
 
         try:
             client = self._get_client()
+            kwargs: dict = dict(
+                model=model,
+                max_tokens=self.settings.claude.max_tokens,
+                temperature=self.settings.claude.temperature,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": custom_prompt}],
+            )
+            if self.settings.claude.top_p is not None:
+                kwargs["top_p"] = self.settings.claude.top_p
             response = await asyncio.wait_for(
-                client.messages.create(
-                    model=model,
-                    max_tokens=self.settings.claude.max_tokens,
-                    temperature=self.settings.claude.temperature,
-                    system=SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": custom_prompt}],
-                ),
+                client.messages.create(**kwargs),
                 timeout=self.settings.claude.api_timeout_seconds,
             )
 
@@ -704,14 +710,17 @@ class ClaudeForecaster:
         async def _call_at_temp(temp: float) -> ForecastResult:
             client = self._get_client()
             start = time.monotonic()
+            kwargs: dict = dict(
+                model=model,
+                max_tokens=self.settings.claude.max_tokens,
+                temperature=temp,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            if self.settings.claude.top_p is not None:
+                kwargs["top_p"] = self.settings.claude.top_p
             response = await asyncio.wait_for(
-                client.messages.create(
-                    model=model,
-                    max_tokens=self.settings.claude.max_tokens,
-                    temperature=temp,
-                    system=SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
-                ),
+                client.messages.create(**kwargs),
                 timeout=self.settings.claude.api_timeout_seconds,
             )
             latency_ms = int((time.monotonic() - start) * 1000)

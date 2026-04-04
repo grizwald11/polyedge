@@ -14,6 +14,25 @@ from src.core.models import Signal, Trade
 logger = logging.getLogger(__name__)
 
 
+def _acquire_write_lock(lock, caller: str, max_retries: int = 1, timeout: int = 60) -> None:
+    """Acquire write lock with retry. Raises TimeoutError if exhausted.
+
+    M-4: Prevents silent failure when DB write lock is contended.
+    Critical writes (log_trade, save_pending_order) get 1 retry.
+    """
+    for attempt in range(max_retries + 1):
+        if lock.acquire(timeout=timeout):
+            return
+        logger.warning(
+            f"Database write lock timeout ({timeout}s) in {caller} "
+            f"(attempt {attempt + 1}/{max_retries + 1})"
+        )
+    raise TimeoutError(
+        f"Database write lock acquisition timed out in {caller} "
+        f"after {max_retries + 1} attempts"
+    )
+
+
 class TradesMixin:
     """Database mixin for trade, order, signal, and position operations."""
 
@@ -114,9 +133,7 @@ class TradesMixin:
         """Log a completed trade. Ignores duplicates (same order_id + side)."""
         conn = self._get_conn()
         platform = trade.platform.value if hasattr(trade.platform, 'value') else str(trade.platform)
-        if not self._write_lock.acquire(timeout=60):
-            logger.error("Database write lock timeout (60s) in log_trade — concurrent write contention")
-            raise TimeoutError("Database write lock acquisition timed out in log_trade")
+        _acquire_write_lock(self._write_lock, "log_trade", max_retries=1)
         try:
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO trades (order_id, market_id, platform, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
@@ -151,9 +168,7 @@ class TradesMixin:
         On restart, load_pending_orders() rebuilds the dict from this table.
         """
         conn = self._get_conn()
-        if not self._write_lock.acquire(timeout=60):
-            logger.error("Database write lock timeout (60s) in save_pending_order — concurrent write contention")
-            raise TimeoutError("Database write lock acquisition timed out in save_pending_order")
+        _acquire_write_lock(self._write_lock, "save_pending_order", max_retries=1)
         try:
             conn.execute(
                 "INSERT OR REPLACE INTO pending_orders (order_id, cost) VALUES (?, ?)",
@@ -166,9 +181,7 @@ class TradesMixin:
     def delete_pending_order(self, order_id: str) -> None:
         """Remove a pending order record (order filled, cancelled, or expired)."""
         conn = self._get_conn()
-        if not self._write_lock.acquire(timeout=60):
-            logger.error("Database write lock timeout (60s) in delete_pending_order — concurrent write contention")
-            raise TimeoutError("Database write lock acquisition timed out in delete_pending_order")
+        _acquire_write_lock(self._write_lock, "delete_pending_order")
         try:
             conn.execute(
                 "DELETE FROM pending_orders WHERE order_id = ?",
@@ -200,9 +213,7 @@ class TradesMixin:
         """Log the reason a position was exited."""
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
-        if not self._write_lock.acquire(timeout=60):
-            logger.error("Database write lock timeout (60s) in log_exit_reason — concurrent write contention")
-            raise TimeoutError("Database write lock acquisition timed out in log_exit_reason")
+        _acquire_write_lock(self._write_lock, "log_exit_reason")
         try:
             conn.execute("""
                 INSERT INTO position_exits
