@@ -327,3 +327,48 @@ class TestMetrics:
         m = Metrics()
         # Should not raise even if the DB call fails
         m.persist_to_db(mock_db)
+
+    # ── Fill rate tracking ────────────────────────────────────────────────────
+
+    def test_fill_rate_initial_none(self):
+        m = Metrics()
+        assert m.get_fill_rate() is None
+
+    def test_fill_rate_all_filled(self):
+        m = Metrics()
+        m.record_order_submitted()
+        m.record_order_submitted()
+        m.record_order_filled()
+        m.record_order_filled()
+        assert m.get_fill_rate() == 1.0
+
+    def test_fill_rate_partial(self):
+        m = Metrics()
+        for _ in range(4):
+            m.record_order_submitted()
+        m.record_order_filled()
+        m.record_order_filled()
+        m.record_order_filled()
+        m.record_order_rejected()
+        assert m.get_fill_rate() == 0.75
+
+    def test_fill_rate_zero(self):
+        m = Metrics()
+        m.record_order_submitted()
+        m.record_order_rejected()
+        assert m.get_fill_rate() == 0.0
+
+    def test_fill_rate_in_health_status(self):
+        m = Metrics()
+        m.record_order_submitted()
+        m.record_order_filled()
+        status = m.get_health_status()
+        assert status["orders_submitted"] == 1
+        assert status["orders_filled"] == 1
+        assert status["orders_rejected"] == 0
+        assert status["fill_rate"] == 1.0
+
+    def test_fill_rate_none_in_health_status_when_no_orders(self):
+        m = Metrics()
+        status = m.get_health_status()
+        assert status["fill_rate"] is None

@@ -142,3 +142,47 @@ class TestExecutionConfig:
     def test_snapshot_retention_days(self):
         s = Settings()
         assert s.database.snapshot_retention_days == 30
+
+
+class TestValidateRequiredKeys:
+    def test_warns_missing_anthropic_key(self):
+        s = Settings()
+        s.anthropic_api_key = None
+        warnings = s.validate_required_keys()
+        assert any("ANTHROPIC_API_KEY" in w for w in warnings)
+
+    def test_warns_missing_kalshi_credentials(self):
+        s = Settings()
+        s.kalshi_api_key_id = None
+        s.kalshi_private_key_path = None
+        warnings = s.validate_required_keys()
+        assert any("Kalshi API credentials" in w for w in warnings)
+
+    def test_warns_nonexistent_key_path(self, tmp_path):
+        s = Settings()
+        s.kalshi_api_key_id = "test-key"
+        s.kalshi_private_key_path = str(tmp_path / "nonexistent_key.pem")
+        s.anthropic_api_key = "sk-test"
+        warnings = s.validate_required_keys()
+        assert any("does not exist" in w for w in warnings)
+
+    def test_valid_key_path_no_warning(self, tmp_path):
+        key_file = tmp_path / "valid_key.pem"
+        key_file.write_text("fake-key-content")
+        s = Settings()
+        s.kalshi_api_key_id = "test-key"
+        s.kalshi_private_key_path = str(key_file)
+        s.anthropic_api_key = "sk-test"
+        warnings = s.validate_required_keys()
+        assert not any("does not exist" in w for w in warnings)
+        assert not any("not readable" in w for w in warnings)
+
+    def test_no_warnings_when_all_set(self, tmp_path):
+        key_file = tmp_path / "valid_key.pem"
+        key_file.write_text("fake-key-content")
+        s = Settings()
+        s.kalshi_api_key_id = "test-key"
+        s.kalshi_private_key_path = str(key_file)
+        s.anthropic_api_key = "sk-test"
+        warnings = s.validate_required_keys()
+        assert len(warnings) == 0

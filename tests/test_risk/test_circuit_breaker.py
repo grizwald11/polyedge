@@ -258,3 +258,76 @@ class TestPersistence:
         assert state["halted"] == 0
         assert state["consecutive_losing_days"] == 0
         assert state["reduced_sizing"] == 0
+
+
+class TestGetWarnings:
+    """Tests for pre-halt warning system (loss velocity, low balance, drawdown)."""
+
+    def test_no_warnings_when_healthy(self, cb):
+        warnings = cb.get_warnings(bankroll=500.0)
+        assert warnings == []
+
+    def test_loss_velocity_50_pct(self, cb, tmp_db):
+        # Daily limit = 8% of 500 = $40. Log -22 realized → 55% of limit
+        _log_losing_trade(tmp_db, pnl=-22.0)
+        warnings = cb.get_warnings(bankroll=500.0)
+        assert len(warnings) == 1
+        assert warnings[0]["type"] == "loss_velocity"
+        assert warnings[0]["pct_of_limit"] >= 0.50
+
+    def test_loss_velocity_75_pct(self, cb, tmp_db):
+        # Log -32 → 80% of $40 limit
+        _log_losing_trade(tmp_db, pnl=-32.0)
+        warnings = cb.get_warnings(bankroll=500.0)
+        assert len(warnings) == 1
+        assert warnings[0]["type"] == "loss_velocity"
+        assert warnings[0]["pct_of_limit"] >= 0.75
+
+    def test_loss_velocity_includes_unrealized(self, cb, tmp_db):
+        # Realized = -15, unrealized = -15 * 0.75 = -11.25, total = -26.25 → 65.6% of $40
+        _log_losing_trade(tmp_db, pnl=-15.0)
+        warnings = cb.get_warnings(bankroll=500.0, unrealized_pnl=-15.0)
+        assert len(warnings) == 1
+        assert warnings[0]["type"] == "loss_velocity"
+
+    def test_low_balance_warning(self, cb):
+        # Bankroll dropped to $200 (40% of initial $500)
+        warnings = cb.get_warnings(bankroll=200.0)
+        assert any(w["type"] == "low_balance" for w in warnings)
+
+    def test_no_low_balance_warning_when_healthy(self, cb):
+        warnings = cb.get_warnings(bankroll=400.0)
+        assert not any(w["type"] == "low_balance" for w in warnings)
+
+    def test_drawdown_warning(self, cb):
+        # Set high water mark to $600, current equity = $500 + (-60) = $440
+        # Drawdown = (600 - 440) / 600 = 26.7%, limit is 20%, so 26.7/20 = 133% — past halt
+        # Use a drawdown that's >= 50% of limit but below limit: 10-19%
+        cb._high_water_mark = 600.0
+        # equity = 560 → drawdown = 40/600 = 6.7% → not enough
+        # equity = 540 → drawdown = 60/600 = 10% → 50% of 20% limit ✓
+        warnings = cb.get_warnings(bankroll=540.0, unrealized_pnl=0.0)
+        assert any(w["type"] == "drawdown_warning" for w in warnings)
+
+    def test_warnings_deduped_per_session(self, cb, tmp_db):
+        _log_losing_trade(tmp_db, pnl=-22.0)
+        warnings1 = cb.get_warnings(bankroll=500.0)
+        assert len(warnings1) == 1
+        # Second call should return no new warnings
+        warnings2 = cb.get_warnings(bankroll=500.0)
+        assert len(warnings2) == 0
+
+    def test_warnings_cleared_on_reset(self, cb, tmp_db):
+        _log_losing_trade(tmp_db, pnl=-22.0)
+        cb.get_warnings(bankroll=500.0)
+        assert len(cb._warnings_sent) > 0
+        cb.reset()
+        assert len(cb._warnings_sent) == 0
+
+    def test_warnings_cleared_on_daily_reset(self, cb, tmp_db):
+        _log_losing_trade(tmp_db, pnl=-22.0)
+        cb.get_warnings(bankroll=500.0)
+        cb._halted = True
+        cb._halt_reason = "Daily loss limit hit"
+        cb.reset_daily()
+        assert len(cb._warnings_sent) == 0

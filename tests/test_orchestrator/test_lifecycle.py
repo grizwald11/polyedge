@@ -633,7 +633,8 @@ class TestRunTradingLoop:
             shutdown_event.set()
 
         with patch("src.orchestrator.lifecycle.scan_and_trade", side_effect=failing_scan):
-            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=5.0)
+            # Timeout increased to account for exponential backoff (2s + 4s between failures)
+            await asyncio.wait_for(run_trading_loop(**kwargs), timeout=15.0)
 
         assert call_count >= 2
 

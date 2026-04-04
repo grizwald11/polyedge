@@ -43,7 +43,7 @@ class TestSetupLogging:
 
     def test_creates_file_handler(self, tmp_path):
         log_file = str(tmp_path / "test.log")
-        setup_logging("INFO", log_file)
+        setup_logging("INFO", log_file, json_log_file=None)
         root = logging.getLogger()
         handler_types = [type(h).__name__ for h in root.handlers]
         assert "RotatingFileHandler" in handler_types
@@ -54,20 +54,51 @@ class TestSetupLogging:
         root = logging.getLogger()
         root.addHandler(logging.StreamHandler())
         root.addHandler(logging.StreamHandler())
-        old_count = len(root.handlers)
 
-        setup_logging("INFO", log_file)
+        setup_logging("INFO", log_file, json_log_file=None)
 
         # Should have exactly 2 handlers (console + file), not accumulated
         assert len(root.handlers) == 2
 
     def test_suppresses_noisy_loggers(self, tmp_path):
         log_file = str(tmp_path / "test.log")
-        setup_logging("DEBUG", log_file)
+        setup_logging("DEBUG", log_file, json_log_file=None)
 
         assert logging.getLogger("httpx").level == logging.WARNING
         assert logging.getLogger("httpcore").level == logging.WARNING
         assert logging.getLogger("urllib3").level == logging.WARNING
+
+    def test_json_log_file_created(self, tmp_path):
+        log_file = str(tmp_path / "test.log")
+        json_file = str(tmp_path / "test.json.log")
+        setup_logging("INFO", log_file, json_log_file=json_file)
+        root = logging.getLogger()
+        # Should have 3 handlers: console + text file + json file
+        assert len(root.handlers) == 3
+
+    def test_json_log_file_produces_valid_json(self, tmp_path):
+        import json
+        log_file = str(tmp_path / "test.log")
+        json_file = str(tmp_path / "test.json.log")
+        setup_logging("INFO", log_file, json_log_file=json_file)
+        test_logger = logging.getLogger("test.json_format")
+        test_logger.info("Hello structured world")
+        # Flush handlers
+        for h in logging.getLogger().handlers:
+            h.flush()
+        content = Path(json_file).read_text().strip()
+        assert content  # Not empty
+        entry = json.loads(content.split("\n")[-1])
+        assert entry["level"] == "INFO"
+        assert entry["logger"] == "test.json_format"
+        assert "Hello structured world" in entry["message"]
+        assert "timestamp" in entry
+
+    def test_json_log_disabled_with_none(self, tmp_path):
+        log_file = str(tmp_path / "test.log")
+        setup_logging("INFO", log_file, json_log_file=None)
+        root = logging.getLogger()
+        assert len(root.handlers) == 2  # Only console + text file
 
 
 # ──────────────────────────────────────────────

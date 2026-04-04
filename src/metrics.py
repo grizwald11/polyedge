@@ -46,6 +46,10 @@ class Metrics:
         # M-10: Track edges for ALL signals (generated + risk-gated)
         self._all_signal_edges: list[float] = []
         self._gated_signal_edges: list[float] = []
+        # Fill rate tracking: orders submitted vs filled
+        self.orders_submitted: int = 0
+        self.orders_filled: int = 0
+        self.orders_rejected: int = 0
         # L-5: Per-endpoint API latency tracking (bounded deques)
         self._api_latencies: dict[str, deque[float]] = {}
         self._max_latency_entries = 100
@@ -155,6 +159,24 @@ class Metrics:
             self._edge_return_log = self._edge_return_log[-self._max_edge_return_entries:]
         logger.info(json.dumps({"event": "position_closed", **entry}))
 
+    def record_order_submitted(self) -> None:
+        """Record that an order was submitted for execution."""
+        self.orders_submitted += 1
+
+    def record_order_filled(self) -> None:
+        """Record that a submitted order was filled."""
+        self.orders_filled += 1
+
+    def record_order_rejected(self) -> None:
+        """Record that a submitted order was rejected."""
+        self.orders_rejected += 1
+
+    def get_fill_rate(self) -> float | None:
+        """Return fill rate as a fraction (0.0–1.0), or None if no orders submitted."""
+        if self.orders_submitted == 0:
+            return None
+        return self.orders_filled / self.orders_submitted
+
     def record_api_latency(self, endpoint: str, latency_ms: float) -> None:
         """Record an API call latency for a given endpoint (L-5)."""
         if endpoint not in self._api_latencies:
@@ -212,6 +234,10 @@ class Metrics:
                 round(sum(self._gated_signal_edges) / len(self._gated_signal_edges), 4)
                 if self._gated_signal_edges else None
             ),
+            "orders_submitted": self.orders_submitted,
+            "orders_filled": self.orders_filled,
+            "orders_rejected": self.orders_rejected,
+            "fill_rate": round(self.get_fill_rate(), 4) if self.get_fill_rate() is not None else None,
             "seconds_since_last_cycle": (
                 round(seconds_since_last_cycle, 0)
                 if seconds_since_last_cycle is not None

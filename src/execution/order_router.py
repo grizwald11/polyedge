@@ -83,6 +83,7 @@ class OrderRouter:
         self._session_confirm_time: float | None = None  # When gate 3 was confirmed
         self._session_confirm_ttl = self.GATE3_CONFIRMATION_TTL_SECONDS
         self._polymarket_residency_confirmed = False  # Polymarket jurisdiction gate
+        self.metrics = None  # Optional: set by orchestrator for fill rate tracking
         self._restore_pending_orders()
         self._log_gate_status()
 
@@ -207,12 +208,23 @@ class OrderRouter:
                     fee_dollars = kalshi_taker_fee(int(order.size), price_cents) / 100.0
                 order.cost = round(order.price * order.size + fee_dollars, 4)
 
+        if self.metrics is not None:
+            self.metrics.record_order_submitted()
+
         if order.paper or self.settings.trading.mode == "paper":
-            return await self._paper_fill(order)
+            result = await self._paper_fill(order)
         elif order.platform == Platform.POLYMARKET:
-            return await self._poly_live_fill(order)
+            result = await self._poly_live_fill(order)
         else:
-            return await self._live_fill(order)
+            result = await self._live_fill(order)
+
+        if self.metrics is not None:
+            if result.success:
+                self.metrics.record_order_filled()
+            else:
+                self.metrics.record_order_rejected()
+
+        return result
 
     # ------------------------------------------------------------------ #
     # Delegation to platform-specific routers                             #

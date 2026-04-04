@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -966,3 +967,62 @@ class TestDatabaseLifecycle:
         # When WAL not requested, default is usually 'delete' or whatever SQLite uses
         assert mode != "wal"
         db.close()
+
+
+class TestWalCheckpoint:
+
+    def test_checkpoint_returns_int(self, tmp_db: Database):
+        result = tmp_db.wal_checkpoint()
+        assert isinstance(result, int)
+        assert result >= 0
+
+    def test_checkpoint_after_writes(self, tmp_db: Database):
+        tmp_db.upsert_market(_make_market())
+        result = tmp_db.wal_checkpoint()
+        assert result >= 0
+
+
+class TestBackup:
+
+    def test_backup_creates_file(self, tmp_path):
+        db_path = str(tmp_path / "source.db")
+        db = Database(db_path=db_path, wal_mode=True)
+        db.upsert_market(_make_market())
+
+        backup_path = db.backup()
+        assert Path(backup_path).exists()
+        assert backup_path.startswith(db_path)
+        db.close()
+
+    def test_backup_custom_path(self, tmp_path):
+        db_path = str(tmp_path / "source.db")
+        db = Database(db_path=db_path, wal_mode=True)
+        db.upsert_market(_make_market())
+
+        dest = str(tmp_path / "custom_backup.db")
+        result = db.backup(dest_path=dest)
+        assert result == dest
+        assert Path(dest).exists()
+        db.close()
+
+    def test_backup_is_readable(self, tmp_path):
+        db_path = str(tmp_path / "source.db")
+        db = Database(db_path=db_path, wal_mode=True)
+        db.upsert_market(_make_market("BKP-MKT"))
+
+        dest = str(tmp_path / "backup.db")
+        db.backup(dest_path=dest)
+
+        # Open backup and verify data
+        backup_db = Database(db_path=dest, wal_mode=False)
+        row = backup_db.get_market("BKP-MKT")
+        assert row is not None
+        backup_db.close()
+        db.close()
+
+    def test_backup_memory_db_raises(self, tmp_db: Database):
+        # tmp_db might not be :memory:, so create one explicitly
+        import sqlite3
+        db = Database(db_path=":memory:", wal_mode=False)
+        with pytest.raises(ValueError, match="in-memory"):
+            db.backup()

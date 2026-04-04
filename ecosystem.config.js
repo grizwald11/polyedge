@@ -54,6 +54,11 @@ module.exports = {
       out_file: "~/.pm2/logs/polyedge-out.log",
       error_file: "~/.pm2/logs/polyedge-error.log",
       log_date_format: "YYYY-MM-DD HH:mm:ss",
+      // Log rotation requires pm2-logrotate module:
+      //   pm2 install pm2-logrotate
+      //   pm2 set pm2-logrotate:max_size 50M
+      //   pm2 set pm2-logrotate:retain 5
+      //   pm2 set pm2-logrotate:compress true
       autorestart: true,
       max_restarts: 15,
       min_uptime: "10s",

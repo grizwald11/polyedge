@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 from src.core.models import (
@@ -247,6 +248,7 @@ async def _generate_all_signals(
 async def _periodic_calibration_and_edge(
     calibration_analyzer, kelly_sizer, circuit_breaker,
     scanner, alert_manager, kalshi, logger,
+    settings=None,
 ) -> None:
     """Run calibration report, edge tracker update, and key rotation check.
 
@@ -292,6 +294,28 @@ async def _periodic_calibration_and_edge(
                     f"Calibration improving: Brier improved by {trend_delta:+.3f} "
                     f"(now {report.overall_brier:.3f})"
                 )
+
+            # Absolute Brier score threshold alert
+            brier_threshold = 0.30
+            if settings is not None:
+                brier_threshold = settings.alerts.brier_alert_threshold
+            if report.overall_brier > brier_threshold and report.total_resolved >= 10:
+                logger.critical(
+                    f"STRATEGY DEGRADATION: Brier score {report.overall_brier:.3f} "
+                    f"exceeds threshold {brier_threshold:.2f} "
+                    f"({report.total_resolved} resolved predictions)"
+                )
+                await alert_manager.send_error_alert(
+                    error=(
+                        f"Strategy degradation: Brier score {report.overall_brier:.3f} "
+                        f"exceeds {brier_threshold:.2f} threshold"
+                    ),
+                    context=(
+                        f"Based on {report.total_resolved} resolved predictions. "
+                        f"Win rate: {report.overall_win_rate:.1%}. "
+                        f"Consider pausing AI strategy and reviewing prompt templates."
+                    ),
+                )
         else:
             logger.info("Calibration: no resolved predictions yet")
     except Exception as e:
@@ -319,6 +343,13 @@ async def _periodic_calibration_and_edge(
     try:
         if not kalshi.check_key_freshness():
             logger.warning("Kalshi private key was rotated — reloaded automatically")
+            try:
+                await alert_manager.send_error_alert(
+                    error="Kalshi API key rotated (periodic check)",
+                    context="Key file modified on disk. Reloaded for next request.",
+                )
+            except Exception as e:
+                logger.debug(f"Key rotation alert failed: {e}")
     except Exception as e:
         logger.debug(f"Key freshness check failed: {e}")
 
@@ -418,7 +449,16 @@ async def scan_and_trade(
 
     # H-7: Auto-check Kalshi key freshness every cycle
     try:
-        kalshi.check_key_freshness()
+        key_fresh = kalshi.check_key_freshness()
+        if not key_fresh:
+            logger.warning("Kalshi private key was rotated — reloaded automatically")
+            try:
+                await alert_manager.send_error_alert(
+                    error="Kalshi API key was rotated on disk and reloaded",
+                    context="Key file was modified since last load. New key will be used for next request.",
+                )
+            except Exception as e:
+                logger.debug(f"Key rotation alert failed: {e}")
     except Exception as e:
         logger.debug(f"Key freshness check: {e}")
 
@@ -446,6 +486,30 @@ async def scan_and_trade(
             except Exception as e:
                 logger.error(f"Failed to send circuit breaker alert: {e}", exc_info=True)
         return
+
+    # 3a. Pre-halt warnings (loss velocity, low balance, drawdown approaching limit)
+    try:
+        warnings = circuit_breaker.get_warnings(bankroll, unrealized_pnl=unrealized_pnl)
+        for w in warnings:
+            logger.warning(f"Risk warning: {w['message']}")
+            if w["type"] == "loss_velocity":
+                await alert_manager.send_loss_velocity_alert(
+                    daily_pnl=w["daily_pnl"],
+                    daily_limit=w["daily_limit"],
+                    pct_of_limit=w["pct_of_limit"],
+                )
+            elif w["type"] == "low_balance":
+                await alert_manager.send_low_balance_alert(
+                    bankroll=w["bankroll"],
+                    initial_bankroll=w["initial_bankroll"],
+                )
+            elif w["type"] == "drawdown_warning":
+                await alert_manager.send_error_alert(
+                    error=w["message"],
+                    context="Drawdown approaching circuit breaker threshold",
+                )
+    except Exception as e:
+        logger.debug(f"Warning check failed: {e}")
 
     # 3b. Regime detection — adaptive thresholds based on market volatility
     try:
@@ -579,8 +643,44 @@ async def scan_and_trade(
         await _periodic_calibration_and_edge(
             calibration_analyzer, kelly_sizer, circuit_breaker,
             scanner, alert_manager, kalshi, logger,
+            settings=settings,
         )
+
+    # WAL checkpoint every 12 cycles (~1 hour) to prevent unbounded WAL growth
+    if cycle_count > 0 and cycle_count % 12 == 0:
+        try:
+            scanner.db.wal_checkpoint()
+        except Exception as e:
+            logger.debug(f"WAL checkpoint skipped: {e}")
+
+    # Automated backup every 288 cycles (~24 hours)
+    if cycle_count > 0 and cycle_count % 288 == 0:
+        try:
+            backup_path = scanner.db.backup()
+            logger.info(f"Automated daily backup: {backup_path}")
+            # Clean up backups older than 7 days
+            _cleanup_old_backups(scanner.db.db_path, max_age_days=7, logger=logger)
+        except Exception as e:
+            logger.error(f"Automated backup failed: {e}")
 
     # Check for closed/settled position markets and sync with Kalshi
     await _check_closed_markets(markets, position_manager, alert_manager, logger)
     await _sync_positions_live(settings, position_manager, kalshi, circuit_breaker, logger)
+
+
+def _cleanup_old_backups(db_path: str, max_age_days: int = 7, logger=None) -> int:
+    """Remove backup files older than max_age_days. Returns count deleted."""
+    import glob
+    backup_pattern = f"{db_path}.bak-*"
+    cutoff = time.time() - (max_age_days * 86400)
+    deleted = 0
+    for path in glob.glob(backup_pattern):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                deleted += 1
+        except OSError:
+            pass
+    if deleted and logger:
+        logger.info(f"Cleaned up {deleted} old backup(s)")
+    return deleted

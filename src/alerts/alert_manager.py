@@ -69,6 +69,27 @@ class AlertManager:
             body += f"\nContext: {context}"
         await self._dispatch(title, body)
 
+    async def send_low_balance_alert(self, bankroll: float, initial_bankroll: float):
+        """Send alert when bankroll drops below warning threshold."""
+        pct = bankroll / initial_bankroll * 100 if initial_bankroll > 0 else 0
+        title = "LOW BALANCE WARNING"
+        body = (
+            f"Bankroll: ${bankroll:.2f} ({pct:.0f}% of initial ${initial_bankroll:.2f})\n"
+            f"Consider reviewing open positions and risk parameters."
+        )
+        await self._dispatch(title, body)
+
+    async def send_loss_velocity_alert(self, daily_pnl: float, daily_limit: float, pct_of_limit: float):
+        """Send alert when daily losses approach the circuit breaker threshold."""
+        title = "LOSS VELOCITY WARNING"
+        body = (
+            f"Daily P&L: ${daily_pnl:.2f}\n"
+            f"Daily loss limit: -${daily_limit:.2f}\n"
+            f"Currently at {pct_of_limit:.0%} of halt threshold.\n"
+            f"Trading will halt if losses reach -${daily_limit:.2f}."
+        )
+        await self._dispatch(title, body)
+
     async def send_daily_summary(self, summary: str):
         """Send the daily P&L report."""
         title = "PolyEdge Daily Report"

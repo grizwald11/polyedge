@@ -33,6 +33,9 @@ class CircuitBreaker:
         self._reduced_sizing = False
         # H-3: Peak-to-trough drawdown tracking
         self._high_water_mark: float = settings.trading.bankroll
+        # Warning dedup: track which warnings have been sent this session
+        # to avoid spamming alerts every cycle. Reset on daily reset or manual reset.
+        self._warnings_sent: set[str] = set()
         self._load_state()
 
     @property
@@ -187,6 +190,76 @@ class CircuitBreaker:
 
         return True
 
+    def get_warnings(self, bankroll: float, unrealized_pnl: float = 0.0) -> list[dict]:
+        """Return pre-halt warnings without triggering halts.
+
+        Each warning is a dict with keys: type, message, pct_of_limit.
+        Warnings are deduped per session — each warning fires at most once
+        until reset_daily() or reset() clears the dedup set.
+
+        Warning thresholds:
+        - loss_velocity_50: daily losses >= 50% of halt threshold
+        - loss_velocity_75: daily losses >= 75% of halt threshold
+        - low_balance: bankroll <= 50% of initial bankroll
+        - drawdown_warning: drawdown >= 50% of max drawdown limit
+        """
+        warnings: list[dict] = []
+        initial_bankroll = self.settings.trading.bankroll
+
+        # Loss velocity warnings
+        daily_pnl = self.db.get_daily_pnl()
+        daily_pnl += unrealized_pnl * 0.75
+        daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
+
+        if daily_limit > 0 and daily_pnl < 0:
+            pct_of_limit = abs(daily_pnl) / daily_limit
+            if pct_of_limit >= 0.75 and "loss_velocity_75" not in self._warnings_sent:
+                self._warnings_sent.add("loss_velocity_75")
+                warnings.append({
+                    "type": "loss_velocity",
+                    "message": f"Daily losses at {pct_of_limit:.0%} of halt threshold",
+                    "daily_pnl": daily_pnl,
+                    "daily_limit": daily_limit,
+                    "pct_of_limit": pct_of_limit,
+                })
+            elif pct_of_limit >= 0.50 and "loss_velocity_50" not in self._warnings_sent:
+                self._warnings_sent.add("loss_velocity_50")
+                warnings.append({
+                    "type": "loss_velocity",
+                    "message": f"Daily losses at {pct_of_limit:.0%} of halt threshold",
+                    "daily_pnl": daily_pnl,
+                    "daily_limit": daily_limit,
+                    "pct_of_limit": pct_of_limit,
+                })
+
+        # Low balance warning
+        if initial_bankroll > 0 and bankroll <= initial_bankroll * 0.50:
+            if "low_balance" not in self._warnings_sent:
+                self._warnings_sent.add("low_balance")
+                warnings.append({
+                    "type": "low_balance",
+                    "message": f"Bankroll ${bankroll:.2f} is below 50% of initial ${initial_bankroll:.2f}",
+                    "bankroll": bankroll,
+                    "initial_bankroll": initial_bankroll,
+                })
+
+        # Drawdown warning (50% of max drawdown limit)
+        equity = bankroll + unrealized_pnl
+        if self._high_water_mark > 0:
+            drawdown = (self._high_water_mark - equity) / self._high_water_mark
+            max_dd = self.settings.trading.max_drawdown_pct
+            if drawdown >= max_dd * 0.50 and "drawdown_warning" not in self._warnings_sent:
+                self._warnings_sent.add("drawdown_warning")
+                warnings.append({
+                    "type": "drawdown_warning",
+                    "message": (
+                        f"Drawdown {drawdown:.1%} is approaching limit {max_dd:.0%} "
+                        f"(peak ${self._high_water_mark:.2f})"
+                    ),
+                })
+
+        return warnings
+
     def is_halted(self) -> bool:
         """Check if trading is currently halted."""
         return self._halted
@@ -213,6 +286,7 @@ class CircuitBreaker:
         self._halt_time = None
         self._consecutive_losing_days = 0
         self._reduced_sizing = False
+        self._warnings_sent.clear()
         if bankroll is not None:
             self._high_water_mark = bankroll
         self._persist_state()
@@ -224,6 +298,7 @@ class CircuitBreaker:
             self._halted = False
             self._halt_reason = None
             self._halt_time = None
+            self._warnings_sent.clear()
             self._persist_state()
             logger.info("Circuit breaker: daily halt cleared for new day")
 

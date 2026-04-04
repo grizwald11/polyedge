@@ -267,6 +267,7 @@ class AlertsConfig(BaseModel):
     imessage_endpoint: Optional[str] = None
     alert_on_trade: bool = True
     alert_on_circuit_breaker: bool = True
+    brier_alert_threshold: float = 0.30  # Alert when Brier score exceeds this
     daily_report_time: str = "21:00"
     dashboard_port: int = 8080
 
@@ -330,7 +331,10 @@ class Settings(BaseModel):
     live_enabled: bool = False
 
     def validate_required_keys(self) -> list[str]:
-        """Check for missing required API keys at startup. Returns list of warnings."""
+        """Check for missing required API keys and credential file paths at startup.
+
+        Returns list of warnings for non-fatal issues.
+        """
         import logging
         _logger = logging.getLogger(__name__)
         warnings = []
@@ -340,6 +344,19 @@ class Settings(BaseModel):
             warnings.append("Kalshi API credentials not set — Kalshi trading disabled")
         if self.polymarket.enabled and not self.polymarket_private_key:
             warnings.append("Polymarket enabled but POLYMARKET_PRIVATE_KEY not set — PM trading will fail")
+
+        # Validate credential file paths are readable
+        if self.kalshi_private_key_path:
+            key_path = Path(self.kalshi_private_key_path)
+            if not key_path.exists():
+                warnings.append(
+                    f"KALSHI_PRIVATE_KEY_PATH does not exist: {self.kalshi_private_key_path}"
+                )
+            elif not os.access(str(key_path), os.R_OK):
+                warnings.append(
+                    f"KALSHI_PRIVATE_KEY_PATH is not readable: {self.kalshi_private_key_path}"
+                )
+
         for w in warnings:
             _logger.warning(w)
         return warnings

@@ -69,6 +69,8 @@ async def run_trading_loop(
     cycle_count = 0
     last_trading_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     _last_report_date: str = ""
+    _consecutive_failures: int = 0
+    _max_backoff_seconds: int = 300  # Cap at 5 minutes
 
     while not (shutdown_event and shutdown_event.is_set()):
         try:
@@ -139,6 +141,7 @@ async def run_trading_loop(
                 f"{stats['total_trades']} trades, "
                 f"P&L: ${stats['total_pnl']:.2f}"
             )
+            _consecutive_failures = 0  # Reset on successful cycle
         except KeyboardInterrupt:
             logger.info("Shutting down...")
             break
@@ -161,8 +164,30 @@ async def run_trading_loop(
                         "Positions may be desynced. Triggering circuit breaker."
                     )
                     circuit_breaker.trigger_halt("Post-timeout position sync failed")
+            _consecutive_failures += 1
         except Exception as e:
             logger.error(f"Trade cycle failed: {e}", exc_info=True)
+            _consecutive_failures += 1
+
+        # Exponential backoff on consecutive failures to avoid hammering failing APIs
+        if _consecutive_failures > 0:
+            backoff_seconds = min(
+                2 ** _consecutive_failures,  # 2, 4, 8, 16, 32, 64, 128, 256, 300...
+                _max_backoff_seconds,
+            )
+            logger.warning(
+                f"Consecutive failures: {_consecutive_failures} — "
+                f"backing off {backoff_seconds}s before next cycle"
+            )
+            try:
+                await asyncio.wait_for(
+                    shutdown_event.wait() if shutdown_event else asyncio.sleep(backoff_seconds),
+                    timeout=backoff_seconds,
+                )
+                if shutdown_event and shutdown_event.is_set():
+                    break
+            except asyncio.TimeoutError:
+                pass
 
         if shutdown_event and shutdown_event.is_set():
             logger.info("Shutdown requested — exiting trading loop cleanly")
@@ -491,6 +516,8 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
     c.metrics = Metrics()
     # L-5: Wire metrics into KalshiClient for API latency tracking
     c.kalshi._metrics = c.metrics
+    # Wire metrics into OrderRouter for fill rate tracking
+    c.order_router.metrics = c.metrics
 
 
 async def _setup_background_tasks(settings, c: _Components, logger) -> None:

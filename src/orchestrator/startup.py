@@ -2,15 +2,46 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
-def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log") -> None:
-    """Configure structured logging to both console and file."""
+class _JsonFormatter(logging.Formatter):
+    """Structured JSON log formatter for machine-parseable log files.
+
+    Each log line is a single JSON object with fields:
+    timestamp, level, logger, message, and optional exc_info.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[1] is not None:
+            entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(entry, default=str)
+
+
+def setup_logging(
+    level: str = "INFO",
+    log_file: str = "data/logs/polyedge.log",
+    json_log_file: str | None = "data/logs/polyedge.json.log",
+) -> None:
+    """Configure logging to console (human-readable) and file (optionally JSON).
+
+    Args:
+        level: Log level (DEBUG, INFO, WARNING, etc.)
+        log_file: Path for the human-readable rotating log file.
+        json_log_file: Path for the structured JSON log file. Set to None to disable.
+    """
     Path(log_file).parent.mkdir(parents=True, exist_ok=True)
 
     log_format = "%(asctime)s | %(levelname)-7s | %(name)-25s | %(message)s"
@@ -31,8 +62,20 @@ def setup_logging(level: str = "INFO", log_file: str = "data/logs/polyedge.log")
     file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
     root.addHandler(file_handler)
 
+    # Structured JSON log file for machine parsing (monitoring, log aggregation)
+    if json_log_file:
+        Path(json_log_file).parent.mkdir(parents=True, exist_ok=True)
+        json_handler = logging.handlers.RotatingFileHandler(
+            json_log_file, maxBytes=10 * 1024 * 1024, backupCount=5
+        )
+        json_handler.setFormatter(_JsonFormatter())
+        root.addHandler(json_handler)
+        try:
+            os.chmod(json_log_file, 0o600)
+        except OSError:
+            pass
+
     # L-5 FIX: Enforce restrictive permissions on log file
-    import os
     try:
         os.chmod(log_file, 0o600)
     except OSError:

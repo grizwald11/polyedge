@@ -365,6 +365,61 @@ class Database(
                 logger.debug(f"Error closing database connection: {e}")
             self._conn = None
 
+    def wal_checkpoint(self) -> int:
+        """Run WAL checkpoint to merge WAL frames back into the main database.
+
+        Returns the number of WAL frames checkpointed, or -1 on error.
+        Should be called periodically (e.g. every hour) to prevent unbounded
+        WAL growth on long-running processes.
+        """
+        conn = self._get_conn()
+        try:
+            result = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            # result: (busy, log_frames, checkpointed_frames)
+            checkpointed = result[2] if result else 0
+            if checkpointed > 0:
+                logger.info(f"WAL checkpoint: {checkpointed} frames merged")
+            return checkpointed
+        except sqlite3.Error as e:
+            logger.warning(f"WAL checkpoint failed: {e}")
+            return -1
+
+    def backup(self, dest_path: str | None = None) -> str:
+        """Create a safe backup using SQLite's online backup API.
+
+        Args:
+            dest_path: Destination file path. Defaults to {db_path}.bak-{timestamp}.
+
+        Returns:
+            The path of the created backup file.
+        """
+        if self.db_path == ":memory:":
+            raise ValueError("Cannot backup in-memory database")
+
+        if dest_path is None:
+            from datetime import datetime, timezone
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            dest_path = f"{self.db_path}.bak-{ts}"
+
+        Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+
+        source_conn = self._get_conn()
+        dest_conn = sqlite3.connect(dest_path)
+        try:
+            source_conn.backup(dest_conn)
+            logger.info(f"Database backed up to {dest_path}")
+        finally:
+            dest_conn.close()
+
+        # Restrict backup file permissions
+        try:
+            import os
+            os.chmod(dest_path, 0o600)
+        except OSError:
+            pass
+
+        return dest_path
+
     def _init_db(self):
         """Create tables if they don't exist."""
         conn = self._get_conn()
