@@ -166,6 +166,10 @@ class ClaudeConfig(BaseModel):
     reassessment_price_move: float = 0.03  # Re-assess if relative price move exceeds this (3%)
     daily_token_budget: int = 1_000_000  # Soft daily token budget warning threshold
     max_concurrent_assessments: int = 5  # Max parallel Claude API calls per scan cycle
+    model_pricing: dict[str, list[float]] = Field(
+        default_factory=dict,
+        description="Per-model cost overrides: {model_id: [input_cost_per_M, output_cost_per_M]}",
+    )
 
     @field_validator("temperature")
     @classmethod
@@ -294,7 +298,6 @@ class LoggingConfig(BaseModel):
     @field_validator("level")
     @classmethod
     def level_valid(cls, v: str) -> str:
-        import logging
         if v.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
             raise ValueError(f"Invalid logging level: {v}")
         return v.upper()

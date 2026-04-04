@@ -13,8 +13,6 @@ from typing import Optional
 from src.core.models import (
     Direction,
     Market,
-    Order,
-    OrderStatus,
     Position,
     Side,
     StrategyName,
@@ -70,7 +68,7 @@ MIN_HOLD_BEFORE_EDGE_GONE = 86400  # 24 hours in seconds
 if __name__ != "__main__":
     from typing import TYPE_CHECKING
     if TYPE_CHECKING:
-        from src.core.kalshi_client import KalshiClient
+        pass
 
 logger = logging.getLogger(__name__)
 

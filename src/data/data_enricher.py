@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 from src.analysis.market_classifier import classify_market
 from src.analysis.news_researcher import NewsResearcher

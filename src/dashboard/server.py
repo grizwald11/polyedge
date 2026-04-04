@@ -48,6 +48,7 @@ def create_app(
     calibration_analyzer=None,
     circuit_breaker=None,
     bankroll: float = 500.0,
+    dashboard_port: int = 8080,
 ) -> Optional[object]:
     """Create and configure the FastAPI dashboard application.
 
@@ -74,7 +75,7 @@ def create_app(
     if cors_origins_env:
         cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
     else:
-        cors_origins = ["http://localhost:8080", "http://127.0.0.1:8080"]
+        cors_origins = [f"http://localhost:{dashboard_port}", f"http://127.0.0.1:{dashboard_port}"]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -191,6 +192,7 @@ async def start_dashboard(
         calibration_analyzer=calibration_analyzer,
         circuit_breaker=circuit_breaker,
         bankroll=bankroll,
+        dashboard_port=port,
     )
     if app is None:
         logger.info("Dashboard not available (install fastapi + uvicorn)")

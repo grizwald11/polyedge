@@ -15,7 +15,6 @@ import argparse
 import asyncio
 import logging
 import sys
-import time
 from typing import Any, Optional
 
 from src.analysis.calibration_analyzer import CalibrationAnalyzer

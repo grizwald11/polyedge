@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from src.core.models import MarketCategory, StrategyName
 from src.execution.position_manager import PositionManager
 from src.storage.database import Database
 

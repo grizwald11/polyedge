@@ -18,6 +18,7 @@ from src.core.models import (
     Platform,
     Trade,
 )
+from src.core.retry_helper import retry_with_backoff
 
 if TYPE_CHECKING:
     from src.core.models import Order
@@ -89,28 +90,20 @@ async def poly_live_fill(router: OrderRouter, order: Order) -> OrderResult:
         poly_side = order.side.value  # "BUY" or "SELL"
         poly_order_type = "GTC" if order.order_type == OrderType.GTC else "FOK"
 
-        # Retry up to 2 attempts on transient API failures (network errors, 5xx)
-        result = None
-        last_error: Exception | None = None
-        for _poly_attempt in range(2):
-            try:
-                result = await router.polymarket.create_and_post_order(
-                    token_id=order.token_id,
-                    side=poly_side,
-                    price=order.price,
-                    size=order.size,
-                    order_type=poly_order_type,
-                )
-                break  # Success -- exit retry loop
-            except Exception as _poly_err:
-                last_error = _poly_err
-                if _poly_attempt == 0:
-                    logger.warning(
-                        f"Polymarket API call failed (attempt 1/2): {_poly_err} -- retrying in 1s"
-                    )
-                    await asyncio.sleep(1.0)
-                else:
-                    raise  # Re-raise on second failure to hit outer except
+        # Retry with backoff on transient API failures (network errors, 5xx)
+        result = await retry_with_backoff(
+            router.polymarket.create_and_post_order,
+            token_id=order.token_id,
+            side=poly_side,
+            price=order.price,
+            size=order.size,
+            order_type=poly_order_type,
+            max_retries=1,
+            base_delay=1.0,
+            on_retry=lambda attempt, err: logger.warning(
+                f"Polymarket API call failed (attempt {attempt + 1}/2): {err} -- retrying"
+            ),
+        )
 
         now = datetime.now(timezone.utc)
 

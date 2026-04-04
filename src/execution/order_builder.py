@@ -24,11 +24,9 @@ from src.core.models import (
     Platform,
     Side,
     Signal,
-    StrategyName,
     dollars_to_cents,
     kalshi_maker_fee,
     kalshi_taker_fee,
-    polymarket_fee,
 )
 
 logger = logging.getLogger(__name__)

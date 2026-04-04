@@ -23,7 +23,6 @@ from src.analysis.forecast_parser import (
     extract_text as _extract_text,
     parse_response as _parse_response,
 )
-from src.analysis.market_classifier import classify_market
 from src.analysis.news_researcher import NewsResearcher
 from src.analysis.prompt_ab_testing import PromptVariantManager
 from src.analysis.prompt_builder import (
@@ -67,8 +66,10 @@ class ClaudeForecaster:
             "claude-opus-4-6": (15.0, 60.0),
         }
         # Override from settings if configured
-        if hasattr(settings.claude, 'model_pricing') and settings.claude.model_pricing:
-            self._cost_per_million.update(settings.claude.model_pricing)
+        if settings.claude.model_pricing:
+            for model, costs in settings.claude.model_pricing.items():
+                if len(costs) == 2:
+                    self._cost_per_million[model] = (costs[0], costs[1])
         # Prompt A/B testing: Thompson sampling for prompt variant selection
         ab_enabled = getattr(settings.claude, 'ab_testing_enabled', True)
         self.variant_manager = PromptVariantManager(enabled=ab_enabled)
@@ -78,6 +79,11 @@ class ClaudeForecaster:
         # Circuit breaker: disable API calls after repeated consecutive failures
         self._consecutive_failures: int = 0
         self._circuit_open_until: float = 0.0  # monotonic time; 0 = circuit closed
+
+    def is_circuit_open(self) -> bool:
+        """Check if the Claude API circuit breaker is currently open."""
+        import time as _time
+        return self._circuit_open_until > _time.monotonic()
 
     async def close(self) -> None:
         """Close the underlying Anthropic client, releasing connections."""

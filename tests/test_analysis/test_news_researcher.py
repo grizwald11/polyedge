@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.analysis.news_researcher import (
-    NewsResearcher,
-    NewsResult,
+from src.analysis.news_fetcher import (
     _extract_source,
     _extract_text_from_html,
     _truncate_at_sentence,
+)
+from src.analysis.news_researcher import (
+    NewsResearcher,
+    NewsResult,
 )
 
 
@@ -610,7 +612,7 @@ class TestFetchArticleText:
     @pytest.mark.asyncio
     async def test_includes_lede_sentences(self):
         """Extracted text should include the first 2 sentences (lede), not skip them."""
-        from src.analysis.news_researcher import MAX_ARTICLE_CHARS
+        from src.analysis.news_fetcher import MAX_ARTICLE_CHARS
         researcher = NewsResearcher()
 
         # Craft HTML with clearly identifiable first and later sentences
@@ -641,7 +643,7 @@ class TestFetchArticleText:
     @pytest.mark.asyncio
     async def test_respects_max_article_chars(self):
         """Extracted text must not exceed MAX_ARTICLE_CHARS (3000)."""
-        from src.analysis.news_researcher import MAX_ARTICLE_CHARS
+        from src.analysis.news_fetcher import MAX_ARTICLE_CHARS
         researcher = NewsResearcher()
 
         # Generate a very long article

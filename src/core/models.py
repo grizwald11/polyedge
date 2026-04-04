@@ -11,7 +11,6 @@ dollars (0.0-1.0) and need no conversion.
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional

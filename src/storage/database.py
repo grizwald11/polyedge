@@ -25,18 +25,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from src.core.models import (
-    CalibrationRecord,
-    Market,
-    MarketSnapshot,
-    Order,
-    Signal,
-    Trade,
-)
 
 # M-10: Import domain mixins
 from src.storage.db_calibration import CalibrationMixin
@@ -343,7 +334,6 @@ class Database(
         if self._conn is not None:
             return self._conn
         # H-16: Ensure database file has restrictive permissions (owner-only)
-        import os
         db_file = Path(self.db_path)
         if db_file.exists():
             current_mode = db_file.stat().st_mode & 0o777

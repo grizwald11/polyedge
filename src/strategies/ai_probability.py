@@ -75,6 +75,79 @@ class AIProbabilityStrategy:
         self._category_base_rates: dict[str, dict] = {}
         self._category_brier_scores: dict[str, float] = {}
 
+    def _fallback_from_cached_predictions(
+        self, markets: list[Market], min_edge: float,
+    ) -> list[Signal]:
+        """Generate signals from recent unresolved predictions when Claude is down.
+
+        Looks up predictions from the calibration_records table that:
+        - Are unresolved (no actual_outcome yet)
+        - Were made recently (within reassessment_interval_hours * 3)
+        - Still show edge vs the current market price
+
+        This keeps some capital working during brief Claude API outages
+        instead of going completely idle.
+        """
+        if not self.db:
+            return []
+
+        signals: list[Signal] = []
+        market_by_ticker = {m.ticker: m for m in markets}
+        reassess_hours = self.settings.claude.reassessment_interval_hours
+
+        try:
+            recent_predictions = self.db.get_unresolved_predictions()
+        except Exception as e:
+            logger.error(f"Fallback prediction lookup failed: {e}")
+            return []
+
+        for pred in recent_predictions:
+            market_id = pred.get("market_id")
+            market = market_by_ticker.get(market_id)
+            if market is None:
+                continue
+
+            predicted_prob = pred.get("predicted_probability", 0)
+            if predicted_prob <= 0 or predicted_prob >= 1:
+                continue
+
+            # Check staleness — skip predictions older than 3x reassessment interval
+            predicted_at = pred.get("predicted_at", "")
+            if predicted_at:
+                from datetime import datetime, timedelta, timezone
+                try:
+                    pred_time = datetime.fromisoformat(predicted_at)
+                    max_age = timedelta(hours=reassess_hours * 3)
+                    if datetime.now(timezone.utc) - pred_time > max_age:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
+            # Compute edge against current market price
+            edge = predicted_prob - market.yes_price
+            if abs(edge) < min_edge:
+                continue
+
+            direction = Direction.BUY_YES if edge > 0 else Direction.BUY_NO
+            signals.append(Signal(
+                strategy=StrategyName.AI_PROBABILITY,
+                market_id=market_id,
+                market_question=market.question,
+                direction=direction,
+                edge=abs(edge),
+                probability_estimate=predicted_prob,
+                market_price=market.yes_price,
+                confidence=0.60,  # Lower confidence for cached predictions
+                reasoning=f"Fallback: cached prediction from {predicted_at[:16]} (Claude API down)",
+            ))
+
+        if signals:
+            logger.info(
+                f"Claude fallback: generated {len(signals)} signals from "
+                f"{len(recent_predictions)} cached predictions"
+            )
+        return signals
+
     def set_regime_edge_multiplier(self, multiplier: float) -> None:
         """Set the regime-based edge multiplier.
 
@@ -206,6 +279,15 @@ class AIProbabilityStrategy:
         signals = []
         max_assessments = self.settings.claude.max_assessments_per_cycle
         min_edge = self.settings.trading.min_edge_ai * self._regime_edge_multiplier
+
+        # Graceful degradation: if Claude API circuit breaker is open,
+        # fall back to recent unresolved predictions from the DB that
+        # still show edge vs current market prices.
+        if self.forecaster.is_circuit_open():
+            logger.warning(
+                "Claude API circuit breaker open — using cached prediction fallback"
+            )
+            return self._fallback_from_cached_predictions(markets, min_edge)
 
         cross_check_enabled = self.settings.claude.cross_check_enabled
         cross_check_top_n = self.settings.claude.cross_check_top_n

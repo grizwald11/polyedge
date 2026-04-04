@@ -6,7 +6,7 @@ Routes alerts to registered backends (iMessage, log-only) with error isolation.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Protocol
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 

@@ -244,6 +244,14 @@ class TestDashboardAPI:
         resp = full_client.get("/api/health")
         assert resp.status_code == 200
 
+    def test_api_metrics(self, full_client):
+        resp = full_client.get("/api/metrics")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Should have strategy_conversion and edge_decay even with no data
+        assert "strategy_conversion" in data
+        assert "edge_decay" in data
+
 
 class TestHTMLRoutes:
     def test_index(self, full_client):

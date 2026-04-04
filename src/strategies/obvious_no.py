@@ -7,7 +7,6 @@ Buying NO at 95-99 cents gives 1-5% return at resolution.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 
 from src.config import Settings
 from src.core.models import Direction, Market, MarketCategory, Signal, StrategyName

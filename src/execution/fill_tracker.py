@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,13 +18,10 @@ from src.core.models import (
     OrderStatus,
     OrderType,
     Platform,
-    Side,
-    StrategyName,
     Trade,
     dollars_to_cents,
     kalshi_maker_fee,
     kalshi_taker_fee,
-    polymarket_fee,
 )
 from src.storage.database import Database
 

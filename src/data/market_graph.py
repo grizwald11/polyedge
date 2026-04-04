@@ -7,7 +7,6 @@ Falls back to keyword-based matching if ChromaDB is not installed.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from src.core.models import Market
 

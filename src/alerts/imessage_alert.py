@@ -6,7 +6,6 @@ Falls back to logging if the iMessage endpoint is unreachable.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import httpx
 

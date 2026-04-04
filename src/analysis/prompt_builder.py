@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 from src.analysis.market_classifier import classify_market
 from src.analysis.news_researcher import NewsResearcher

@@ -30,11 +30,14 @@
 ## 1. PROJECT OVERVIEW
 
 ### What This Software Does
-PolyEdge is a multi-strategy AI-driven Polymarket trading platform that runs 4 complementary strategies simultaneously:
+PolyEdge is a multi-strategy AI-driven prediction market trading platform that runs 7 complementary strategies simultaneously:
 1. **AI Probability Assessment** — Claude analyzes markets, estimates true probabilities, trades when market is mispriced
-2. **Cross-Market Logical Arbitrage** — Detects pricing inconsistencies between related markets
-3. **Whale Signal Tracking** — Monitors proven wallets, trades on basket consensus
-4. **News-Reactive Trading** — Detects breaking news, assesses impact, trades before crowd reprices
+2. **Cross-Market Logical Arbitrage** — Detects pricing inconsistencies between related markets on the same platform
+3. **Cross-Platform Arbitrage** — Detects pricing discrepancies between Kalshi and Polymarket for the same event (requires validated market pairs; min similarity 0.55)
+4. **Whale Signal Tracking** — Monitors proven wallets, trades on basket consensus
+5. **News-Reactive Trading** — Detects breaking news, assesses impact, trades before crowd reprices
+6. **Late Resolution** — Trades markets resolving within 6 hours where public info makes the outcome >90% certain but the market is still priced <80%. Speed advantage on public evidence.
+7. **Mean Reversion** — Fades sharp intraday price moves (>10% in 2 hours) with small positions (max 2% bankroll), auto-closes within 4 hours
 
 ### Why This Architecture Wins
 - **Fee-free markets only** — All strategies target event/political markets (zero fees). Avoids 5/15-min crypto markets where HFT bots dominate.
@@ -126,9 +129,12 @@ polyedge/
 │   │   ├── __init__.py
 │   │   ├── ai_probability.py    # Strategy 1: Claude-driven probability assessment
 │   │   ├── cross_arb.py         # Strategy 2: Logical arbitrage between related markets
-│   │   ├── whale_tracker.py     # Strategy 3: Smart money signal tracking
-│   │   ├── news_reactive.py     # Strategy 4: Breaking news → rapid trade
-│   │   └── obvious_no.py        # Strategy 5: Low-risk base yield from near-certain markets
+│   │   ├── cross_platform_arb.py # Strategy 3: Kalshi/Polymarket cross-platform pricing arb
+│   │   ├── whale_tracker.py     # Strategy 4: Smart money signal tracking
+│   │   ├── news_reactive.py     # Strategy 5: Breaking news → rapid trade
+│   │   ├── obvious_no.py        # Strategy 6: Low-risk base yield from near-certain markets
+│   │   ├── late_resolution.py   # Strategy 7: Trade near-resolution markets with clear outcomes
+│   │   └── mean_reversion.py    # Strategy 8: Fade sharp intraday price moves
 │   ├── analysis/
 │   │   ├── __init__.py
 │   │   ├── claude_forecaster.py # Claude API integration, prompt construction, parsing

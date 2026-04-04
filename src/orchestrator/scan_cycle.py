@@ -7,7 +7,6 @@ import logging
 import time
 
 from src.core.models import (
-    Direction,
     Market,
     MarketToken,
     Platform,
@@ -480,7 +479,7 @@ async def scan_and_trade(
 
     # 5b. Bayesian belief updates on open positions
     try:
-        from src.analysis.bayesian_updater import BayesianUpdater, BeliefState
+        from src.analysis.bayesian_updater import BayesianUpdater
         _bayesian_updater = BayesianUpdater()
         for pos in position_manager.get_all_positions():
             # Only update if we have a stored belief (from a previous assessment)

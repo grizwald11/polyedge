@@ -8,7 +8,6 @@ PolymarketCrossRef for market matching and caches validated pairs in the databas
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 from src.config import Settings

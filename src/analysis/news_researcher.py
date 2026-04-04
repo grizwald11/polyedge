@@ -15,22 +15,14 @@ from typing import Optional
 import httpx
 
 from src.analysis.news_fetcher import (
-    _ArticleTextExtractor,
-    _extract_source,
-    _extract_text_from_html,
     _normalize_url,
-    _truncate_at_sentence,
     enrich_with_article_text,
     fetch_article_text,
-    MAX_ARTICLE_CHARS,
-    MAX_ARTICLE_FETCH,
-    ARTICLE_FETCH_TIMEOUT,
 )
 from src.analysis.news_search import (
     DDG_AVAILABLE,
     NewsResult,
     SERPER_SEARCH_URL,
-    MAX_RESULTS_PER_QUERY,
     _SerperNonRetryable,
     search_ddg,
     search_serper,

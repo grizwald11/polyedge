@@ -530,7 +530,6 @@ class TestFullPaperTradeCycle:
         scanner = MarketScanner(mock_discovery, db, settings)
         scanner.run_scan_cycle = AsyncMock(return_value=markets)
 
-        # First cycle: Claude sees edge, opens a position
         forecaster = ClaudeForecaster(settings)
         forecaster.assess_market = AsyncMock(return_value=_mock_forecast(0.42))
 
@@ -544,6 +543,22 @@ class TestFullPaperTradeCycle:
 
         ai_strategy = AIProbabilityStrategy(forecaster, settings, db, calibration_analyzer)
         no_strategy = ObviousNoStrategy(settings)
+
+        # Directly mock signal generation so this test doesn't depend on
+        # AI pipeline internals (divergence gates, confidence checks, etc.).
+        # This test is about EXIT logic, not signal generation.
+        cycle1_signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="FED-RATE-CUT-MAY26",
+            market_question="Will the Federal Reserve cut rates at the May 2026 meeting?",
+            direction=Direction.BUY_YES,
+            edge=0.08,
+            probability_estimate=0.42,
+            market_price=0.34,
+            confidence=0.85,
+            reasoning="Test signal for exit logic",
+        )
+        ai_strategy.scan_for_opportunities = AsyncMock(return_value=[cycle1_signal])
 
         order_builder = OrderBuilder(settings)
         mock_kalshi = AsyncMock()
@@ -571,7 +586,7 @@ class TestFullPaperTradeCycle:
             alert_manager=alert_manager, metrics=None, settings=settings,
         )
 
-        # Cycle 1: open positions
+        # Cycle 1: open positions via directly-mocked AI signal
         await scan_and_trade(**kwargs, cycle_count=1)
         positions_after_open = position_manager.get_all_positions()
         assert len(positions_after_open) >= 1, "Expected at least 1 position opened"

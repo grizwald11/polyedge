@@ -17,7 +17,6 @@ from src.analysis.resolution_tracker import ResolutionTracker
 from src.config import load_settings
 from src.core.kalshi_client import KalshiClient
 from src.core.market_discovery import MarketDiscovery
-from src.core.models import Platform
 from src.core.price_monitor import PriceMonitor
 from src.core.websocket_client import (
     FillUpdate,

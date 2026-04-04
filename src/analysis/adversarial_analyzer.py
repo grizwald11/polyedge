@@ -11,7 +11,6 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 from src.core.models import ForecastResult, Market
 

@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Optional
 from src.core.models import (
     OrderStatus,
     OrderType,
-    Side,
     Trade,
     dollars_to_cents,
     kalshi_maker_fee,
@@ -22,9 +21,7 @@ from src.core.models import (
 )
 
 if TYPE_CHECKING:
-    from src.core.kalshi_client import KalshiClient
     from src.core.models import Order
-    from src.config import Settings
     from src.execution.order_router import OrderResult, OrderRouter
 
 logger = logging.getLogger(__name__)

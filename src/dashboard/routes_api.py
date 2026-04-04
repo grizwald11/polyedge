@@ -180,3 +180,104 @@ def _register_risk_routes(app, *, db, metrics, position_manager, circuit_breaker
         if metrics is not None:
             return metrics.get_health_status()
         return {"status": "unknown", "message": "Metrics not initialized"}
+
+    @app.get("/api/metrics")
+    async def api_metrics():
+        """Comprehensive operational metrics for monitoring."""
+        result: dict = {}
+
+        # Core health
+        if metrics is not None:
+            result["health"] = metrics.get_health_status()
+            result["api_latencies"] = metrics.get_all_latency_stats()
+            result["signal_funnel"] = {
+                "generated": metrics.signals_generated,
+                "risk_gated": metrics.signals_risk_gated,
+                "executed": metrics.signals_executed,
+                "conversion_rate": (
+                    round(metrics.signals_executed / metrics.signals_generated, 3)
+                    if metrics.signals_generated > 0 else 0
+                ),
+                "gate_rate": (
+                    round(metrics.signals_risk_gated / metrics.signals_generated, 3)
+                    if metrics.signals_generated > 0 else 0
+                ),
+            }
+
+        # Per-strategy conversion rates from DB
+        try:
+            result["strategy_conversion"] = _compute_strategy_conversion(db)
+        except Exception as e:
+            logger.debug(f"Strategy conversion query failed: {e}")
+
+        # Edge decay: predicted vs realized edge from edge_records
+        try:
+            result["edge_decay"] = _compute_edge_decay(db)
+        except Exception as e:
+            logger.debug(f"Edge decay query failed: {e}")
+
+        # Risk state
+        if circuit_breaker is not None:
+            result["circuit_breaker"] = {
+                "halted": circuit_breaker.is_halted(),
+                "halt_reason": circuit_breaker.halt_reason,
+                "reduced_sizing": circuit_breaker.is_reduced_sizing,
+                "kelly_multiplier": circuit_breaker.get_kelly_multiplier(),
+            }
+
+        if position_manager is not None:
+            result["exposure"] = {
+                "total": round(position_manager.get_total_exposure(), 2),
+                "pct": round(position_manager.get_total_exposure_pct(), 3),
+                "positions": position_manager.get_position_count(),
+                "unrealized_pnl": round(position_manager.get_total_unrealized_pnl(), 2),
+            }
+
+        return result
+
+
+def _compute_strategy_conversion(db) -> list[dict]:
+    """Compute signal-to-trade conversion rates per strategy from DB."""
+    conn = db._get_conn()
+    rows = conn.execute("""
+        SELECT
+            strategy,
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'executed' THEN 1 ELSE 0 END) as executed,
+            SUM(CASE WHEN status = 'risk_gated' THEN 1 ELSE 0 END) as risk_gated,
+            ROUND(AVG(edge), 4) as avg_edge,
+            ROUND(AVG(CASE WHEN status = 'executed' THEN edge END), 4) as avg_executed_edge,
+            ROUND(AVG(CASE WHEN status = 'risk_gated' THEN edge END), 4) as avg_gated_edge
+        FROM signals
+        WHERE timestamp >= date('now', '-7 days')
+        GROUP BY strategy
+        ORDER BY total DESC
+    """).fetchall()
+    result = []
+    for row in rows:
+        r = dict(row)
+        r["conversion_rate"] = round(r["executed"] / r["total"], 3) if r["total"] > 0 else 0
+        result.append(r)
+    return result
+
+
+def _compute_edge_decay(db) -> dict:
+    """Compute predicted vs realized edge from edge_records table."""
+    conn = db._get_conn()
+    try:
+        row = conn.execute("""
+            SELECT
+                COUNT(*) as count,
+                ROUND(AVG(predicted_edge), 4) as avg_predicted,
+                ROUND(AVG(realized_edge), 4) as avg_realized,
+                ROUND(AVG(CASE WHEN realized_edge > 0 THEN 1.0 ELSE 0.0 END), 3) as win_rate
+            FROM edge_records
+            WHERE resolved_at IS NOT NULL
+        """).fetchone()
+        if row and row["count"] > 0:
+            r = dict(row)
+            r["shrinkage"] = round(r["avg_realized"] / r["avg_predicted"], 3) if r["avg_predicted"] else None
+            return r
+    except Exception as e:
+        logger.debug(f"Edge decay query failed: {e}")
+    return {"count": 0, "avg_predicted": None, "avg_realized": None, "shrinkage": None, "win_rate": None}

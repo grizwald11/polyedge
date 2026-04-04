@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 from src.config import Settings
-from src.core.kalshi_client import KalshiClient, KalshiRateLimitError
+from src.core.kalshi_client import KalshiClient
 from src.core.models import (
     Order,
     OrderStatus,
@@ -29,7 +29,6 @@ from src.core.models import (
     dollars_to_cents,
     kalshi_maker_fee,
     kalshi_taker_fee,
-    polymarket_fee,
 )
 from src.storage.database import Database
 

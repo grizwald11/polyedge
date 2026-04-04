@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 
 from src.core.models import (
     Direction,
-    Market,
-    MarketToken,
     Order,
     OrderStatus,
     OrderType,
     Platform,
     Side,
     StrategyName,
-    TokenOutcome,
 )
 
 
