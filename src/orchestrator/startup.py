@@ -209,6 +209,35 @@ def _check_env_security(logger) -> None:
             pass
 
 
+def _check_pm2_logrotate(logger) -> None:
+    """H-6: Warn at startup if pm2-logrotate is not installed.
+
+    Without log rotation, PM2 logs grow unbounded and exhaust disk space.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("pm2"):
+        return  # Not running under PM2
+
+    try:
+        result = subprocess.run(
+            ["pm2", "list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # pm2 jlist includes module names; simpler: check if pm2-logrotate dir exists
+        logrotate_dir = Path.home() / ".pm2" / "modules" / "pm2-logrotate"
+        if not logrotate_dir.exists():
+            logger.warning(
+                "pm2-logrotate is NOT installed — PM2 logs will grow unbounded. "
+                "Run: bash scripts/setup_log_rotation.sh"
+            )
+        else:
+            logger.debug("pm2-logrotate is installed")
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass  # Can't check; skip silently
+
+
 def _release_pid_lock(lock_path: str = "data/polyedge.pid"):
     """Release the PID lock file on shutdown."""
     lock_file = Path(lock_path)

@@ -462,67 +462,6 @@ class TestFillTracker:
         assert len(fills) == 1
         assert fills[0].market_id == "MKT-FAST"
 
-    # ──────────────────────────────────────────────────────────────────
-    # Platform routing: Polymarket vs Kalshi
-    # ──────────────────────────────────────────────────────────────────
-
-    @pytest.mark.asyncio
-    async def test_polymarket_order_routed_to_polymarket_client(self, mock_kalshi, tmp_db):
-        """Orders with Platform.POLYMARKET should use the polymarket client, not kalshi."""
-        mock_poly = AsyncMock()
-        mock_poly.get_order = AsyncMock(return_value={"status": "executed"})
-
-        tracker = FillTracker(mock_kalshi, tmp_db, polymarket=mock_poly)
-        order = Order(
-            id="PE-poly-order",
-            market_id="POLY-MKT-A",
-            token_id="POLY-MKT-A_yes",
-            side=Side.BUY,
-            price=0.60,
-            size=5,
-            cost=3.00,
-            order_type=OrderType.GTC,
-            status=OrderStatus.OPEN,
-            strategy=StrategyName.AI_PROBABILITY,
-            paper=False,
-            platform=Platform.POLYMARKET,
-        )
-        tracker.track(order)
-
-        fills = await tracker.check_fills()
-
-        mock_poly.get_order.assert_called_once_with("PE-poly-order")
-        mock_kalshi.get_order.assert_not_called()
-        assert len(fills) == 1
-        assert fills[0].platform == Platform.POLYMARKET
-
-    @pytest.mark.asyncio
-    async def test_polymarket_order_missing_polymarket_client_falls_back_to_kalshi(self, mock_kalshi, tmp_db):
-        """Platform.POLYMARKET order with no polymarket client falls back to kalshi (line 89-92)."""
-        mock_kalshi.get_order = AsyncMock(return_value={"status": "executed"})
-
-        tracker = FillTracker(mock_kalshi, tmp_db, polymarket=None)
-        order = Order(
-            id="PE-poly-fallback",
-            market_id="POLY-MKT-B",
-            token_id="POLY-MKT-B_yes",
-            side=Side.BUY,
-            price=0.60,
-            size=5,
-            cost=3.00,
-            order_type=OrderType.GTC,
-            status=OrderStatus.OPEN,
-            strategy=StrategyName.AI_PROBABILITY,
-            paper=False,
-            platform=Platform.POLYMARKET,
-        )
-        tracker.track(order)
-
-        fills = await tracker.check_fills()
-
-        mock_kalshi.get_order.assert_called_once_with("PE-poly-fallback")
-        assert len(fills) == 1
-
     @pytest.mark.asyncio
     async def test_order_missing_platform_defaults_to_kalshi(self, mock_kalshi, tmp_db):
         """An order where platform attribute is missing defaults to KALSHI (lines 83-84)."""

@@ -1,12 +1,11 @@
 """Order router -- routes orders through paper or live execution.
 
 Paper mode simulates fills at the order price.
-Live mode submits to Kalshi or Polymarket API based on order platform.
+Live mode submits to Kalshi API.
 
 Platform-specific logic is delegated to:
   - router_paper.py     (paper trading simulation)
   - router_kalshi.py    (Kalshi live execution)
-  - router_polymarket.py (Polymarket live execution)
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ from src.core.models import (
 from src.storage.database import Database
 
 if TYPE_CHECKING:
-    from src.core.polymarket_client import PolymarketClient
     from src.execution.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
@@ -61,7 +59,6 @@ class OrderRouter:
     Platform-specific fill logic is delegated to submodules:
       - router_paper.paper_fill() for paper trading
       - router_kalshi.live_fill() for Kalshi live execution
-      - router_polymarket.poly_live_fill() for Polymarket live execution
     """
 
     # Paper trading simulation constants (kept for backward compat with tests
@@ -70,10 +67,9 @@ class OrderRouter:
     PAPER_MAX_SLIPPAGE = 0.01           # 0-1 cent adverse slippage
     GATE3_CONFIRMATION_TTL_SECONDS = 3600  # Gate 3 expires after 1 hour
 
-    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager: Optional[PositionManager] = None, polymarket: Optional[PolymarketClient] = None):
+    def __init__(self, settings: Settings, kalshi: KalshiClient, db: Database, position_manager: Optional[PositionManager] = None):
         self.settings = settings
         self.kalshi = kalshi
-        self.polymarket = polymarket  # Optional PolymarketClient
         self.db = db
         self.position_manager = position_manager
         self._pending_order_cost: float = 0.0  # Total cost of unfilled pending orders
@@ -82,7 +78,6 @@ class OrderRouter:
         self._session_confirmed = False  # Gate 3: first-trade confirmation
         self._session_confirm_time: float | None = None  # When gate 3 was confirmed
         self._session_confirm_ttl = self.GATE3_CONFIRMATION_TTL_SECONDS
-        self._polymarket_residency_confirmed = False  # Polymarket jurisdiction gate
         self.metrics = None  # Optional: set by orchestrator for fill rate tracking
         self._restore_pending_orders()
         self._log_gate_status()
@@ -200,9 +195,7 @@ class OrderRouter:
                 order.size = position.size
                 # Recalculate cost including fees (not just price * size)
                 price_cents = dollars_to_cents(order.price)
-                if order.platform == Platform.POLYMARKET:
-                    fee_dollars = 0.0
-                elif order.order_type == OrderType.GTC:
+                if order.order_type == OrderType.GTC:
                     fee_dollars = kalshi_maker_fee(int(order.size), price_cents) / 100.0
                 else:
                     fee_dollars = kalshi_taker_fee(int(order.size), price_cents) / 100.0
@@ -226,8 +219,6 @@ class OrderRouter:
         try:
             if order.paper or self.settings.trading.mode == "paper":
                 result = await self._paper_fill(order)
-            elif order.platform == Platform.POLYMARKET:
-                result = await self._poly_live_fill(order)
             else:
                 result = await self._live_fill(order)
         except Exception:
@@ -270,11 +261,6 @@ class OrderRouter:
         """Submit order to Kalshi API for live execution."""
         from src.execution.router_kalshi import live_fill
         return await live_fill(self, order)
-
-    async def _poly_live_fill(self, order: Order) -> OrderResult:
-        """Submit order to Polymarket CLOB API for live execution."""
-        from src.execution.router_polymarket import poly_live_fill
-        return await poly_live_fill(self, order)
 
     # ------------------------------------------------------------------ #
     # Gate checking (shared across platforms)                              #

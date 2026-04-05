@@ -68,20 +68,6 @@ async def paper_fill(router: OrderRouter, order: Order) -> OrderResult:
     """
     from src.execution.order_router import OrderResult
 
-    # L-4: Apply Polymarket jurisdiction gate even in paper mode,
-    # so paper trading results are realistic about which markets are tradeable.
-    if order.platform == Platform.POLYMARKET and not router._polymarket_residency_confirmed:
-        import os
-        if os.environ.get("CONFIRM_NON_US_POLYMARKET", "").lower() != "true":
-            order.status = OrderStatus.REJECTED
-            order.rejection_reason = (
-                "Polymarket residency gate: set CONFIRM_NON_US_POLYMARKET=true "
-                "to confirm you are not a US resident (applies to paper trading too -- L-4)"
-            )
-            router._log_order(order)
-            return OrderResult(success=False, order=order, error=order.rejection_reason)
-        router._polymarket_residency_confirmed = True
-
     now = datetime.now(timezone.utc)
 
     # Simulate realistic fill with possible slippage/miss

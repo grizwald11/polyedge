@@ -13,6 +13,7 @@ cryptography==46.0.5
 
 # AI
 anthropic==0.86.0
+openai==1.76.0  # Optional: enables GPT-4o ensemble diversity (set OPENAI_API_KEY)
 
 # HTTP
 httpx==0.28.1

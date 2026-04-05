@@ -24,11 +24,9 @@ class KalshiConfig(BaseModel):
 
 
 class PolymarketConfig(BaseModel):
-    clob_host: str = "https://clob.polymarket.com"
+    """Read-only cross-reference configuration. No trading capability."""
     gamma_host: str = "https://gamma-api.polymarket.com"
     data_host: str = "https://data-api.polymarket.com"
-    chain_id: int = 137
-    signature_type: int = 1  # 0=EOA, 1=proxy/email wallet
     enabled: bool = False
 
 
@@ -137,6 +135,14 @@ class TradingConfig(BaseModel):
         if v <= 0 or v > 1:
             raise ValueError(f"{info.field_name} must be in (0, 1], got {v}")
         return v
+
+
+class OpenAIConfig(BaseModel):
+    model: str = "gpt-4o"
+    temperature: float = 0.3
+    timeout: int = 60
+    max_tokens: int = 2000
+    daily_budget: int = 500_000  # Soft daily token budget
 
 
 class ClaudeConfig(BaseModel):
@@ -330,6 +336,7 @@ class Settings(BaseModel):
 
     kalshi: KalshiConfig = Field(default_factory=KalshiConfig)
     polymarket: PolymarketConfig = Field(default_factory=PolymarketConfig)
+    openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     scanning: ScanningConfig = Field(default_factory=ScanningConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
@@ -348,7 +355,6 @@ class Settings(BaseModel):
     searxng_url: Optional[str] = None
     fred_api_key: Optional[str] = None
     metaculus_api_token: Optional[str] = None
-    polymarket_private_key: Optional[str] = None
     live_enabled: bool = False
 
     def validate_required_keys(self) -> list[str]:
@@ -363,8 +369,7 @@ class Settings(BaseModel):
             warnings.append("ANTHROPIC_API_KEY not set — Claude forecasting will fail")
         if not self.kalshi_api_key_id or not self.kalshi_private_key_path:
             warnings.append("Kalshi API credentials not set — Kalshi trading disabled")
-        if self.polymarket.enabled and not self.polymarket_private_key:
-            warnings.append("Polymarket enabled but POLYMARKET_PRIVATE_KEY not set — PM trading will fail")
+        # Polymarket is read-only cross-reference only (no trading capability)
 
         # Validate credential file paths are readable
         if self.kalshi_private_key_path:
@@ -417,7 +422,6 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     settings.searxng_url = os.environ.get("SEARXNG_URL") or None
     settings.fred_api_key = os.environ.get("FRED_API_KEY") or None
     settings.metaculus_api_token = os.environ.get("METACULUS_API_TOKEN") or None
-    settings.polymarket_private_key = os.environ.get("POLYMARKET_PRIVATE_KEY") or None
     settings.live_enabled = os.environ.get("POLYEDGE_LIVE_ENABLED", "false").lower() == "true"
 
     return settings

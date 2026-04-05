@@ -1,14 +1,6 @@
 // ============================================================================
-// IMPORTANT: PM2 log rotation is NOT configured by default. Without it,
-// logs at ~/.pm2/logs/ will grow unbounded and eventually exhaust disk space.
-// Run these commands ONCE after deploying to set up log rotation:
-//
-//   pm2 install pm2-logrotate
-//   pm2 set pm2-logrotate:max_size 50M
-//   pm2 set pm2-logrotate:retain 5
-//   pm2 set pm2-logrotate:compress true
-//
-// Verify with: pm2 conf pm2-logrotate
+// REQUIRED: Run scripts/setup_log_rotation.sh once after first pm2 start.
+// Without it, logs at ~/.pm2/logs/ will grow unbounded and exhaust disk space.
 // ============================================================================
 
 const fs = require('fs');

@@ -38,7 +38,7 @@ from src.execution.order_router import OrderRouter
 from src.execution.position_manager import PositionManager
 from src.metrics import Metrics
 from src.orchestrator.scan_cycle import scan_and_trade
-from src.orchestrator.startup import _acquire_pid_lock, _check_env_security, _release_pid_lock, setup_logging
+from src.orchestrator.startup import _acquire_pid_lock, _check_env_security, _check_pm2_logrotate, _release_pid_lock, setup_logging
 from src.risk.circuit_breaker import CircuitBreaker
 from src.risk.correlation_detector import CorrelationDetector
 from src.risk.kelly_sizer import KellySizer
@@ -234,7 +234,6 @@ class _Components:
         self.late_resolution_strategy: LateResolutionStrategy | None = None
         self.poly_scanner = None
         self.cross_platform_arb: CrossPlatformArbStrategy | None = None
-        self.polymarket_client = None
         self.order_builder: OrderBuilder | None = None
         self.position_manager: PositionManager | None = None
         self.order_router: OrderRouter | None = None
@@ -360,35 +359,17 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
     except Exception as e:
         logger.info(f"Whale tracker strategy disabled: {e}")
 
-    # Polymarket integration (conditional)
+    # Polymarket read-only cross-reference (no execution capability)
     if settings.polymarket.enabled:
-        logger.warning(
-            "LEGAL WARNING: Polymarket is not available to US residents per Terms of Service. "
-            "Ensure you are eligible before enabling Polymarket trading. "
-            "Set polymarket.enabled=false in settings.yaml if you are a US resident."
-        )
         try:
-            from src.core.polymarket_client import PolymarketClient
             from src.core.polymarket_discovery import PolymarketDiscovery
             from src.data.polymarket_cross_ref import PolymarketCrossRef
             from src.data.polymarket_scanner import PolymarketScanner
 
             poly_discovery = PolymarketDiscovery(settings.polymarket.gamma_host)
 
-            if settings.polymarket_private_key:
-                c.polymarket_client = PolymarketClient(
-                    host=settings.polymarket.clob_host,
-                    private_key=settings.polymarket_private_key,
-                    chain_id=settings.polymarket.chain_id,
-                    signature_type=settings.polymarket.signature_type,
-                )
-                await c.polymarket_client.initialize()
-                logger.info("Polymarket client initialized (trading enabled)")
-            else:
-                logger.info("Polymarket: no private key — read-only mode (scanning only)")
-
             c.poly_scanner = PolymarketScanner(poly_discovery, c.db, settings)
-            logger.info("Polymarket scanner enabled")
+            logger.info("Polymarket scanner enabled (read-only cross-reference)")
 
             cross_ref = PolymarketCrossRef(ttl_seconds=300)
             c.cross_platform_arb = CrossPlatformArbStrategy(settings, c.db, cross_ref)
@@ -396,12 +377,11 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
 
             c.resolution_tracker.polymarket_discovery = poly_discovery
         except Exception as e:
-            logger.warning(f"Polymarket integration failed to initialize: {e}")
+            logger.warning(f"Polymarket cross-reference init failed: {e}")
             c.poly_scanner = None
             c.cross_platform_arb = None
-            c.polymarket_client = None
     else:
-        logger.info("Polymarket integration disabled (polymarket.enabled=false)")
+        logger.info("Polymarket cross-reference disabled (polymarket.enabled=false)")
 
 
 async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
@@ -421,12 +401,10 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
     c.order_router = OrderRouter(
         settings, c.kalshi, c.db,
         position_manager=c.position_manager,
-        polymarket=c.polymarket_client,
     )
     c.fill_tracker = FillTracker(
         c.kalshi, c.db,
         poll_timeout=settings.execution.order_poll_timeout_seconds,
-        polymarket=c.polymarket_client,
     )
 
     try:
@@ -695,12 +673,6 @@ async def _shutdown(c: _Components, logger) -> None:
     except Exception as e:
         logger.warning(f"Kalshi client close failed: {e}")
 
-    if c.polymarket_client is not None:
-        try:
-            await c.polymarket_client.close()
-        except Exception as e:
-            logger.warning(f"Polymarket client close failed: {e}")
-
     try:
         if c.db is not None:
             c.db.close()
@@ -720,6 +692,7 @@ async def main() -> None:
 
     settings.validate_required_keys()
     _check_env_security(logger)  # C-5: Warn about plaintext keys
+    _check_pm2_logrotate(logger)  # H-6: Warn if pm2-logrotate not installed
 
     logger.info("=" * 60)
     logger.info("PolyEdge Starting — Phase 3: Paper Trading")

@@ -21,6 +21,7 @@ from src.analysis.claude_forecaster import ClaudeForecaster
 from src.analysis.decomposer import QuestionDecomposer, is_compound_question
 from src.analysis.ensemble import compute_market_efficiency, ensemble_forecast, multi_model_ensemble
 from src.analysis.market_classifier import classify_market
+from src.analysis.openai_forecaster import OpenAIForecaster
 from src.analysis.temporal_analyzer import TemporalAnalyzer
 from src.config import Settings
 from src.core.models import Direction, ForecastResult, Market, Signal, StrategyName
@@ -51,6 +52,7 @@ class AIProbabilityStrategy:
         data_enricher=None,
     ):
         self.forecaster = forecaster
+        self.openai_forecaster = OpenAIForecaster(settings)
         self.settings = settings
         self.db = db
         self.calibration_analyzer = calibration_analyzer
@@ -436,6 +438,24 @@ class AIProbabilityStrategy:
         if ensemble is None:
             return None
 
+        # AI model disagreement sizing reduction: when Claude and GPT-4o disagree
+        # by >15 percentage points, reduce confidence to trigger 50% smaller positions
+        # via the Kelly sizer (which uses confidence as an input).
+        if getattr(ensemble, 'disagreement_pct', 0) > 0.15:
+            logger.info(
+                f"AI model disagreement {ensemble.disagreement_pct:.0%} > 15% for "
+                f"{market.ticker} — halving confidence for sizing reduction"
+            )
+            from src.core.models import EnsembleForecast as EnsembleForecastModel
+            ensemble = EnsembleForecastModel(
+                final_probability=ensemble.final_probability,
+                individual_forecasts=ensemble.individual_forecasts,
+                market_price=ensemble.market_price,
+                edge=ensemble.edge,
+                confidence=ensemble.confidence * 0.5,
+                disagreement_pct=ensemble.disagreement_pct,
+            )
+
         # 7. Edge calculation, significance check, and signal generation
         return await self._calculate_edge_and_signal(
             market=market,
@@ -787,6 +807,21 @@ class AIProbabilityStrategy:
 
         Returns (ensemble, consensus_forecasts, market_eff, cat_brier_dict).
         """
+        # Get GPT-4o forecast for ensemble diversity (runs in parallel with consensus)
+        gpt4o_forecast: Optional[ForecastResult] = None
+        if self.openai_forecaster.is_available and not self.openai_forecaster.is_circuit_open():
+            try:
+                gpt4o_forecast = await self.openai_forecaster.assess_market(
+                    market=market,
+                    news_context="",
+                    base_rate_context="",
+                    accuracy_context="",
+                )
+                if gpt4o_forecast and gpt4o_forecast.parse_failed:
+                    gpt4o_forecast = None
+            except Exception as e:
+                logger.info(f"GPT-4o forecast unavailable for {market.ticker}: {e}")
+
         # Collect cross-platform consensus forecasts (Polymarket, Manifold, Metaculus)
         consensus_forecasts: list[ForecastResult] = []
         if self.consensus_aggregator:
@@ -800,6 +835,10 @@ class AIProbabilityStrategy:
             community_forecast = await self._get_community_forecast(market)
             if community_forecast is not None:
                 consensus_forecasts = [community_forecast]
+
+        # Include GPT-4o forecast in the ensemble sources
+        if gpt4o_forecast is not None:
+            consensus_forecasts = [gpt4o_forecast] + consensus_forecasts
 
         # Compute market efficiency from real data (volume, liquidity, time)
         market_eff = compute_market_efficiency(

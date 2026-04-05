@@ -8,8 +8,10 @@ The ensemble applies Brier-score-weighted averaging when historical accuracy
 data is available, falling back to equal weights otherwise. Market price is
 always included as an additional "forecast" with configurable weight.
 
-# M-1: Currently Claude-only. GPT-4o/Gemini as second forecaster is planned
-# for Phase 8+ to reduce single-vendor dependency.
+When both Claude and GPT-4o forecasts are available, uses Brier-score-weighted
+averaging with a 20% minimum weight floor for either model. When models disagree
+by >15 percentage points, logs a warning and the disagreement_pct field is set
+on the EnsembleForecast so downstream sizing can reduce position by 50%.
 """
 
 from __future__ import annotations
@@ -273,6 +275,23 @@ def multi_model_ensemble(
     variance = sum((p - mean_prob) ** 2 for p in probs) / len(probs)
     disagreement = variance ** 0.5  # std dev
 
+    # Compute max pairwise disagreement between AI models for sizing adjustment.
+    # When AI models (Claude vs GPT-4o) disagree by >15pp, downstream sizing
+    # should reduce position by 50% to account for model uncertainty.
+    ai_forecasts = [f for f in forecasts if _is_ai_model(f.model_used or "")]
+    max_ai_disagreement = 0.0
+    if len(ai_forecasts) >= 2:
+        for i, fa in enumerate(ai_forecasts):
+            for fb in ai_forecasts[i + 1:]:
+                pairwise = abs(fa.probability - fb.probability)
+                max_ai_disagreement = max(max_ai_disagreement, pairwise)
+        if max_ai_disagreement > 0.15:
+            logger.warning(
+                f"AI model disagreement: {max_ai_disagreement:.0%} between "
+                f"{[f.model_used for f in ai_forecasts]} — "
+                f"recommend 50% position sizing reduction"
+            )
+
     # Multiplicative penalty: disagreement scales down confidence rather than
     # subtracting a fixed amount, which was overly punitive (e.g., 0.15 std dev
     # would wipe 15pp of confidence).  A disagreement of 0.25 now reduces
@@ -293,6 +312,7 @@ def multi_model_ensemble(
         market_price=market_price,
         edge=edge,
         confidence=confidence,
+        disagreement_pct=max_ai_disagreement,
     )
 
 
@@ -381,4 +401,30 @@ def _compute_model_weights(
         for w in weights:
             w.weight /= total_weight
 
+    # Enforce 20% minimum weight floor for AI model diversity.
+    # When exactly 2 AI forecasters are present (e.g., Claude + GPT-4o),
+    # neither should drop below 20% weight to maintain ensemble diversity.
+    MIN_AI_WEIGHT = 0.20
+    ai_models = [w for w in weights if _is_ai_model(w.name)]
+    if len(ai_models) == 2:
+        for w in ai_models:
+            if w.weight < MIN_AI_WEIGHT:
+                deficit = MIN_AI_WEIGHT - w.weight
+                w.weight = MIN_AI_WEIGHT
+                # Take the deficit from the other AI model
+                other = [m for m in ai_models if m is not w][0]
+                other.weight = max(MIN_AI_WEIGHT, other.weight - deficit)
+        # Re-normalize after floor enforcement
+        total_weight = sum(w.weight for w in weights)
+        if total_weight > 0:
+            for w in weights:
+                w.weight /= total_weight
+
     return weights
+
+
+def _is_ai_model(model_name: str) -> bool:
+    """Check if a model name corresponds to an AI forecaster (not community/market)."""
+    ai_prefixes = ("claude", "gpt", "gemini", "openai")
+    name_lower = model_name.lower()
+    return any(name_lower.startswith(p) or p in name_lower for p in ai_prefixes)

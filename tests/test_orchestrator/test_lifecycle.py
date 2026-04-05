@@ -72,7 +72,6 @@ class TestComponents:
         assert c.portfolio_risk is None
         assert c.poly_scanner is None
         assert c.cross_platform_arb is None
-        assert c.polymarket_client is None
         assert c.order_builder is None
         assert c.position_manager is None
         assert c.order_router is None
@@ -299,7 +298,6 @@ class TestSetupStrategies:
 
         assert base_components.poly_scanner is None
         assert base_components.cross_platform_arb is None
-        assert base_components.polymarket_client is None
 
     @pytest.mark.asyncio
     @patch("src.orchestrator.lifecycle.WhaleMonitor")
@@ -332,7 +330,6 @@ class TestSetupExecutionAndRisk:
         c.db = MagicMock()
         c.kalshi = AsyncMock()
         c.kalshi_healthy = False
-        c.polymarket_client = None
         return c
 
     @pytest.mark.asyncio
@@ -464,8 +461,6 @@ class TestShutdown:
         c.discovery.close = AsyncMock()
         c.kalshi = AsyncMock()
         c.kalshi.close = AsyncMock()
-        c.polymarket_client = AsyncMock()
-        c.polymarket_client.close = AsyncMock()
         c.db = MagicMock()
         c.db.close = MagicMock()
 
@@ -475,7 +470,6 @@ class TestShutdown:
         c.forecaster.close.assert_awaited_once()
         c.discovery.close.assert_awaited_once()
         c.kalshi.close.assert_awaited_once()
-        c.polymarket_client.close.assert_awaited_once()
         c.db.close.assert_called_once()
         assert c.ws_task.cancelled()
         assert c.dashboard_task.cancelled()
@@ -493,7 +487,6 @@ class TestShutdown:
         c.discovery.close = AsyncMock()
         c.kalshi = AsyncMock()
         c.kalshi.close = AsyncMock()
-        c.polymarket_client = None
         c.db = MagicMock()
         c.db.close = MagicMock()
 
@@ -869,7 +862,6 @@ class TestSetupExecutionAndRiskLiveMode:
         c.db = MagicMock()
         c.kalshi = AsyncMock()
         c.kalshi_healthy = True
-        c.polymarket_client = None
         return c
 
     @pytest.mark.asyncio
@@ -980,8 +972,6 @@ class TestSetupExecutionAndRiskLiveMode:
         c.db = MagicMock()
         c.kalshi = AsyncMock()
         c.kalshi_healthy = False
-        c.polymarket_client = None
-
         settings = MagicMock()
         settings.trading.mode = "paper"
         settings.alerts.imessage_enabled = True
@@ -1039,7 +1029,7 @@ class TestSetupStrategiesPolymarket:
         """Polymarket enabled but no private key → read-only scanner mode."""
         settings = MagicMock()
         settings.polymarket.enabled = True
-        settings.polymarket_private_key = None
+
         settings.polymarket.gamma_host = "https://gamma-api.polymarket.com"
         settings.polymarket.clob_host = "https://clob.polymarket.com"
         settings.polymarket.chain_id = 137
@@ -1058,7 +1048,6 @@ class TestSetupStrategiesPolymarket:
              ):
             # Patch all the Polymarket-specific imports inside _setup_strategies
             with patch.dict("sys.modules", {
-                "src.core.polymarket_client": MagicMock(),
                 "src.core.polymarket_discovery": MagicMock(),
                 "src.data.polymarket_cross_ref": MagicMock(),
                 "src.data.polymarket_scanner": MagicMock(),
@@ -1085,7 +1074,7 @@ class TestSetupStrategiesPolymarket:
         """If Polymarket init raises, scanner and arb are set to None."""
         settings = MagicMock()
         settings.polymarket.enabled = True
-        settings.polymarket_private_key = None
+
         settings.polymarket.gamma_host = "https://gamma-api.polymarket.com"
         settings.news.rss_feeds = []
         settings.news.max_article_age_minutes = 60
@@ -1094,7 +1083,6 @@ class TestSetupStrategiesPolymarket:
         MockWhale.return_value.basket_size = 0
 
         with patch.dict("sys.modules", {
-            "src.core.polymarket_client": MagicMock(**{"PolymarketClient.side_effect": RuntimeError("no poly")}),
             "src.core.polymarket_discovery": MagicMock(**{"PolymarketDiscovery.side_effect": RuntimeError("no poly")}),
             "src.data.polymarket_cross_ref": MagicMock(),
             "src.data.polymarket_scanner": MagicMock(),

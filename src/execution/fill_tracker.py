@@ -40,9 +40,8 @@ class FillTracker:
     - WebSocket: handle_ws_fill() processes real-time fill notifications
     """
 
-    def __init__(self, kalshi: KalshiClient, db: Database, poll_timeout: int = 15, polymarket=None):
+    def __init__(self, kalshi: KalshiClient, db: Database, poll_timeout: int = 15):
         self.kalshi = kalshi
-        self.polymarket = polymarket  # Optional PolymarketClient
         self.db = db
         self._poll_timeout = poll_timeout
         self._pending_orders: dict[str, Order] = {}  # order_id -> Order
@@ -81,14 +80,9 @@ class FillTracker:
                 if platform is None:
                     platform = Platform.KALSHI
                     logger.warning(f"H-5: Order {order.id} missing platform field, defaulting to KALSHI")
-                if platform == Platform.POLYMARKET and self.polymarket is not None:
-                    status = await asyncio.wait_for(
-                        self.polymarket.get_order(order_id), timeout=self._poll_timeout
-                    )
-                else:
-                    status = await asyncio.wait_for(
-                        self.kalshi.get_order(order_id), timeout=self._poll_timeout
-                    )
+                status = await asyncio.wait_for(
+                    self.kalshi.get_order(order_id), timeout=self._poll_timeout
+                )
                 return (order_id, order, status)
             except asyncio.TimeoutError:
                 logger.warning(f"Order poll timed out for {order_id}")

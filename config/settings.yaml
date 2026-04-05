@@ -4,12 +4,10 @@ kalshi:
   use_demo: true  # H-7: Use demo API in paper mode to avoid hitting production. Set false only for live trading.
 
 polymarket:
-  clob_host: "https://clob.polymarket.com"
+  # Read-only cross-reference only. No trading capability.
   gamma_host: "https://gamma-api.polymarket.com"
   data_host: "https://data-api.polymarket.com"
-  chain_id: 137
-  signature_type: 1  # 0=EOA, 1=proxy/email wallet
-  enabled: false     # Set to true when Polymarket wallet is funded
+  enabled: false     # Set to true to enable Polymarket as a community forecast signal
 
 scanning:
   interval_seconds: 300  # 5 minutes
@@ -47,6 +45,13 @@ trading:
   max_obvious_no_pct: 0.10      # Max 10% bankroll in obvious NO positions
   max_trades_per_cycle: 5       # Max trades per scan cycle (matches config.py default)
   max_concurrent_positions: 15  # M-13: Max open positions at any time (prevents over-diversification)
+
+openai:
+  model: "gpt-4o"
+  temperature: 0.3  # Match Claude's default; category overrides apply via shared templates
+  timeout: 60
+  max_tokens: 2000
+  daily_budget: 500000  # Soft daily token budget (hard limit is 2x)
 
 claude:
   model_primary: "claude-sonnet-4-6"

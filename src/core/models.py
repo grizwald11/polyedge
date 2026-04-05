@@ -93,6 +93,7 @@ def polymarket_fee(contracts: int, price: float, *, fee_enabled: bool = False) -
 
 class Platform(str, Enum):
     KALSHI = "kalshi"
+    # Platform enum retained for cross-reference data only. No execution capability.
     POLYMARKET = "polymarket"
 
 class Side(str, Enum):
@@ -478,6 +479,7 @@ class EnsembleForecast(BaseModel):
     market_price: float = 0.0
     edge: float = 0.0  # final_probability - market_price
     confidence: float = 0.5
+    disagreement_pct: float = 0.0  # Max pairwise disagreement between AI models (0-1)
 
     @field_validator("final_probability")
     @classmethod
