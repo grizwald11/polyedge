@@ -197,7 +197,15 @@ def build_forecast(data: dict) -> ForecastResult:
             logger.warning(f"Non-numeric CI value: {value!r} — using default {default}")
             return default
 
-    ci_default_width = 0.25 if (ci_low_missing or ci_high_missing) else 0.20
+    if ci_low_missing or ci_high_missing:
+        # Use proportional width for extreme probabilities to avoid
+        # CIs that always hit 0 or 1
+        if probability < 0.05 or probability > 0.95:
+            ci_default_width = max(0.03, min(0.15, probability * 2, (1 - probability) * 2))
+        else:
+            ci_default_width = 0.25
+    else:
+        ci_default_width = 0.20
     ci_low_raw = _safe_float(data.get("confidence_low"), max(0, probability - ci_default_width))
     ci_high_raw = _safe_float(data.get("confidence_high"), min(1, probability + ci_default_width))
 

@@ -171,6 +171,7 @@ class KellySizer:
         bankroll: float,
         probability: float,
         current_exposure: float,
+        strategy: str | None = None,
     ) -> tuple[float, float]:
         """Apply position and exposure caps.
 
@@ -180,9 +181,14 @@ class KellySizer:
         # Cap 1 — Max position percentage
         max_position = bankroll * self.settings.trading.max_position_pct
         # High-probability trades (P>0.95, typically obvious-NO) have tiny payoffs
-        # but full downside if the market flips. Cap at 3% of bankroll.
+        # but full downside if the market flips.
+        # M-8 FIX: OBVIOUS_NO gets 5% cap (higher, since these are near-certain);
+        # other strategies get 3% for high-prob trades.
         if probability > 0.95:
-            high_prob_cap = bankroll * 0.03
+            if strategy and strategy.upper() == "OBVIOUS_NO":
+                high_prob_cap = bankroll * 0.05
+            else:
+                high_prob_cap = bankroll * 0.03
             max_position = min(max_position, high_prob_cap)
             logger.debug(
                 f"Kelly: high-prob cap applied (P={probability:.2f}), "
@@ -269,6 +275,7 @@ class KellySizer:
         fee_rate: float = 0.0,
         confidence: float | None = None,
         slippage_pct: float = 0.0,
+        strategy: str | None = None,
     ) -> int:
         """Calculate optimal number of contracts to buy.
 
@@ -296,6 +303,8 @@ class KellySizer:
                 for 2%). When provided and > 0, the effective edge is reduced by
                 this amount before Kelly calculation, accounting for execution
                 cost that erodes theoretical edge.
+            strategy: M-8: Optional strategy name (e.g. "OBVIOUS_NO"). Used to
+                apply strategy-specific caps in _apply_caps.
 
         Returns:
             Number of contracts (integers, minimum 1 if any edge exists)
@@ -341,7 +350,7 @@ class KellySizer:
 
         kelly_dollars = self._apply_liquidity_adjustment(kelly_dollars, cost_price, market_liquidity)
 
-        kelly_dollars, max_position = self._apply_caps(kelly_dollars, bankroll, probability, current_exposure)
+        kelly_dollars, max_position = self._apply_caps(kelly_dollars, bankroll, probability, current_exposure, strategy=strategy)
         if kelly_dollars == 0:
             return 0
 

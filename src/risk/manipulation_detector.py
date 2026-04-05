@@ -23,7 +23,10 @@ RAPID_MOVE_THRESHOLD = 0.20
 MIN_SNAPSHOTS_FOR_DETECTION = 2
 
 # How long (seconds) to keep a market flagged after detection
-FLAG_EXPIRY_SECONDS = 1800  # 30 minutes
+# M-7: Reduced from 1800 (30 min) to 900 (15 min) — 30 min was overly
+# conservative and blocked legitimate re-entry on markets that had
+# already stabilized.
+FLAG_EXPIRY_SECONDS = 900  # 15 minutes
 
 
 @dataclass
@@ -77,9 +80,27 @@ class ManipulationDetector:
         # Clean expired flags
         self._clean_expired_flags(now)
 
-        # If already flagged and not expired, return existing flag
+        # If already flagged and not expired, check for volume-based early reset
         if market_id in self._flags:
-            return self._flags[market_id]
+            # M-7: High subsequent volume indicates organic price discovery —
+            # clear the flag early instead of waiting for full expiry.
+            volume_24h = getattr(market, 'volume_24h', 0.0) or 0.0
+            flag = self._flags[market_id]
+            if volume_24h > 50_000:
+                elapsed = now - flag.detected_at
+                # Require at least 60s since detection to avoid instant clears
+                if elapsed > 60:
+                    logger.info(
+                        "M-7: Clearing manipulation flag for %s early — "
+                        "high volume ($%.0f) indicates organic move",
+                        market_id, volume_24h,
+                    )
+                    del self._flags[market_id]
+                    # Fall through to normal checks below
+                else:
+                    return flag
+            else:
+                return self._flags[market_id]
 
         # Record current price
         current_price = market.yes_price

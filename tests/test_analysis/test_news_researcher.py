@@ -555,9 +555,11 @@ class TestSerperRecovery:
 
         researcher._serper_disabled = True
         researcher._serper_disabled_at = 100.0  # temporary disable
+        researcher._serper_auth_failure_count = 1
         assert not researcher.serper_permanently_disabled
 
-        researcher._serper_disabled_at = float("inf")
+        # M-4: permanently_disabled now checks auth_failure_count >= 3
+        researcher._serper_auth_failure_count = 3
         assert researcher.serper_permanently_disabled
 
     @pytest.mark.asyncio

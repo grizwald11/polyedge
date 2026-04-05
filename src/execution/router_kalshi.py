@@ -364,7 +364,11 @@ async def _record_fill(router: OrderRouter, order: Order, now: datetime) -> Orde
 
 
 async def _balance_preflight(router: OrderRouter, order: Order) -> Optional[OrderResult]:
-    """M-14: Balance pre-flight check. Returns OrderResult rejection if fails, None if OK."""
+    """M-14: Balance pre-flight check. Returns OrderResult rejection if fails, None if OK.
+
+    H-1 FIX: Subtracts pending_order_cost from the exchange balance so that
+    capital reserved for resting (unfilled) orders is not double-committed.
+    """
     from src.execution.order_router import OrderResult
 
     large_order_threshold = router.settings.trading.bankroll * 0.10
@@ -374,11 +378,18 @@ async def _balance_preflight(router: OrderRouter, order: Order) -> Optional[Orde
     for _bal_attempt in range(balance_retries):
         try:
             balance = await asyncio.wait_for(router.kalshi.get_balance(), timeout=5.0)
-            if balance is not None and order.cost > balance:
+            if balance is not None:
+                # H-1 FIX: Subtract pending order cost to avoid over-committing
+                available = balance - router.pending_order_cost
+                logger.debug(
+                    "Balance preflight: exchange=$%.2f - pending=$%.2f = available=$%.2f, order=$%.2f",
+                    balance, router.pending_order_cost, available, order.cost,
+                )
+            if balance is not None and order.cost > available:
                 order.status = OrderStatus.REJECTED
                 order.rejection_reason = (
                     f"Insufficient balance: order cost ${order.cost:.2f} > "
-                    f"available ${balance:.2f}"
+                    f"available ${available:.2f} (exchange=${balance:.2f} - pending=${router.pending_order_cost:.2f})"
                 )
                 router._log_order(order)
                 logger.warning(f"Balance pre-flight failed: {order.rejection_reason}")

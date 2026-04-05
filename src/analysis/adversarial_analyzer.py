@@ -12,6 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 
+from src.analysis.prompt_templates import _sanitize_external_text
 from src.core.models import ForecastResult, Market
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,8 @@ class AdversarialAnalyzer:
         opposite = "NO" if forecast.probability > 0.5 else "YES"
 
         prompt = ADVERSARIAL_TEMPLATE.format(
-            question=market.question[:500],
-            resolution_criteria=(market.description or "Standard resolution")[:2000],
+            question=_sanitize_external_text(market.question, 500),
+            resolution_criteria=_sanitize_external_text(market.description or "Standard resolution", 2000),
             probability=forecast.probability,
             opposite_outcome=opposite,
         )
@@ -93,7 +94,16 @@ class AdversarialAnalyzer:
             if result is None or getattr(result, "parse_failed", False):
                 return AdversarialResult()
 
-            return self._parse_result(result.raw_response or "", forecast.probability)
+            adversarial = self._parse_result(result.raw_response or "", forecast.probability)
+            if adversarial.plausibility > 0.5:
+                logger.info(
+                    f"Adversarial check for {market.ticker}: "
+                    f"plausibility={adversarial.plausibility:.0%}, "
+                    f"prob_adj={adversarial.probability_adjustment:+.3f}, "
+                    f"ci_adj={adversarial.ci_adjustment:+.3f}, "
+                    f"weakest_assumption={adversarial.weakest_assumption!r}"
+                )
+            return adversarial
 
         except Exception as e:
             logger.debug(f"Pre-mortem analysis failed for {market.ticker}: {e}")

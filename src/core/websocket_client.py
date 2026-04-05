@@ -137,21 +137,27 @@ class KalshiWebSocket:
     # ── Subscription management ────────────────────
 
     def subscribe(self, tickers: list[str]):
-        """Add tickers to subscription set. Sends subscribe if connected."""
+        """Add tickers to subscription set. Sends subscribe if connected.
+
+        H-2: Uses copy-on-write to avoid mutating _subscriptions during iteration.
+        """
         new = set(tickers) - self._subscriptions
         if not new:
             return
-        self._subscriptions.update(new)
+        self._subscriptions = self._subscriptions | new  # H-2: copy-on-write
         if self._ws is not None:
             task = asyncio.create_task(self._send_subscribe(list(new)))
             task.add_done_callback(self._log_task_exception)
 
     def unsubscribe(self, tickers: list[str]):
-        """Remove tickers from subscription set."""
+        """Remove tickers from subscription set.
+
+        H-2: Uses copy-on-write to avoid mutating _subscriptions during iteration.
+        """
         removing = set(tickers) & self._subscriptions
         if not removing:
             return
-        self._subscriptions -= removing
+        self._subscriptions = self._subscriptions - removing  # H-2: copy-on-write
         if self._ws is not None:
             task = asyncio.create_task(self._send_unsubscribe(list(removing)))
             task.add_done_callback(self._log_task_exception)
@@ -284,7 +290,8 @@ class KalshiWebSocket:
 
                     # Run reconnect callbacks (e.g., market status sync via REST)
                     # M-9: Retry each callback once (2s delay) before giving up
-                    for cb in self._reconnect_callbacks:
+                    # H-2: Snapshot callback list to avoid mutation during iteration
+                    for cb in list(self._reconnect_callbacks):
                         try:
                             await cb()
                         except Exception as cb_err:

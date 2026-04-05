@@ -218,7 +218,16 @@ async def enrich_with_article_text(results: list) -> list:
 
     to_fetch = results[:MAX_ARTICLE_FETCH]
     tasks = [fetch_article_text(r.url) for r in to_fetch]
-    texts = await asyncio.gather(*tasks, return_exceptions=True)
+    # M-5: Total timeout of 8s for all article fetches combined,
+    # instead of 5s per article (which could reach 15s total)
+    try:
+        texts = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("M-5: Article enrichment timed out (8s total) — using snippets only")
+        return results
 
     for i, text in enumerate(texts):
         if isinstance(text, str) and text and len(text) > len(to_fetch[i].snippet):

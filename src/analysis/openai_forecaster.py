@@ -157,7 +157,8 @@ class OpenAIForecaster:
         if self._total_tokens_today > self._daily_budget:
             logger.warning(
                 f"GPT-4o daily token usage ({self._total_tokens_today:,}) "
-                f"exceeds budget ({self._daily_budget:,})"
+                f"exceeds budget ({self._daily_budget:,}) — "
+                f"combined AI token spend may be high; check Claude budget too"
             )
 
     def is_budget_exceeded(self) -> bool:
@@ -228,6 +229,7 @@ class OpenAIForecaster:
             async def get_context(self, _q: str) -> str:
                 return ""
 
+        # TODO: Wire enabled flag to settings.openai.ab_testing_enabled when ready
         variant_manager = PromptVariantManager(enabled=False)
         prompt, _model, _category, _temp, _variant = await build_forecaster_prompt(
             market,
@@ -250,9 +252,18 @@ class OpenAIForecaster:
         try:
             response = await self._call_gpt4o(prompt, temperature)
         except Exception as e:
+            latency_ms = int((time.monotonic() - start_time) * 1000)
             logger.warning(f"GPT-4o assessment failed for {market.ticker}: {e}")
             self._record_api_failure()
-            return None
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0.0, market.yes_price - 0.25),
+                confidence_high=min(1.0, market.yes_price + 0.25),
+                reasoning=f"GPT-4o API call failed: {e}",
+                model_used=self._model,
+                latency_ms=latency_ms,
+                parse_failed=True,
+            )
 
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -260,7 +271,15 @@ class OpenAIForecaster:
         if not response.choices or not response.choices[0].message.content:
             logger.warning("GPT-4o returned empty content")
             self._record_api_failure()
-            return None
+            return ForecastResult(
+                probability=market.yes_price,
+                confidence_low=max(0.0, market.yes_price - 0.25),
+                confidence_high=min(1.0, market.yes_price + 0.25),
+                reasoning="GPT-4o returned empty content",
+                model_used=self._model,
+                latency_ms=latency_ms,
+                parse_failed=True,
+            )
 
         raw_text = response.choices[0].message.content
 

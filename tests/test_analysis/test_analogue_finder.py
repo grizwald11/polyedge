@@ -4,6 +4,16 @@ import pytest
 
 from src.analysis.analogue_finder import AnalogueFinder, MarketAnalogue
 
+_sklearn_available = True
+try:
+    import sklearn  # noqa: F401
+except ImportError:
+    _sklearn_available = False
+
+pytestmark = pytest.mark.skipif(
+    not _sklearn_available, reason="scikit-learn not installed"
+)
+
 
 @pytest.fixture
 def finder_with_corpus(tmp_db):

@@ -31,6 +31,9 @@ from src.core.models import (
 
 logger = logging.getLogger(__name__)
 
+# L-8: Market price staleness threshold for order building.
+# Orders built against prices older than this trigger a warning.
+STALE_MARKET_PRICE_SECONDS = 300
 
 class OrderBuilder:
     """Builds orders for Kalshi and Polymarket execution."""
@@ -125,11 +128,11 @@ class OrderBuilder:
         # H-6: Warn if market price data may be stale (>5 minutes old)
         if market.price_updated_at is not None:
             age_seconds = (datetime.now(timezone.utc) - market.price_updated_at).total_seconds()
-            if age_seconds > 300:
+            if age_seconds > STALE_MARKET_PRICE_SECONDS:
                 logger.warning(
                     "Market order using potentially stale prices for %s: "
-                    "price data is %.0f seconds old (threshold: 300s)",
-                    market.ticker, age_seconds,
+                    "price data is %.0f seconds old (threshold: %ds)",
+                    market.ticker, age_seconds, STALE_MARKET_PRICE_SECONDS,
                 )
 
         # Use current market price for the appropriate side

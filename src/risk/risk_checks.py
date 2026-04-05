@@ -350,6 +350,9 @@ def check_wash_trade(
 ) -> None:
     """M-4: Block re-entry within 4 hours of exiting a market.
 
+    H-6 FIX: Also checks for recent sells on any market in the same event
+    (by event_ticker), preventing wash trades via sibling markets.
+
     Previously 30 minutes (WASH_TRADE_COOLDOWN_SECONDS=1800), which was
     too short. Extended to 4 hours to reduce rapid entry-exit cycles that
     could trigger exchange-side monitoring.
@@ -358,22 +361,55 @@ def check_wash_trade(
         return
     try:
         conn = db._get_conn()
-        rows = conn.execute(
-            "SELECT timestamp FROM trades WHERE market_id = ? AND side = 'SELL' "
-            "ORDER BY timestamp DESC LIMIT 1",
-            (market_id,),
-        ).fetchall()
+
+        # H-6: Look up event_ticker for this market to also check sibling markets
+        event_ticker = ""
+        try:
+            mkt_row = conn.execute(
+                "SELECT event_ticker FROM markets WHERE ticker = ?", (market_id,)
+            ).fetchone()
+            if mkt_row:
+                event_ticker = mkt_row["event_ticker"] or ""
+        except Exception:
+            pass  # Fall through to market_id-only check
+
+        # Build query: check market_id directly, and also any market sharing
+        # the same event_ticker (if available and non-empty)
+        if event_ticker:
+            # H-6: Get all market_ids in the same event
+            sibling_rows = conn.execute(
+                "SELECT ticker FROM markets WHERE event_ticker = ?", (event_ticker,)
+            ).fetchall()
+            sibling_ids = [r["ticker"] for r in sibling_rows]
+            if market_id not in sibling_ids:
+                sibling_ids.append(market_id)
+            placeholders = ",".join("?" for _ in sibling_ids)
+            rows = conn.execute(
+                f"SELECT market_id, timestamp FROM trades WHERE market_id IN ({placeholders}) "
+                f"AND side = 'SELL' ORDER BY timestamp DESC LIMIT 1",
+                sibling_ids,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT market_id, timestamp FROM trades WHERE market_id = ? AND side = 'SELL' "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (market_id,),
+            ).fetchall()
+
         if not rows:
             return
         last_sell_ts = rows[0]["timestamp"]
+        last_sell_market = rows[0]["market_id"]
         last_sell = datetime.fromisoformat(last_sell_ts)
         if last_sell.tzinfo is None:
             last_sell = last_sell.replace(tzinfo=timezone.utc)
         elapsed = (datetime.now(timezone.utc) - last_sell).total_seconds()
         if elapsed < WASH_TRADE_COOLDOWN_SECONDS:
             minutes = (WASH_TRADE_COOLDOWN_SECONDS - elapsed) / 60.0
+            source = last_sell_market if last_sell_market != market_id else market_id
+            event_note = f" (event: {event_ticker})" if event_ticker and last_sell_market != market_id else ""
             failed.append(
-                f"Wash trading prevention: exited {market_id} {minutes:.0f} min ago ({WASH_TRADE_COOLDOWN_SECONDS // 3600}h cooldown)"
+                f"Wash trading prevention: exited {source}{event_note} {minutes:.0f} min ago ({WASH_TRADE_COOLDOWN_SECONDS // 3600}h cooldown)"
             )
     except Exception as e:
         logger.warning(f"Wash trade check failed for {market_id}: {e}")
@@ -386,6 +422,23 @@ def check_manipulation(
     manip_flag = manipulation_detector.check_market(market)
     if manip_flag is not None:
         failed.append(f"Manipulation flag: {manip_flag.reason}")
+
+
+def check_strategy_exposure(
+    settings: Settings, positions: PositionManager,
+    signal: Signal, bankroll: float, proposed_cost: float,
+    failed: list[str],
+) -> None:
+    """H-5: Per-strategy exposure limit — caps any single strategy at max_strategy_exposure_pct."""
+    max_pct = settings.trading.max_strategy_exposure_pct
+    current = positions.get_strategy_exposure(signal.strategy)
+    max_allowed = bankroll * max_pct
+    if current + proposed_cost > max_allowed:
+        failed.append(
+            f"Strategy exposure limit: {signal.strategy.value} at "
+            f"${current + proposed_cost:.2f} > ${max_allowed:.2f} "
+            f"({max_pct:.0%} limit)"
+        )
 
 
 def check_obvious_no_limit(

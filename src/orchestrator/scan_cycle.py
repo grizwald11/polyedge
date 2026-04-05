@@ -70,6 +70,45 @@ async def _scan_markets(scanner, poly_scanner, metrics, logger) -> None:
         logger.error(f"Market scan failed: {e}", exc_info=True)
         if metrics is not None:
             metrics.record_error("scanner", str(e))
+        markets = []
+
+    # M-14: Fall back to cached markets from database when scan returns empty
+    if not markets:
+        try:
+            cached = scanner.db.get_active_markets()
+            if cached:
+                logger.warning(
+                    f"M-14: Using {len(cached)} cached markets from database (scan failed or empty)"
+                )
+                # Convert cached dicts to Market objects
+                cached_markets = []
+                for row in cached:
+                    try:
+                        m = Market(
+                            ticker=row["ticker"],
+                            question=row.get("question", row["ticker"]),
+                            tokens=[
+                                MarketToken(
+                                    token_id=f"{row['ticker']}_yes",
+                                    outcome=TokenOutcome.YES,
+                                    price=float(row.get("yes_price", 0)),
+                                ),
+                                MarketToken(
+                                    token_id=f"{row['ticker']}_no",
+                                    outcome=TokenOutcome.NO,
+                                    price=float(row.get("no_price", 0)),
+                                ),
+                            ],
+                        )
+                        cached_markets.append(m)
+                    except Exception:
+                        continue
+                if cached_markets:
+                    markets = cached_markets
+        except Exception as cache_err:
+            logger.warning(f"M-14: Cached market fallback also failed: {cache_err}")
+
+    if not markets:
         return None, poly_markets
     return markets, poly_markets
 

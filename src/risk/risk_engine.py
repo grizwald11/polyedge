@@ -150,6 +150,9 @@ class RiskEngine:
         )
         risk_checks.check_wash_trade(signal.market_id, self.db, failed)
         risk_checks.check_manipulation(self.manipulation_detector, market, failed)
+        risk_checks.check_strategy_exposure(
+            self.settings, self.positions, signal, bankroll, proposed_cost, failed,
+        )
         risk_checks.check_obvious_no_limit(
             self.settings, self.positions, signal, bankroll, proposed_cost, failed,
         )
@@ -253,6 +256,11 @@ class RiskEngine:
 
     def _check_manipulation(self, market, failed):
         return risk_checks.check_manipulation(self.manipulation_detector, market, failed)
+
+    def _check_strategy_exposure(self, signal, bankroll, proposed_cost, failed):
+        return risk_checks.check_strategy_exposure(
+            self.settings, self.positions, signal, bankroll, proposed_cost, failed,
+        )
 
     def _check_obvious_no_limit(self, signal, bankroll, proposed_cost, failed):
         return risk_checks.check_obvious_no_limit(

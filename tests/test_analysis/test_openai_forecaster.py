@@ -236,7 +236,9 @@ class TestOpenAIForecasterAssess:
 
             result = await forecaster.assess_market(_make_market())
 
-            assert result is None
+            assert result is not None
+            assert result.parse_failed is True
+            assert "GPT-4o API call failed" in result.reasoning
             assert forecaster._consecutive_failures == 1
 
     @pytest.mark.asyncio
@@ -255,7 +257,9 @@ class TestOpenAIForecasterAssess:
 
             result = await forecaster.assess_market(_make_market())
 
-            assert result is None
+            assert result is not None
+            assert result.parse_failed is True
+            assert "empty content" in result.reasoning
             assert forecaster._consecutive_failures == 1
 
     @pytest.mark.asyncio

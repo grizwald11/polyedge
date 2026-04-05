@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -30,6 +31,10 @@ logger = logging.getLogger(__name__)
 MAX_POLLS = 5
 MAX_PROCESSED_FILLS = 10000  # M-13: prune oldest entries when exceeded
 POLL_STATES_TERMINAL = {"executed", "canceled", "cancelled"}
+
+# H-3: Partial fill cancel-remainder policy
+PARTIAL_FILL_CANCEL_AFTER_SECONDS = 600  # Cancel remainder after 10 minutes
+PARTIAL_FILL_MIN_FILL_PCT = 0.50  # Only cancel when >50% of order is filled
 
 
 class FillTracker:
@@ -101,6 +106,7 @@ class FillTracker:
 
         fills: list[Trade] = []
         resolved: list[str] = []
+        now = datetime.now(timezone.utc)
 
         for result in poll_results:
             if isinstance(result, Exception):
@@ -132,6 +138,25 @@ class FillTracker:
                         partial_trade = None
                     if partial_trade:
                         fills.append(partial_trade)
+                # H-3: Cancel remainder if >50% filled and order resting >10 min
+                if remaining > 0 and filled_count > 0:
+                    total_count = filled_count + remaining
+                    fill_pct = filled_count / total_count if total_count > 0 else 0.0
+                    age = (now - order.created_at).total_seconds()
+                    if fill_pct >= PARTIAL_FILL_MIN_FILL_PCT and age >= PARTIAL_FILL_CANCEL_AFTER_SECONDS:
+                        logger.info(
+                            f"Cancelling remainder of partially filled order {order_id}: "
+                            f"{filled_count}/{total_count} contracts filled after {age:.0f}s"
+                        )
+                        try:
+                            exchange_id = getattr(order, "exchange_order_id", None) or order_id
+                            await self.kalshi.cancel_order(exchange_id)
+                            resolved.append(order_id)
+                        except Exception as cancel_err:
+                            logger.error(
+                                f"Failed to cancel remainder of {order_id}: {cancel_err}",
+                                exc_info=True,
+                            )
                 if remaining == 0:
                     resolved.append(order_id)
             elif kalshi_status in ("canceled", "cancelled"):
@@ -143,7 +168,6 @@ class FillTracker:
             self._pending_orders.pop(oid, None)
 
         # H-3: Escalate orders stuck pending for >1 hour
-        now = datetime.now(timezone.utc)
         stale_escalate: list[str] = []
         for oid, order in list(self._pending_orders.items()):
             if oid in resolved:
@@ -293,8 +317,9 @@ class FillTracker:
             self.db.log_trade(trade)
             self._log_order_with_conn(order, conn)
             conn.commit()
-        except Exception:
+        except (sqlite3.Error, OSError, TimeoutError) as db_err:
             conn.rollback()
+            logger.error(f"DB error recording partial fill for {order.id}: {db_err}", exc_info=True)
             raise
         self._partial_recorded[order.id] = filled_count
         self._prune_partial_recorded()
@@ -378,8 +403,9 @@ class FillTracker:
             self._log_order_with_conn(order, conn)
             self.db.log_trade(trade)
             conn.commit()
-        except Exception:
+        except (sqlite3.Error, OSError, TimeoutError) as db_err:
             conn.rollback()
+            logger.error(f"DB error recording fill for {order.id}: {db_err}", exc_info=True)
             raise
 
         logger.info(

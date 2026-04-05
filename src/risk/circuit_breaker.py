@@ -146,6 +146,15 @@ class CircuitBreaker:
         daily_pnl += unrealized_pnl * UNREALIZED_PNL_DAILY_WEIGHT
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
 
+        # H-7: Log per-strategy P&L breakdown for attribution
+        try:
+            strategy_pnl = self.db.get_pnl_by_strategy(days=1)
+            if strategy_pnl:
+                breakdown = ", ".join(f"{s}=${p:.2f}" for s, p in strategy_pnl.items())
+                logger.info(f"Daily P&L by strategy: {breakdown} (total=${daily_pnl:.2f})")
+        except Exception:
+            logger.debug("Could not fetch per-strategy P&L breakdown", exc_info=True)
+
         if daily_pnl < -daily_limit:
             reason = (
                 f"Daily loss limit hit: ${daily_pnl:.2f} exceeds "

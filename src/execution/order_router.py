@@ -14,6 +14,8 @@ import asyncio
 import logging
 import sqlite3
 from datetime import datetime, timezone
+
+import httpx
 from typing import TYPE_CHECKING, Optional
 
 from src.config import Settings
@@ -221,8 +223,14 @@ class OrderRouter:
                 result = await self._paper_fill(order)
             else:
                 result = await self._live_fill(order)
-        except Exception:
+        except (httpx.HTTPError, asyncio.TimeoutError, OSError, ValueError) as exc:
             # H-12: Release reserved cost if submission itself raises
+            if is_live:
+                await self._remove_pending(order.id)
+            raise
+        except Exception as exc:
+            # Catch-all for unexpected errors; still release reserved cost
+            logger.error(f"Unexpected error routing order {order.id}: {exc}", exc_info=True)
             if is_live:
                 await self._remove_pending(order.id)
             raise

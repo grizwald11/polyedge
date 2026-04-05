@@ -229,9 +229,10 @@ class TestScanMarkets:
         assert len(poly) == 1
 
     @pytest.mark.asyncio
-    async def test_kalshi_scan_failure_returns_empty_list(self):
+    async def test_kalshi_scan_failure_returns_none_with_no_cache(self):
         scanner = MagicMock()
         scanner.run_scan_cycle = AsyncMock(return_value=Exception("scan error"))
+        scanner.db.get_active_markets.return_value = []  # M-14: no cached markets
 
         poly_scanner = MagicMock()
         poly_scanner.run_scan_cycle = AsyncMock(return_value=[])
@@ -252,7 +253,8 @@ class TestScanMarkets:
         with patch("src.orchestrator.scan_cycle.asyncio.gather", side_effect=fake_gather):
             result, poly = await _scan_markets(scanner, poly_scanner, metrics, logger)
 
-        assert result == [] or result is not None
+        # M-14: With no cached markets, result is None (scan failed, no fallback)
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_scan_exception_records_metric_error(self):

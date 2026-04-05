@@ -131,7 +131,7 @@ async def _process_exits(
                     platform=position.platform.value if hasattr(position.platform, 'value') else str(getattr(position, 'platform', 'kalshi')),
                 )
             except Exception as e:
-                logger.debug(f"Failed to log exit reason for {position.market_id}: {e}")
+                logger.warning(f"Failed to log exit reason for {position.market_id}: {e}")
             if settings.alerts.alert_on_trade:
                 try:
                     await alert_manager.send_trade_alert(
@@ -246,6 +246,7 @@ async def _execute_signals(
             continue
 
         current_exposure = position_manager.get_total_exposure()
+        strategy_name = signal.strategy.value if hasattr(signal.strategy, 'value') else str(signal.strategy)
         contracts = kelly_sizer.calculate_position_size(
             edge=signal.edge,
             probability=signal.probability_estimate,
@@ -253,7 +254,19 @@ async def _execute_signals(
             current_exposure=current_exposure,
             order_price=signal.market_price,
             confidence=signal.confidence,
+            strategy=strategy_name,
         )
+
+        # M-12: Log Kelly sizing details for debugging and audit
+        if contracts > 0:
+            cost_price = max(signal.probability_estimate - signal.edge, signal.market_price) if signal.market_price > 0 else (signal.probability_estimate - signal.edge)
+            bankroll_fraction = (contracts * cost_price) / bankroll if bankroll > 0 else 0.0
+            logger.debug(
+                f"Kelly details for {signal.market_id}: edge={signal.edge:.3f}, "
+                f"prob={signal.probability_estimate:.3f}, bankroll_frac={bankroll_fraction:.4f}, "
+                f"final_contracts={contracts}, cost_price=${cost_price:.3f}, "
+                f"strategy={strategy_name}"
+            )
 
         # NOTE: Circuit breaker multiplier is already applied inside
         # kelly_sizer via set_circuit_breaker_multiplier(). Do NOT apply

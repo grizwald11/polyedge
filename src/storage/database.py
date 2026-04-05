@@ -484,6 +484,9 @@ class Database(
 
     def _run_migrations(self, conn: sqlite3.Connection):
         """Run schema migrations for existing databases."""
+        # H-8: Forward-compatible INTEGER cents migration started in v17 below.
+        # Next steps: add _cents columns to orders table, then update read paths
+        # to prefer _cents columns when available.
         # Migration v2 -> v3: add brier_score and profit_loss to calibration_records
         existing_cols = {
             row[1]
@@ -777,6 +780,23 @@ class Database(
                 )
             """)
             logger.info("Migration v16: created pending_exits table for exit order persistence")
+
+        # Migration v17: H-8 — add INTEGER cents columns to trades table.
+        # Forward-compatible: existing REAL columns remain untouched, new code
+        # can read from _cents columns when available. Backfills from existing data.
+        trades_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        if "price_cents" not in trades_cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN price_cents INTEGER")
+            conn.execute("ALTER TABLE trades ADD COLUMN fee_cents INTEGER")
+            conn.execute(
+                "UPDATE trades SET "
+                "price_cents = CAST(ROUND(price * 100) AS INTEGER), "
+                "fee_cents = CAST(ROUND(fee * 100) AS INTEGER) "
+                "WHERE price_cents IS NULL"
+            )
+            logger.info("Migration v17: added price_cents/fee_cents INTEGER columns to trades (H-8)")
 
         conn.commit()
 

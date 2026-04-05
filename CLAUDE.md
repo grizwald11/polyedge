@@ -4,7 +4,7 @@
 
 ## 1. PROJECT OVERVIEW
 
-PolyEdge runs 7+ complementary strategies simultaneously on Polymarket:
+PolyEdge runs 7+ complementary strategies simultaneously on Kalshi (CFTC-regulated):
 1. **AI Probability** — Claude estimates true probabilities, trades mispriced markets
 2. **Cross-Market Logical Arb** — Pricing inconsistencies between related markets (same platform)
 3. **Cross-Platform Arb** — Kalshi vs Polymarket discrepancies (min similarity 0.55)
@@ -13,9 +13,11 @@ PolyEdge runs 7+ complementary strategies simultaneously on Polymarket:
 6. **Late Resolution** — Markets resolving <6h where outcome >90% certain but priced <80%
 7. **Mean Reversion** — Fades >10% moves in 2h, max 2% bankroll, auto-closes in 4h
 
+> **Note:** Polymarket is used as a read-only cross-reference for price validation only. All trade execution happens on Kalshi.
+
 **Why it wins:** Fee-free event markets only | information edge (not speed) | multi-strategy diversification | paper-trade-first discipline | self-calibrating
 
-**Revenue target:** Conservative 5–10% monthly, aggressive 15–30%. Top 1% Polymarket traders have 55–67% win rates — edge comes from SIZING, not accuracy.
+**Revenue target:** Conservative 5–10% monthly, aggressive 15–30%. Top 1% prediction market traders have 55–67% win rates — edge comes from SIZING, not accuracy.
 
 ## 2. RESEARCH-BACKED DESIGN DECISIONS
 

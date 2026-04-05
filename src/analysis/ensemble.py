@@ -52,6 +52,28 @@ def extremize(probability: float, factor: float = DEFAULT_EXTREMIZE_FACTOR) -> f
     return max(0.01, min(0.99, result))
 
 
+def apply_overconfidence_shrinkage(
+    prob: float, ci_width: float, shrinkage: float = 0.05,
+) -> float:
+    """M-3: Shrink extreme, narrow-CI forecasts toward 0.5.
+
+    Claude is systematically overconfident by 5-15% on extreme predictions.
+    When the confidence interval is narrow (high confidence) AND the
+    probability is extreme, apply conservative shrinkage toward 0.5.
+
+    Args:
+        prob: Probability estimate (0-1)
+        ci_width: Width of confidence interval (confidence_high - confidence_low)
+        shrinkage: Shrinkage factor toward 0.5 (default 5%)
+
+    Returns:
+        Adjusted probability, shrunk toward 0.5 if conditions met.
+    """
+    if (prob > 0.93 or prob < 0.07) and ci_width < 0.15:
+        return prob * (1 - shrinkage) + 0.5 * shrinkage
+    return prob
+
+
 @dataclass
 class ModelWeight:
     """A forecast source with its weight."""
@@ -106,6 +128,7 @@ def ensemble_forecast(
     market_price: float,
     claude_weight: float = 0.85,
     market_efficiency: Optional[float] = None,
+    extremize_factor: float = DEFAULT_EXTREMIZE_FACTOR,
 ) -> EnsembleForecast:
     """Combine Claude forecast with market price using adaptive weights.
 
@@ -178,7 +201,13 @@ def ensemble_forecast(
     )
 
     # Extremize: push away from 50% to correct for averaging regression
-    final_prob = extremize(final_prob)
+    final_prob = extremize(final_prob, factor=extremize_factor)
+
+    # M-3: Overconfidence shrinkage for extreme forecasts with narrow CI.
+    # Claude systematically overconfident by 5-15% on extreme predictions.
+    # When CI is narrow (high confidence) AND probability is extreme,
+    # apply conservative 5% shrinkage toward 0.5.
+    final_prob = apply_overconfidence_shrinkage(final_prob, ci_width)
 
     # Clamp
     final_prob = max(0.01, min(0.99, final_prob))
@@ -205,6 +234,7 @@ def multi_model_ensemble(
     category: str = "",
     category_brier_scores: Optional[dict[str, dict[str, float]]] = None,
     market_efficiency: Optional[float] = None,
+    extremize_factor: float = DEFAULT_EXTREMIZE_FACTOR,
 ) -> EnsembleForecast:
     """Combine multiple model forecasts using Brier-score-weighted averaging.
 
@@ -260,7 +290,14 @@ def multi_model_ensemble(
         final_prob += mw.forecast.probability * mw.weight
 
     # Extremize: push away from 50% to correct for averaging regression
-    final_prob = extremize(final_prob)
+    final_prob = extremize(final_prob, factor=extremize_factor)
+
+    # M-3: Overconfidence shrinkage for extreme forecasts with narrow CI.
+    # Claude systematically overconfident by 5-15% on extreme predictions.
+    # When CI is narrow (high confidence) AND probability is extreme,
+    # apply conservative 5% shrinkage toward 0.5.
+    avg_ci_width = sum(abs(f.confidence_high - f.confidence_low) for f in forecasts) / len(forecasts)
+    final_prob = apply_overconfidence_shrinkage(final_prob, avg_ci_width)
 
     final_prob = max(0.01, min(0.99, final_prob))
     edge = final_prob - market_price

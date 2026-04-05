@@ -82,6 +82,7 @@ class TradingConfig(BaseModel):
     #   P(NO) = 1 - yes_price * multiplier
     # At 0.3: YES=$0.03 → P(NO)=0.991. Accounts for illiquidity inflating YES prices.
     # Calibrate against historical obvious-NO resolutions. Range: 0.1 (very conservative) to 0.5.
+    max_strategy_exposure_pct: float = 0.15  # H-5: Max per-strategy exposure as % of bankroll
     max_trades_per_cycle: int = 5  # Max trades per scan cycle to prevent overtrading
     max_concurrent_positions: int = 6  # H-2: Hard cap on simultaneous open positions
     allow_position_additions: bool = True  # If False, block all trades on markets where a position already exists

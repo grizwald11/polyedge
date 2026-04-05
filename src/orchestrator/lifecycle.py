@@ -281,25 +281,38 @@ async def _initialize_services(settings, logger) -> _Components:
         logger.error("ANTHROPIC_API_KEY not set — Claude forecasting will not work")
     c.forecaster = ClaudeForecaster(settings)
     if settings.anthropic_api_key:
-        try:
-            await c.forecaster.health_check()
-            logger.info("Anthropic API: key validated successfully")
-        except (
-            anthropic.APIError,
-            anthropic.AuthenticationError,
-            anthropic.APIConnectionError,
-            asyncio.TimeoutError,
-            RuntimeError,
-        ) as e:
-            # M-3: Narrowed from bare Exception — catch Anthropic API and runtime errors
-            logger.critical(
-                f"Anthropic API key validation FAILED: {e}. "
-                "WARNING: The bot will have DEGRADED SIGNAL GENERATION. "
-                "AI probability, cross-market arbitrage validation, and news-reactive "
-                "strategies will NOT produce signals until the Anthropic API is reachable. "
-                "Check ANTHROPIC_API_KEY and API status at https://status.anthropic.com",
-                exc_info=True,
-            )
+        # H-4: Retry Anthropic key validation up to 3 times with exponential backoff
+        validated = False
+        for attempt in range(3):
+            try:
+                await c.forecaster.health_check()
+                logger.info("Anthropic API: key validated successfully")
+                validated = True
+                break
+            except (
+                anthropic.APIError,
+                anthropic.AuthenticationError,
+                anthropic.APIConnectionError,
+                asyncio.TimeoutError,
+                RuntimeError,
+            ) as e:
+                if attempt < 2:
+                    delay = 2 ** (attempt + 1)
+                    logger.warning(
+                        f"Anthropic API validation attempt {attempt + 1}/3 failed: {e}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    # M-3: Narrowed from bare Exception — catch Anthropic API and runtime errors
+                    logger.critical(
+                        f"Anthropic API key validation FAILED after 3 attempts: {e}. "
+                        "WARNING: The bot will have DEGRADED SIGNAL GENERATION. "
+                        "AI probability, cross-market arbitrage validation, and news-reactive "
+                        "strategies will NOT produce signals until the Anthropic API is reachable. "
+                        "Check ANTHROPIC_API_KEY and API status at https://status.anthropic.com",
+                        exc_info=True,
+                    )
     c.calibration = CalibrationTracker(c.db)
     c.resolution_tracker = ResolutionTracker(c.kalshi, c.db, calibration_tracker=c.calibration)
     c.calibration_analyzer = CalibrationAnalyzer(c.db)
@@ -358,6 +371,15 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
             logger.info("Whale tracker strategy disabled: empty basket")
     except Exception as e:
         logger.info(f"Whale tracker strategy disabled: {e}")
+
+    # M-10: Polymarket regulatory gate — require explicit non-US confirmation
+    import os
+    if settings.polymarket.enabled:
+        if os.environ.get("CONFIRM_NON_US_POLYMARKET") != "true":
+            logger.error(
+                "CONFIRM_NON_US_POLYMARKET env var required to enable Polymarket. Disabling."
+            )
+            settings.polymarket.enabled = False
 
     # Polymarket read-only cross-reference (no execution capability)
     if settings.polymarket.enabled:

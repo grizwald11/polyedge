@@ -63,6 +63,14 @@ SLIPPAGE_BUFFER = 0.02
 # typical market spread and order routing latency.
 
 MIN_HOLD_BEFORE_EDGE_GONE = 86400  # 24 hours in seconds
+
+STALE_PRICE_THRESHOLD_SECONDS = 300
+# 5 minutes: Price data older than this is considered potentially stale.
+# Used for stale-price detection in position updates and capital rotation.
+
+STALE_PRICE_CRITICAL_SECONDS = 600
+# 10 minutes: Price data older than this is critically stale. Capital rotation
+# proceeds with a logged error rather than skipping.
 # Prediction markets need days/weeks to play out. Edge-gone checks should not
 # fire on normal price noise within the first 24 hours of holding a position.
 
@@ -246,7 +254,7 @@ class PositionManager:
             time_since_update = (now - position.last_updated).total_seconds()
             price_for_side = no_price if position.direction in (Direction.BUY_NO, Direction.SELL_NO) else yes_price
             is_resolved_price = (yes_price <= 0.01 or yes_price >= 0.99) and (no_price <= 0.01 or no_price >= 0.99)
-            if time_since_update > 300 and position.current_price > 0 and not is_resolved_price:
+            if time_since_update > STALE_PRICE_THRESHOLD_SECONDS and position.current_price > 0 and not is_resolved_price:
                 price_delta = abs(price_for_side - position.current_price)
                 if price_delta == 0:
                     position._price_stale = True
@@ -479,7 +487,7 @@ class PositionManager:
                         f"loss={loss_pct:.0%}, price age={price_age:.0f}s"
                     )
                 else:
-                    if price_age >= 600:
+                    if price_age >= STALE_PRICE_CRITICAL_SECONDS:
                         logger.error(
                             f"C-3: Stop-loss proceeding with stale price ({price_age:.0f}s) "
                             f"for {position.market_id} to prevent indefinite blocking"
@@ -504,7 +512,7 @@ class PositionManager:
                             f"price data stale ({price_age:.0f}s old)"
                         )
                     else:
-                        if price_age >= 600:
+                        if price_age >= STALE_PRICE_CRITICAL_SECONDS:
                             logger.error(
                                 f"C-3: Trailing stop proceeding with stale price ({price_age:.0f}s) "
                                 f"for {position.market_id} to prevent indefinite blocking"
@@ -536,7 +544,7 @@ class PositionManager:
                     f"gain={position.unrealized_pnl / max_gain:.0%}, price age={price_age:.0f}s"
                 )
             else:
-                if price_age >= 600:
+                if price_age >= STALE_PRICE_CRITICAL_SECONDS:
                     logger.error(
                         f"C-3: Take-profit proceeding with stale price ({price_age:.0f}s) "
                         f"for {position.market_id} to prevent indefinite blocking"
@@ -578,7 +586,7 @@ class PositionManager:
                         f"price data stale ({price_age:.0f}s old)"
                     )
                 else:
-                    if price_age >= 600:
+                    if price_age >= STALE_PRICE_CRITICAL_SECONDS:
                         logger.error(
                             f"C-3: Edge-gone proceeding with stale price ({price_age:.0f}s) "
                             f"for {position.market_id} to prevent indefinite blocking"
@@ -593,13 +601,13 @@ class PositionManager:
         #    Skip if market price data is stale (>5 min) to avoid exiting on outdated edge calc.
         if market is not None and position.unrealized_pnl > 0:
             price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
-            if price_age > 300 and price_age < 600:
+            if price_age > STALE_PRICE_THRESHOLD_SECONDS and price_age < STALE_PRICE_CRITICAL_SECONDS:
                 logger.debug(
                     f"Skipping capital_rotation for {position.market_id}: "
                     f"price data stale ({price_age:.0f}s old)"
                 )
             else:
-                if price_age >= 600:
+                if price_age >= STALE_PRICE_CRITICAL_SECONDS:
                     logger.error(
                         f"C-3: Capital rotation proceeding with stale price ({price_age:.0f}s) "
                         f"for {position.market_id} to prevent indefinite blocking"
@@ -928,6 +936,32 @@ class PositionManager:
             conn.commit()
         except Exception as e:
             logger.error(f"Failed to update trade P&L in DB: {e}", exc_info=True)
+
+    def check_partial_fill_deviation(
+        self, order_id: str, expected_price: float, actual_price: float
+    ) -> bool:
+        """Check if a partial fill price deviates >2% from expected.
+
+        Returns True if deviation exceeds the 2% threshold (informational flag
+        for callers to review the position). Logs a warning when triggered.
+
+        H-3: Helps detect adverse fills on partially filled orders.
+        """
+        if expected_price <= 0:
+            logger.warning(
+                f"H-3: Cannot check deviation for order {order_id}: "
+                f"expected_price={expected_price} is non-positive"
+            )
+            return False
+        deviation = abs(actual_price - expected_price) / expected_price
+        if deviation > 0.02:
+            logger.warning(
+                f"H-3: Partial fill price deviation for order {order_id}: "
+                f"expected=${expected_price:.4f}, actual=${actual_price:.4f}, "
+                f"deviation={deviation:.2%} (>2% threshold)"
+            )
+            return True
+        return False
 
     def _direction_from_trade(self, trade: Trade) -> Direction:
         """Infer direction from trade side and token."""

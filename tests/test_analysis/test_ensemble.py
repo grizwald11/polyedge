@@ -477,17 +477,20 @@ class TestEnsembleExtremeCombinations:
         assert result.final_probability >= 0.50
 
     def test_both_extreme_high(self):
-        """Both Claude and market at 0.99."""
+        """Both Claude and market at 0.99 — M-3 shrinkage pulls toward 0.5."""
         f = _make_forecast(0.99)
         result = ensemble_forecast(f, market_price=0.99)
-        assert result.final_probability == pytest.approx(0.99, abs=0.01)
-        assert abs(result.edge) < 0.02
+        # M-3: overconfidence shrinkage pulls extreme narrow-CI forecasts
+        # toward 0.5 by 5%, so result is ~0.965 not 0.99
+        assert result.final_probability == pytest.approx(0.965, abs=0.01)
 
     def test_both_extreme_low(self):
-        """Both Claude and market at 0.01."""
+        """Both Claude and market at 0.01 — M-3 shrinkage pulls toward 0.5."""
         f = _make_forecast(0.01)
         result = ensemble_forecast(f, market_price=0.01)
-        assert result.final_probability == pytest.approx(0.01, abs=0.01)
+        # M-3: overconfidence shrinkage pulls extreme narrow-CI forecasts
+        # toward 0.5 by 5%, so result is ~0.035 not 0.01
+        assert result.final_probability == pytest.approx(0.035, abs=0.01)
 
     def test_wide_ci_reduces_claude_weight(self):
         """Very wide CI (0.0–1.0) should reduce Claude's influence."""

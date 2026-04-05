@@ -101,6 +101,28 @@ class StatsMixin:
             })
         return result
 
+    def get_pnl_by_strategy(self, days: int = 30) -> dict[str, float]:
+        """Get total realized P&L grouped by strategy over the last N days.
+
+        H-7: Enables per-strategy P&L attribution for circuit breaker logging
+        and daily reporting.
+
+        Args:
+            days: Lookback window in days (default 30).
+
+        Returns:
+            Dict of strategy_name -> total realized_pnl (float).
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT strategy, ROUND(COALESCE(SUM(realized_pnl), 0), 4) as total "
+            "FROM trades WHERE timestamp >= ? GROUP BY strategy",
+            (cutoff,),
+        ).fetchall()
+        return {row["strategy"]: row["total"] for row in rows}
+
     def get_stats(self) -> dict:
         """Get database stats summary."""
         conn = self._get_conn()

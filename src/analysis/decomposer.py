@@ -155,7 +155,7 @@ class QuestionDecomposer:
                 else f"Decomposition assumes {decomp_type} independence"
             ],
             reasoning=reasoning,
-            model_used=self.forecaster._select_model(),
+            model_used=self.forecaster._select_model(edge=0.0),
             tokens_used=total_tokens,
             latency_ms=latency_ms,
         )
@@ -182,7 +182,7 @@ class QuestionDecomposer:
         )
 
         try:
-            model = self.forecaster._select_model()
+            model = self.forecaster._select_model(edge=0.0)
             temperature = 0.2  # Low temperature for structured decomposition
             timeout = self.forecaster.settings.claude.api_timeout_seconds
 
@@ -315,7 +315,7 @@ class QuestionDecomposer:
                 )
 
             try:
-                model = self.forecaster._select_model()
+                model = self.forecaster._select_model(edge=0.0)
                 temperature = 0.25
                 timeout = self.forecaster.settings.claude.api_timeout_seconds
 

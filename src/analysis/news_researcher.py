@@ -72,6 +72,11 @@ _ENTITY_EXPANSIONS = [
     ("IMF ", "International Monetary Fund "),
     ("ECB ", "European Central Bank "),
     ("BOJ ", "Bank of Japan "),
+    # M-6: Additional abbreviation expansions
+    ("FDA ", "Food and Drug Administration "),
+    ("DOT ", "Department of Transportation "),
+    ("HHS ", "Department of Health and Human Services "),
+    ("BOE ", "Bank of England "),
 ]
 
 
@@ -122,8 +127,11 @@ class NewsResearcher:
 
     @property
     def serper_permanently_disabled(self) -> bool:
-        """True if Serper hit 3 consecutive auth failures and is permanently off."""
-        return self._serper_disabled and self._serper_disabled_at == float("inf")
+        """True if Serper hit 3+ consecutive auth failures and is disabled.
+
+        M-4: No longer truly permanent — will auto-recover after cooldown period.
+        """
+        return self._serper_disabled and self._serper_auth_failure_count >= 3
 
     def generate_queries(self, market_question: str) -> list[str]:
         """Generate 2-3 targeted search queries from a market question.
@@ -150,7 +158,10 @@ class NewsResearcher:
 
         # Add a more specific query focusing on key entities
         # Extract capitalized words as likely entities
+        # M-6: Also match all-caps entities (e.g., NATO, FDA, GDP)
         entities = re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*", market_question)
+        allcaps_entities = re.findall(r"\b[A-Z]{2,}\b", market_question)
+        entities = entities + allcaps_entities
         if entities:
             entity_query = " ".join(entities[:3])
             if entity_query.lower() != cleaned.lower():
@@ -176,58 +187,34 @@ class NewsResearcher:
             if results:
                 return results
 
-        # M-12: Auto-recover if Serper API key has changed since permanent disable
+        # M-12: Auto-recover if Serper API key has changed since disable
         if (
             self._serper_disabled
-            and self._serper_disabled_at == float("inf")
             and self._serper_key_at_disable is not None
             and self.serper_api_key != self._serper_key_at_disable
         ):
             logger.info(
-                "Serper API key changed since permanent disable — auto-resetting"
+                "Serper API key changed since disable — auto-resetting"
             )
             self._serper_disabled = False
             self._serper_disabled_at = 0.0
             self._serper_auth_failure_count = 0
             self._serper_key_at_disable = None
 
-        # H-3 FIX: Auto-recover permanently disabled Serper after 1 hour.
-        # If 3+ auth failures were actually transient (network issue misclassified
-        # as auth), we don't want to permanently lose the paid search backend.
-        # After 1 hour, attempt a single probe query — if it succeeds, re-enable.
-        SERPER_PERMANENT_PROBE_INTERVAL = 3600  # 1 hour
-        if (
-            self._serper_disabled
-            and self._serper_disabled_at == float("inf")
-            and self.serper_api_key
-            and self._serper_key_at_disable == self.serper_api_key  # Key hasn't changed
-        ):
-            import time as _time
-            last_probe = getattr(self, "_serper_last_probe_time", 0.0)
-            if _time.monotonic() - last_probe >= SERPER_PERMANENT_PROBE_INTERVAL:
-                self._serper_last_probe_time = _time.monotonic()
-                logger.info("H-3: Probing Serper API after permanent disable (1h recovery attempt)")
-                try:
-                    probe_results = await self._search_serper("test probe query")
-                    if probe_results is not None:  # Even empty list means API responded OK
-                        logger.info("H-3: Serper probe succeeded — re-enabling API")
-                        self._serper_disabled = False
-                        self._serper_disabled_at = 0.0
-                        self._serper_auth_failure_count = 0
-                        self._serper_key_at_disable = None
-                except Exception as probe_err:
-                    logger.debug(f"H-3: Serper probe still failing: {probe_err}")
-
-        # Re-enable Serper after cooldown — but not if permanently disabled
-        # (3+ consecutive auth failures sets _serper_disabled_at to float("inf"))
-        if self._serper_disabled and 0 < self._serper_disabled_at < float("inf"):
+        # M-4: Re-enable Serper after cooldown (applies to all disables, including 3+ auth failures).
+        # Previously 3+ auth failures used float("inf") which prevented cooldown recovery.
+        # Now all disables use monotonic time and can recover after the cooldown period.
+        if self._serper_disabled and self._serper_disabled_at > 0:
             import time as _time
             elapsed = _time.monotonic() - self._serper_disabled_at
             if elapsed >= self._serper_cooldown_seconds:
-                logger.info("Serper API cooldown expired — re-enabling")
+                logger.info(
+                    f"Serper API cooldown expired after {elapsed:.0f}s "
+                    f"(auth failures was {self._serper_auth_failure_count}) — re-enabling"
+                )
                 self._serper_disabled = False
                 self._serper_disabled_at = 0.0
-                self._serper_auth_failure_count = 0  # Reset counter after successful cooldown
+                self._serper_auth_failure_count = 0
 
         # Fall back to Serper if configured and not disabled
         if self.serper_api_key and not self._serper_disabled:
@@ -261,7 +248,10 @@ class NewsResearcher:
             if status == 429:
                 logger.warning("Serper rate limited (429) — retries exhausted")
                 return []
-            # Auth errors (400/401/403): apply escalating disable logic
+            # M-4: Only count actual auth errors (401/403) — not 400 (bad request)
+            if status not in (401, 403):
+                logger.warning(f"Serper non-auth HTTP error ({status}) — not counting as auth failure")
+                return []
             try:
                 detail = orig.response.json().get("message", str(status))
             except (ValueError, KeyError, AttributeError):
@@ -277,7 +267,9 @@ class NewsResearcher:
                     f"Fix: check SERPER_API_KEY, then call reset_serper() or restart."
                 )
                 self._serper_disabled = True
-                self._serper_disabled_at = float("inf")
+                # M-4: Use monotonic time instead of float("inf") to allow
+                # recovery after cooldown period (1 hour) for transient errors
+                self._serper_disabled_at = _time.monotonic()
                 self._serper_key_at_disable = self.serper_api_key
             elif self._serper_auth_failure_count >= 2:
                 logger.warning(
