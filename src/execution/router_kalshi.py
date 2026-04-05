@@ -271,7 +271,7 @@ async def _handle_final_status(
 
     if final_status == "resting":
         order.status = OrderStatus.OPEN
-        await router._add_pending(order.id, order.cost)
+        # H-12: Pending cost already reserved in route_order before submission
         router._log_order(order)
         logger.info(
             f"[LIVE] Order resting: {order.side.value} {int(order.size)}x "
@@ -391,7 +391,7 @@ async def _balance_preflight(router: OrderRouter, order: Order) -> Optional[Orde
                     f"Balance pre-flight retry {_bal_attempt + 1}/{balance_retries} "
                     f"for large order (${order.cost:.2f}): {e}"
                 )
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(1.0 * (2 ** _bal_attempt))
             else:
                 logger.debug(f"Balance pre-flight check skipped: {e}")
     if is_large_order and not balance_checked:
@@ -493,7 +493,8 @@ async def _recover_order_id(router: OrderRouter, order: Order, result: dict) -> 
             ):
                 recovered_id = (oo.get("order_id") or "").strip()
                 if recovered_id:
-                    # Score by timestamp proximity to our order creation time
+                    # M-2: Score by timestamp proximity AND field matching
+                    # to improve accuracy when multiple similar orders exist.
                     oo_created = oo.get("created_time") or oo.get("created_at") or ""
                     time_score = 0
                     if oo_created and hasattr(order, "created_at") and order.created_at:
@@ -506,7 +507,20 @@ async def _recover_order_id(router: OrderRouter, order: Order, result: dict) -> 
                                 continue  # Too old to be our order
                         except (ValueError, TypeError):
                             time_score = 0  # Can't parse, use as fallback
-                    candidates.append((time_score, recovered_id, oo))
+
+                    # M-2: Additional field-matching score (0-30 points)
+                    field_score = 0
+                    if oo.get("ticker") == order.market_id:
+                        field_score += 10  # Ticker match
+                    if oo.get("side", "").lower() == (order.kalshi_side or "").lower():
+                        field_score += 10  # Side match
+                    oo_price_cents = int(oo.get("yes_price", 0))
+                    order_price_cents = dollars_to_cents(order.price)
+                    if abs(oo_price_cents - order_price_cents) <= 1:
+                        field_score += 10  # Exact price match
+
+                    combined_score = time_score + field_score
+                    candidates.append((combined_score, recovered_id, oo))
         # Pick the best candidate (highest time_score = closest match)
         if candidates:
             candidates.sort(key=lambda c: c[0], reverse=True)

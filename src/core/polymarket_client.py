@@ -1,5 +1,9 @@
 """Polymarket CLOB API client — wraps py-clob-client for async trading.
 
+REGULATORY NOTICE: Polymarket is NOT available to US residents per CFTC regulations.
+This module is disabled by default (polymarket.enabled: false). Enabling requires
+explicit CONFIRM_NON_US_POLYMARKET=true environment variable confirmation.
+
 py-clob-client is synchronous, so all methods use run_in_executor()
 to avoid blocking the async event loop.
 """
@@ -8,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from decimal import Decimal, ROUND_HALF_UP
 from functools import partial
 from typing import Optional
 
@@ -150,8 +155,9 @@ class PolymarketClient:
         # py-clob-client returns balance as a string in USDC atomic units (6 decimals).
         # Always divide by 1e6 — the >1000 heuristic was fragile and wrong for
         # accounts with exactly $1000-$999999 in dollar-denominated balances.
-        raw_balance = float(result.get("balance", 0))
-        balance = raw_balance / 1e6
+        # M-11: Use Decimal for precise balance conversion from atomic USDC units
+        raw_balance = Decimal(str(result.get("balance", 0)))
+        balance = float((raw_balance / Decimal("1000000")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         if balance < 0:
             logger.warning(f"Polymarket returned negative balance: {balance}")
             return 0.0

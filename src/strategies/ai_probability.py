@@ -35,6 +35,8 @@ class AIProbabilityStrategy:
 
     # L-2: Category divergence thresholds — max allowed divergence between
     # Claude's estimate and the market price before we reject as hallucination.
+    # L-7: These thresholds are initial estimates. Recalibrate empirically
+    # after 100+ resolved predictions per category.
     MAX_DIVERGENCE_DATA_RICH = 0.30      # Politics, Elections, Fed, Economics, Financials
     MAX_DIVERGENCE_UNCERTAIN = 0.45      # World, Geopolitics
     MAX_DIVERGENCE_SPECULATIVE = 0.50    # Culture, Entertainment
@@ -314,12 +316,22 @@ class AIProbabilityStrategy:
         if not cross_check_enabled:
             signals = initial_signals
         else:
-            # H-1: Cross-check the weakest signals (lowest edge), which are most
-            # likely to be noise. Auto-pass the highest-edge signals, which are
-            # most likely real. This prioritizes validation where it matters most.
+            # M-10: Cross-check MEDIUM-edge signals — these sit in the zone where
+            # the edge is large enough to matter but uncertain enough to benefit
+            # from dual-temperature validation. Auto-pass the highest-edge signals
+            # (most likely real) and skip the lowest-edge ones (barely tradeable).
             initial_signals.sort(key=lambda s: abs(s.edge), reverse=True)
-            auto_pass = initial_signals[:len(initial_signals) - cross_check_top_n] if len(initial_signals) > cross_check_top_n else []
-            cross_check_candidates = initial_signals[len(initial_signals) - cross_check_top_n:] if len(initial_signals) > cross_check_top_n else initial_signals
+            n_signals = len(initial_signals)
+            if n_signals > cross_check_top_n:
+                # Skip the top tier (high edge, auto-pass) and bottom tier (low edge, skip).
+                # Cross-check the middle band.
+                top_cutoff = max(1, n_signals // 3)  # top third auto-passes
+                bottom_cutoff = max(top_cutoff + 1, n_signals - n_signals // 3)  # bottom third skipped
+                auto_pass = initial_signals[:top_cutoff] + initial_signals[bottom_cutoff:]
+                cross_check_candidates = initial_signals[top_cutoff:bottom_cutoff][:cross_check_top_n]
+            else:
+                auto_pass = []
+                cross_check_candidates = initial_signals
 
             for signal in cross_check_candidates:
                 market = next((m for m in markets if m.ticker == signal.market_id), None)

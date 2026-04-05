@@ -1,5 +1,9 @@
 """Polymarket market scanner — discovers, filters, ranks, and stores qualifying markets.
 
+REGULATORY NOTICE: Polymarket is NOT available to US residents per CFTC regulations.
+This module is disabled by default (polymarket.enabled: false). Enabling requires
+explicit CONFIRM_NON_US_POLYMARKET=true environment variable confirmation.
+
 Mirrors the Kalshi MarketScanner but uses PolymarketDiscovery and
 parse_polymarket_market for Polymarket-specific data formats.
 Polymarket event markets have zero fees, so no fee penalty in ranking.

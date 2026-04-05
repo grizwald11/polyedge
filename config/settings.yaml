@@ -1,7 +1,7 @@
 kalshi:
   host: "https://api.elections.kalshi.com/trade-api/v2"
   demo_host: "https://demo-api.kalshi.co/trade-api/v2"
-  use_demo: false  # L-5: Production host active. Safe because trading.mode=paper. Set true for full sandbox.
+  use_demo: true  # H-7: Use demo API in paper mode to avoid hitting production. Set false only for live trading.
 
 polymarket:
   clob_host: "https://clob.polymarket.com"
@@ -46,6 +46,7 @@ trading:
   daily_loss_limit_pct: 0.08    # 8% daily loss circuit breaker (was 15% — too generous)
   max_obvious_no_pct: 0.10      # Max 10% bankroll in obvious NO positions
   max_trades_per_cycle: 5       # Max trades per scan cycle (matches config.py default)
+  max_concurrent_positions: 15  # M-13: Max open positions at any time (prevents over-diversification)
 
 claude:
   model_primary: "claude-sonnet-4-6"

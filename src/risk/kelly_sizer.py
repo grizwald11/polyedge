@@ -268,6 +268,7 @@ class KellySizer:
         market_liquidity: float | None = None,
         fee_rate: float = 0.0,
         confidence: float | None = None,
+        slippage_pct: float = 0.0,
     ) -> int:
         """Calculate optimal number of contracts to buy.
 
@@ -291,12 +292,26 @@ class KellySizer:
                 ~0.0175 for maker orders in fee-enabled markets). Defaults to
                 0.0 for backward compatibility — callers should pass the
                 appropriate rate based on market type.
+            slippage_pct: M-9: Historical average slippage as a fraction (e.g. 0.02
+                for 2%). When provided and > 0, the effective edge is reduced by
+                this amount before Kelly calculation, accounting for execution
+                cost that erodes theoretical edge.
 
         Returns:
             Number of contracts (integers, minimum 1 if any edge exists)
         """
         if not self._validate_inputs(edge, probability, bankroll, current_exposure):
             return 0
+
+        # M-9: Reduce edge by historical slippage to account for execution cost
+        if slippage_pct > 0:
+            edge = edge - slippage_pct
+            if edge <= 0:
+                logger.debug(
+                    f"Kelly: edge ({edge + slippage_pct:.1%}) fully consumed by "
+                    f"slippage ({slippage_pct:.1%}) — returning 0"
+                )
+                return 0
 
         edge = self._apply_edge_decay(edge)
         if edge <= 0:
@@ -352,6 +367,22 @@ class KellySizer:
                 contracts = 1
 
         contracts = self._apply_calibration_scaling(contracts, kelly_fraction, remaining, cost_price)
+
+        # M-3: Explicit minimum contract floor — ensures we never return 0
+        # when there is a positive edge and bankroll can cover at least 1 contract.
+        # Skip if calibration/circuit-breaker deliberately zeroed us out.
+        effective_multiplier = (
+            self._calibration_multiplier
+            * self._circuit_breaker_multiplier
+            * self._regime_multiplier
+        )
+        if contracts == 0 and kelly_fraction > 0 and effective_multiplier > 0:
+            fee_cents = math.ceil(fee_rate * 1 * cost_price * (1.0 - cost_price)) if 0 < cost_price < 1 else 0
+            fee_dollars = fee_cents / 100.0
+            cost_one = cost_price + fee_dollars  # approximate cost of 1 contract
+            if remaining >= cost_one:
+                contracts = 1
+                logger.debug("M-3: Applied minimum contract floor (1 contract)")
 
         logger.debug(
             f"Kelly sizing: edge={edge:.1%}, prob={probability:.1%}, "

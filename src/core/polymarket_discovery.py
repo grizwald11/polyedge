@@ -1,5 +1,9 @@
 """Polymarket market discovery via Gamma API.
 
+REGULATORY NOTICE: Polymarket is NOT available to US residents per CFTC regulations.
+This module is disabled by default (polymarket.enabled: false). Enabling requires
+explicit CONFIRM_NON_US_POLYMARKET=true environment variable confirmation.
+
 Fetches active markets from the Gamma API, parses them into the generic
 Market model, and tags them with Platform.POLYMARKET.
 
@@ -11,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
 import httpx
@@ -62,6 +67,11 @@ def _is_binary_market(raw: dict) -> bool:
     return True
 
 
+def _decimal_price(value) -> float:
+    """M-12: Convert a raw price value to float via Decimal for precision."""
+    return float(Decimal(str(value)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+
+
 def _parse_outcome_prices(raw: dict) -> tuple[float, float]:
     """Extract YES and NO prices from Gamma API response.
 
@@ -79,34 +89,34 @@ def _parse_outcome_prices(raw: dict) -> tuple[float, float]:
         try:
             prices = json.loads(outcome_prices)
             if len(prices) >= 2:
-                yes_price = float(prices[0])
-                no_price = float(prices[1])
+                yes_price = _decimal_price(prices[0])
+                no_price = _decimal_price(prices[1])
             elif len(prices) == 1:
-                yes_price = float(prices[0])
+                yes_price = _decimal_price(prices[0])
                 if is_binary:
-                    no_price = 1.0 - yes_price
+                    no_price = _decimal_price(1.0 - yes_price)
         except (ValueError, IndexError, json.JSONDecodeError):
             pass
     elif isinstance(outcome_prices, list) and outcome_prices:
-        yes_price = float(outcome_prices[0])
+        yes_price = _decimal_price(outcome_prices[0])
         if len(outcome_prices) > 1:
-            no_price = float(outcome_prices[1])
+            no_price = _decimal_price(outcome_prices[1])
         elif is_binary:
-            no_price = 1.0 - yes_price
+            no_price = _decimal_price(1.0 - yes_price)
 
     if yes_price == 0.0:
         # Fallback to other price fields — only derive no_price for binary markets
         best_bid = raw.get("bestBid")
         if best_bid is not None:
-            yes_price = float(best_bid)
+            yes_price = _decimal_price(best_bid)
             if is_binary:
-                no_price = 1.0 - yes_price
+                no_price = _decimal_price(1.0 - yes_price)
         else:
             last_trade = raw.get("lastTradePrice")
             if last_trade is not None:
-                yes_price = float(last_trade)
+                yes_price = _decimal_price(last_trade)
                 if is_binary:
-                    no_price = 1.0 - yes_price
+                    no_price = _decimal_price(1.0 - yes_price)
 
     # Bounds-check: prices must be in [0, 1]
     yes_price = max(0.0, min(1.0, yes_price))

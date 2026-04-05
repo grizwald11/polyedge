@@ -306,9 +306,10 @@ CREATE TABLE IF NOT EXISTS prompt_variant_stats (
     PRIMARY KEY (category, variant_name)
 );
 
--- Schema version tracking
+-- Schema version tracking (M-7: with applied_at timestamp)
 CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT
 );
 """
 
@@ -435,13 +436,24 @@ class Database(
 
     def _init_db(self):
         """Create tables if they don't exist."""
+        from datetime import datetime, timezone
+
         conn = self._get_conn()
         conn.executescript(SCHEMA_SQL)
-        # Set schema version
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
-            (SCHEMA_VERSION,)
-        )
+
+        # M-7: Schema version tracking with mismatch detection
+        existing = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        db_version = existing[0] if existing and existing[0] is not None else None
+        if db_version is not None and db_version != SCHEMA_VERSION:
+            logger.warning(
+                f"Schema version mismatch: database has v{db_version}, "
+                f"code expects v{SCHEMA_VERSION}. Migrations will run."
+            )
+        if db_version is None or db_version < SCHEMA_VERSION:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (SCHEMA_VERSION, datetime.now(timezone.utc).isoformat()),
+            )
         conn.commit()
         self._run_migrations(conn)
         self._prune_stale_data(conn)
@@ -767,3 +779,100 @@ class Database(
             logger.info("Migration v16: created pending_exits table for exit order persistence")
 
         conn.commit()
+
+    def archive_old_data(self, days: int = 90) -> int:
+        """Move records older than `days` from main tables to archive tables (H-11).
+
+        Creates archive tables if they don't exist, then moves old records from
+        trades, orders, signals, and market_snapshots into their respective
+        archive tables. This controls unbounded database growth while preserving
+        historical data for analysis.
+
+        Args:
+            days: Records older than this many days are archived. Default 90.
+
+        Returns:
+            Total number of records archived across all tables.
+        """
+        conn = self._get_conn()
+        cutoff = f"-{days} days"
+        total_archived = 0
+
+        # Table configs: (source_table, timestamp_column, column_list)
+        archive_configs = [
+            (
+                "trades",
+                "timestamp",
+                "id, order_id, market_id, platform, token_id, side, price, size, "
+                "fee, realized_pnl, strategy, paper, timestamp",
+            ),
+            (
+                "orders",
+                "created_at",
+                "id, market_id, platform, token_id, side, price, size, cost, "
+                "order_type, fee_rate_bps, status, strategy, signal_id, paper, "
+                "created_at, filled_at, fill_price, cancelled_at, rejection_reason, "
+                "exchange_order_id",
+            ),
+            (
+                "signals",
+                "timestamp",
+                "id, strategy, market_id, platform, market_question, direction, "
+                "edge, probability_estimate, market_price, confidence, reasoning, "
+                "timestamp, acted_on, order_id, risk_passed, risk_failed_checks, "
+                "risk_warnings, status",
+            ),
+            (
+                "market_snapshots",
+                "timestamp",
+                "id, market_id, timestamp, yes_price, no_price, spread, "
+                "volume_1h, liquidity",
+            ),
+        ]
+
+        with self._write_lock:
+            try:
+                for source_table, ts_col, columns in archive_configs:
+                    archive_table = f"{source_table}_archive"
+
+                    # Create archive table with same schema (if not exists)
+                    conn.execute(
+                        f"CREATE TABLE IF NOT EXISTS {archive_table} "
+                        f"AS SELECT {columns} FROM {source_table} WHERE 0"
+                    )
+
+                    # Copy old records to archive
+                    inserted = conn.execute(
+                        f"INSERT INTO {archive_table} SELECT {columns} "
+                        f"FROM {source_table} "
+                        f"WHERE {ts_col} < datetime('now', ?)",
+                        (cutoff,),
+                    ).rowcount
+
+                    # Delete archived records from source
+                    if inserted > 0:
+                        conn.execute(
+                            f"DELETE FROM {source_table} "
+                            f"WHERE {ts_col} < datetime('now', ?)",
+                            (cutoff,),
+                        )
+
+                    total_archived += inserted
+                    if inserted > 0:
+                        logger.info(
+                            f"Archived {inserted} rows from {source_table} "
+                            f"(older than {days} days)"
+                        )
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.exception("Failed to archive old data")
+                raise
+
+        if total_archived > 0:
+            logger.info(f"Archive complete: {total_archived} total records moved")
+        else:
+            logger.info("Archive: no records older than %d days to archive", days)
+
+        return total_archived

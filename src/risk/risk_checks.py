@@ -183,15 +183,16 @@ def check_correlated_exposure(
                 f"${correlated_exposure + proposed_cost:.2f} > ${max_correlated:.2f}"
             )
     else:
-        # Strategy-based fallback: not all trades in one strategy are correlated,
-        # so use 50% of strategy exposure as effective correlated exposure.
+        # M-8: Reduced from 50% to 30%. Same-strategy trades aren't necessarily
+        # correlated — e.g., two AI_PROBABILITY trades on unrelated markets
+        # (Fed rate cut vs. sports regulation) have near-zero correlation.
         logger.debug(
             f"Correlation check used: strategy-based fallback for {signal.market_id}"
         )
         strategy_exposure = positions.get_strategy_exposure(signal.strategy)
-        effective_correlated = strategy_exposure * 0.5
+        effective_correlated = strategy_exposure * 0.3
         logger.info(
-            "Correlated exposure check (strategy-based fallback, 50%% correlation): "
+            "Correlated exposure check (strategy-based fallback, 30%% correlation): "
             "%s = $%.2f (raw $%.2f)", signal.strategy.value, effective_correlated, strategy_exposure,
         )
         if effective_correlated + proposed_cost > max_correlated:

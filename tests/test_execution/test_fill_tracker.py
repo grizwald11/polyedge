@@ -816,7 +816,7 @@ class TestFillTracker:
     # ──────────────────────────────────────────────────────────────────
 
     def test_processed_fills_pruned_when_exceeds_cap(self, mock_kalshi, tmp_db):
-        """When _processed_fills exceeds MAX_PROCESSED_FILLS, oldest half is pruned."""
+        """When _processed_fills exceeds MAX_PROCESSED_FILLS, oldest 25% is pruned (M-5)."""
         tracker = FillTracker(mock_kalshi, tmp_db)
 
         # Pre-fill with MAX_PROCESSED_FILLS entries
@@ -829,8 +829,8 @@ class TestFillTracker:
         order = _make_order()
         tracker._record_fill(order, {"status": "executed"})
 
-        # After pruning, set should be roughly half the cap
-        assert len(tracker._processed_fills) <= MAX_PROCESSED_FILLS // 2 + 5
+        # M-5: After pruning, set should keep ~75% of entries (drop oldest 25%)
+        assert len(tracker._processed_fills) <= (MAX_PROCESSED_FILLS * 3 // 4) + 5
 
     # ──────────────────────────────────────────────────────────────────
     # _record_fill: all contracts already recorded via partials (lines 335-337)
@@ -958,11 +958,19 @@ class TestFillTracker:
     # _load_filled_order_ids: exception path (lines 450-452)
     # ──────────────────────────────────────────────────────────────────
 
-    def test_load_filled_order_ids_exception_returns_empty_set(self, mock_kalshi, tmp_db):
-        """If the DB query for filled order IDs fails, return an empty set gracefully."""
+    def test_load_filled_order_ids_exception_raises_on_non_table_error(self, mock_kalshi, tmp_db):
+        """C-4: Non-table DB errors should raise to prevent duplicate fills."""
         with patch.object(tmp_db, "_get_conn", side_effect=RuntimeError("DB unavailable")):
-            tracker = FillTracker(mock_kalshi, tmp_db)
+            with pytest.raises(RuntimeError, match="DB unavailable"):
+                FillTracker(mock_kalshi, tmp_db)
 
+    def test_load_filled_order_ids_graceful_on_missing_table(self, mock_kalshi, tmp_db):
+        """C-4: 'no such table' errors should return empty set gracefully."""
+        from sqlite3 import OperationalError
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = OperationalError("no such table: trades")
+        with patch.object(tmp_db, "_get_conn", return_value=mock_conn):
+            tracker = FillTracker(mock_kalshi, tmp_db)
         assert tracker._processed_fills == set()
 
     # ──────────────────────────────────────────────────────────────────
@@ -1023,8 +1031,8 @@ class TestFillTracker:
         assert "PE-partial-nodup" in tracker._partial_recorded
         assert tracker._partial_recorded["PE-partial-nodup"] == 7
 
-    def test_load_partial_recorded_counts_exception_returns_empty_dict(self, mock_kalshi, tmp_db):
-        """If the DB query for partial counts fails, return empty dict gracefully."""
+    def test_load_partial_recorded_counts_exception_raises_on_non_table_error(self, mock_kalshi, tmp_db):
+        """C-4: Non-table DB errors in partial counts should raise to prevent duplicates."""
         call_count = 0
         real_get_conn = tmp_db._get_conn
 
@@ -1033,6 +1041,25 @@ class TestFillTracker:
             call_count += 1
             if call_count == 2:  # Second call is _load_partial_recorded_counts
                 raise RuntimeError("DB unavailable")
+            return real_get_conn()
+
+        with patch.object(tmp_db, "_get_conn", patched_get_conn):
+            with pytest.raises(RuntimeError, match="DB unavailable"):
+                FillTracker(mock_kalshi, tmp_db)
+
+    def test_load_partial_recorded_counts_graceful_on_missing_table(self, mock_kalshi, tmp_db):
+        """C-4: 'no such table' errors in partial counts should return empty dict."""
+        from sqlite3 import OperationalError
+        call_count = 0
+        real_get_conn = tmp_db._get_conn
+
+        def patched_get_conn():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:  # Second call is _load_partial_recorded_counts
+                mock_conn = MagicMock()
+                mock_conn.execute.side_effect = OperationalError("no such table: trades")
+                return mock_conn
             return real_get_conn()
 
         with patch.object(tmp_db, "_get_conn", patched_get_conn):

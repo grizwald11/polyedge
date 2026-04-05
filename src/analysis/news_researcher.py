@@ -69,6 +69,9 @@ _ENTITY_EXPANSIONS = [
     ("FBI ", "Federal Bureau of Investigation "),
     ("CIA ", "Central Intelligence Agency "),
     ("DNI ", "Director of National Intelligence "),
+    ("IMF ", "International Monetary Fund "),
+    ("ECB ", "European Central Bank "),
+    ("BOJ ", "Bank of Japan "),
 ]
 
 

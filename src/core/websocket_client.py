@@ -363,6 +363,59 @@ class KalshiWebSocket:
             health.uptime_seconds = time.time() - health.connected_since
         return health
 
+    def is_stale(self, timeout_seconds: float = 120.0) -> bool:
+        """Return True if WebSocket appears connected but has gone silent.
+
+        C-2: Detects silent WebSocket death where the TCP connection remains
+        open but no messages are being delivered.
+        """
+        return (
+            self._ws is not None
+            and self._health.last_message_at is not None
+            and time.time() - self._health.last_message_at > timeout_seconds
+        )
+
+    async def health_check(self, timeout_seconds: float = 120.0) -> dict:
+        """Check WebSocket health. Returns status dict.
+
+        C-2: Detects silent WebSocket death where connection appears alive
+        but no messages are being received.
+        """
+        stale = self.is_stale(timeout_seconds)
+        health = self.get_health()
+        result = {
+            "connected": self.connected,
+            "stale": stale,
+            "uptime_seconds": health.uptime_seconds,
+            "total_messages": health.total_messages_received,
+            "consecutive_failures": health.consecutive_failures,
+            "last_message_age_seconds": (
+                time.time() - health.last_message_at
+                if health.last_message_at else None
+            ),
+        }
+        if stale:
+            logger.error(
+                f"C-2: WebSocket appears stale — no messages in "
+                f"{result['last_message_age_seconds']:.0f}s. "
+                f"Fill notifications may be missed. Consider REST polling fallback."
+            )
+        return result
+
+    async def force_reconnect(self):
+        """Force a reconnect by closing the current connection.
+
+        C-2: Used when health_check detects a stale connection.
+        """
+        logger.warning("C-2: Forcing WebSocket reconnect due to stale connection")
+        async with self._ws_lock:
+            if self._ws is not None:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+                self._ws = None
+
     @staticmethod
     def _log_task_exception(task: asyncio.Task):
         """Callback to log exceptions from fire-and-forget tasks."""

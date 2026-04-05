@@ -16,6 +16,9 @@ from src.storage.database import Database
 logger = logging.getLogger(__name__)
 
 MAX_UNREALIZED_LOSS_PCT = 0.15
+# H-9: Daily loss check weights unrealized P&L at 75% (vs 100% for the M-3 hard gate)
+# because unrealized losses are temporary and may recover before positions close.
+UNREALIZED_PNL_DAILY_WEIGHT = 0.75
 
 
 class CircuitBreaker:
@@ -140,7 +143,7 @@ class CircuitBreaker:
         # this is a softer daily measure — unrealized losses are temporary and may
         # recover. The hard gate (M-3 above) uses 100% for immediate flash-crash halt.
         daily_pnl = self.db.get_daily_pnl()
-        daily_pnl += unrealized_pnl * 0.75
+        daily_pnl += unrealized_pnl * UNREALIZED_PNL_DAILY_WEIGHT
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
 
         if daily_pnl < -daily_limit:
@@ -208,7 +211,7 @@ class CircuitBreaker:
 
         # Loss velocity warnings
         daily_pnl = self.db.get_daily_pnl()
-        daily_pnl += unrealized_pnl * 0.75
+        daily_pnl += unrealized_pnl * UNREALIZED_PNL_DAILY_WEIGHT
         daily_limit = bankroll * self.settings.trading.daily_loss_limit_pct
 
         if daily_limit > 0 and daily_pnl < 0:

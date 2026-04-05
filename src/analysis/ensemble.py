@@ -7,6 +7,9 @@ Supports two modes:
 The ensemble applies Brier-score-weighted averaging when historical accuracy
 data is available, falling back to equal weights otherwise. Market price is
 always included as an additional "forecast" with configurable weight.
+
+# M-1: Currently Claude-only. GPT-4o/Gemini as second forecaster is planned
+# for Phase 8+ to reduce single-vendor dependency.
 """
 
 from __future__ import annotations

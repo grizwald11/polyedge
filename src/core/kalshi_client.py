@@ -18,6 +18,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+KALSHI_API_VERSION = "v2"  # L-3: Track expected API version for change detection
+
 # Circuit breaker triggers after this many consecutive 5xx errors
 MAX_CONSECUTIVE_5XX = 5
 

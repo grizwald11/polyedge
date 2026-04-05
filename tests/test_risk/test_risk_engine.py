@@ -270,12 +270,13 @@ class TestCheckAll:
         """
         from src.core.models import Side, Trade
 
-        # Fill up strategy exposure: 8 x $25 = $200 raw → $100 effective (50%)
-        for i in range(8):
+        # M-8: Fill up strategy exposure so 30% correlation assumption still triggers.
+        # 14 x $25 = $350 raw → $105 effective (30%) + $3.40 proposed > $100 limit
+        for i in range(14):
             trade = Trade(
                 order_id=f"PE-corr-{i}", market_id=f"AI-MKT-{i}",
                 token_id=f"AI-MKT-{i}_yes", side=Side.BUY,
-                price=0.50, size=50,  # $25 each = $200 total raw
+                price=0.50, size=50,  # $25 each = $350 total raw
                 strategy=StrategyName.AI_PROBABILITY, paper=True,
             )
             position_manager.update_from_trade(trade)

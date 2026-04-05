@@ -6,6 +6,7 @@ Aggregates trades into positions and provides portfolio-level metrics.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
@@ -106,9 +107,10 @@ class PositionManager:
                 logger.info(f"Restored {len(self._pending_exits)} pending exit(s) from DB: {self._pending_exits}")
         except Exception:
             self._pending_exits: set[str] = set()  # Fresh start if table doesn't exist yet
-        # Note: no asyncio.Lock here — creating a Lock outside an event loop
-        # causes test flakiness with pytest-asyncio auto mode on Python 3.9.
-        # The _positions dict is only mutated from a single async task anyway.
+        # C-1: threading.Lock guards all _positions mutations against concurrent
+        # access from fill_tracker (WS fills vs REST polling). threading.Lock is
+        # used instead of asyncio.Lock because several mutators are synchronous.
+        self._lock = threading.Lock()
         self._load_positions_from_db()
 
     def update_from_trade(self, trade: Trade, market_question: str = "") -> Position:
@@ -121,103 +123,104 @@ class PositionManager:
         Returns:
             Updated position
         """
-        key = trade.market_id
-        existing = self._positions.get(key)
+        with self._lock:
+            key = trade.market_id
+            existing = self._positions.get(key)
 
-        if existing is None:
-            # New position
-            direction = self._direction_from_trade(trade)
-            position = Position(
-                market_id=trade.market_id,
-                market_question=market_question,
-                token_id=trade.token_id,
-                direction=direction,
-                size=trade.size,
-                avg_entry_price=trade.price,
-                current_price=trade.price,
-                unrealized_pnl=0.0,
-                total_fees=trade.fee,
-                buy_fees=trade.fee,
-                strategy=trade.strategy,
-                paper=trade.paper,
-                opened_at=trade.timestamp,
-                last_updated=trade.timestamp,
-            )
-            self._positions[key] = position
-            logger.info(
-                f"Opened position: {direction.value} {trade.size:.0f}x "
-                f"{trade.market_id} @ ${trade.price:.2f}"
-            )
-            return position
-        else:
-            # Update existing position
-            if trade.side == Side.BUY:
-                # Adding to position — weighted average entry
-                total_cost = existing.avg_entry_price * existing.size + trade.price * trade.size
-                existing.size += trade.size
-                existing.avg_entry_price = round(total_cost / existing.size, 6) if existing.size > 0 else 0
-                # Accumulate fees on buy — round to prevent float drift
-                existing.total_fees = round(existing.total_fees + trade.fee, 4)
-                existing.buy_fees = round(existing.buy_fees + trade.fee, 4)
-            else:
-                # Reducing position — avg_entry_price stays the same
-                # (it represents the cost basis of remaining contracts)
-                sell_size = trade.size
-                if sell_size > existing.size:
-                    logger.warning(
-                        f"Sell size ({sell_size}) exceeds position size ({existing.size}) "
-                        f"for {trade.market_id} — clamping to position size"
-                    )
-                    sell_size = existing.size
-                    trade.size = sell_size  # Persist clamped size for DB consistency
-
-                # Proportional buy fee for the contracts being sold
-                proportional_buy_fee = (
-                    existing.buy_fees * (sell_size / existing.size)
-                    if existing.size > 0 else 0.0
+            if existing is None:
+                # New position
+                direction = self._direction_from_trade(trade)
+                position = Position(
+                    market_id=trade.market_id,
+                    market_question=market_question,
+                    token_id=trade.token_id,
+                    direction=direction,
+                    size=trade.size,
+                    avg_entry_price=trade.price,
+                    current_price=trade.price,
+                    unrealized_pnl=0.0,
+                    total_fees=trade.fee,
+                    buy_fees=trade.fee,
+                    strategy=trade.strategy,
+                    paper=trade.paper,
+                    opened_at=trade.timestamp,
+                    last_updated=trade.timestamp,
                 )
-
-                # Calculate realized P&L: gross profit minus both buy and sell fees
-                # Use Decimal arithmetic to avoid float rounding errors (H-1)
-                d_price = Decimal(str(trade.price))
-                d_entry = Decimal(str(existing.avg_entry_price))
-                d_sell_size = Decimal(str(sell_size))
-                d_buy_fee = Decimal(str(proportional_buy_fee))
-                d_sell_fee = Decimal(str(trade.fee))
-                d_realized_pnl = (
-                    (d_price - d_entry) * d_sell_size
-                    - d_buy_fee
-                    - d_sell_fee
-                )
-                realized_pnl = float(d_realized_pnl.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
-                trade.realized_pnl = realized_pnl
-
-                # Update the DB record with the calculated P&L
-                self._update_trade_pnl(trade)
-
+                self._positions[key] = position
                 logger.info(
-                    f"Realized P&L on {trade.market_id}: ${realized_pnl:+.2f} "
-                    f"(sold {sell_size:.0f}x @ ${trade.price:.2f}, "
-                    f"entry @ ${existing.avg_entry_price:.2f})"
+                    f"Opened position: {direction.value} {trade.size:.0f}x "
+                    f"{trade.market_id} @ ${trade.price:.2f}"
                 )
+                return position
+            else:
+                # Update existing position
+                if trade.side == Side.BUY:
+                    # Adding to position — weighted average entry
+                    total_cost = existing.avg_entry_price * existing.size + trade.price * trade.size
+                    existing.size += trade.size
+                    existing.avg_entry_price = round(total_cost / existing.size, 6) if existing.size > 0 else 0
+                    # Accumulate fees on buy — round to prevent float drift
+                    existing.total_fees = round(existing.total_fees + trade.fee, 4)
+                    existing.buy_fees = round(existing.buy_fees + trade.fee, 4)
+                else:
+                    # Reducing position — avg_entry_price stays the same
+                    # (it represents the cost basis of remaining contracts)
+                    sell_size = trade.size
+                    if sell_size > existing.size:
+                        logger.warning(
+                            f"Sell size ({sell_size}) exceeds position size ({existing.size}) "
+                            f"for {trade.market_id} — clamping to position size"
+                        )
+                        sell_size = existing.size
+                        trade.size = sell_size  # Persist clamped size for DB consistency
 
-                # Reduce buy_fees proportionally (remaining fees stay with remaining contracts)
-                existing.buy_fees = round(existing.buy_fees - proportional_buy_fee, 4)
-                # Accumulate sell fee into total_fees for record-keeping
-                existing.total_fees = round(existing.total_fees + trade.fee, 4)
-                existing.size -= sell_size
-                if existing.size <= 0:
-                    # Position closed
-                    self._positions.pop(key, None)
-                    logger.info(f"Closed position: {trade.market_id}")
-                    return existing
+                    # Proportional buy fee for the contracts being sold
+                    proportional_buy_fee = (
+                        existing.buy_fees * (sell_size / existing.size)
+                        if existing.size > 0 else 0.0
+                    )
 
-            existing.last_updated = trade.timestamp
-            logger.info(
-                f"Updated position: {existing.direction.value} {existing.size:.0f}x "
-                f"{trade.market_id} @ avg ${existing.avg_entry_price:.2f}"
-            )
-            return existing
+                    # Calculate realized P&L: gross profit minus both buy and sell fees
+                    # Use Decimal arithmetic to avoid float rounding errors (H-1)
+                    d_price = Decimal(str(trade.price))
+                    d_entry = Decimal(str(existing.avg_entry_price))
+                    d_sell_size = Decimal(str(sell_size))
+                    d_buy_fee = Decimal(str(proportional_buy_fee))
+                    d_sell_fee = Decimal(str(trade.fee))
+                    d_realized_pnl = (
+                        (d_price - d_entry) * d_sell_size
+                        - d_buy_fee
+                        - d_sell_fee
+                    )
+                    realized_pnl = float(d_realized_pnl.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+                    trade.realized_pnl = realized_pnl
+
+                    # Update the DB record with the calculated P&L
+                    self._update_trade_pnl(trade)
+
+                    logger.info(
+                        f"Realized P&L on {trade.market_id}: ${realized_pnl:+.2f} "
+                        f"(sold {sell_size:.0f}x @ ${trade.price:.2f}, "
+                        f"entry @ ${existing.avg_entry_price:.2f})"
+                    )
+
+                    # Reduce buy_fees proportionally (remaining fees stay with remaining contracts)
+                    existing.buy_fees = round(existing.buy_fees - proportional_buy_fee, 4)
+                    # Accumulate sell fee into total_fees for record-keeping
+                    existing.total_fees = round(existing.total_fees + trade.fee, 4)
+                    existing.size -= sell_size
+                    if existing.size <= 0:
+                        # Position closed
+                        self._positions.pop(key, None)
+                        logger.info(f"Closed position: {trade.market_id}")
+                        return existing
+
+                existing.last_updated = trade.timestamp
+                logger.info(
+                    f"Updated position: {existing.direction.value} {existing.size:.0f}x "
+                    f"{trade.market_id} @ avg ${existing.avg_entry_price:.2f}"
+                )
+                return existing
 
     def update_price(self, market_id: str, yes_price: float, no_price: float = 0.0) -> None:
         """Update current price and recalculate unrealized P&L.
@@ -227,64 +230,65 @@ class PositionManager:
             yes_price: Current YES price
             no_price: Current NO price (used for BUY_NO/SELL_NO positions)
         """
-        position = self._positions.get(market_id)
-        if position is None:
-            return
-
-        # Skip invalid prices — 0.0 means no data available
-        if yes_price <= 0 and no_price <= 0:
-            return
-
-        # Stale price detection: warn if price hasn't changed in a while.
-        # This catches dead data feeds that silently replay old prices.
-        # M-12 FIX: Skip for resolved markets where price is legitimately static at 0/1.
-        now = datetime.now(timezone.utc)
-        time_since_update = (now - position.last_updated).total_seconds()
-        price_for_side = no_price if position.direction in (Direction.BUY_NO, Direction.SELL_NO) else yes_price
-        is_resolved_price = (yes_price <= 0.01 or yes_price >= 0.99) and (no_price <= 0.01 or no_price >= 0.99)
-        if time_since_update > 300 and position.current_price > 0 and not is_resolved_price:
-            price_delta = abs(price_for_side - position.current_price)
-            if price_delta == 0:
-                position._price_stale = True
-                logger.debug(
-                    f"Skipping stale price update for {market_id}: "
-                    f"data {time_since_update:.0f}s old, price unchanged"
-                )
+        with self._lock:
+            position = self._positions.get(market_id)
+            if position is None:
                 return
-            elif price_delta < 0.005:
-                position._price_stale = True
-                logger.warning(
-                    f"Potentially stale price for {market_id}: moved only ${price_delta:.4f} "
-                    f"in {time_since_update:.0f}s — data feed may be replaying old prices"
-                )
+
+            # Skip invalid prices — 0.0 means no data available
+            if yes_price <= 0 and no_price <= 0:
+                return
+
+            # Stale price detection: warn if price hasn't changed in a while.
+            # This catches dead data feeds that silently replay old prices.
+            # M-12 FIX: Skip for resolved markets where price is legitimately static at 0/1.
+            now = datetime.now(timezone.utc)
+            time_since_update = (now - position.last_updated).total_seconds()
+            price_for_side = no_price if position.direction in (Direction.BUY_NO, Direction.SELL_NO) else yes_price
+            is_resolved_price = (yes_price <= 0.01 or yes_price >= 0.99) and (no_price <= 0.01 or no_price >= 0.99)
+            if time_since_update > 300 and position.current_price > 0 and not is_resolved_price:
+                price_delta = abs(price_for_side - position.current_price)
+                if price_delta == 0:
+                    position._price_stale = True
+                    logger.debug(
+                        f"Skipping stale price update for {market_id}: "
+                        f"data {time_since_update:.0f}s old, price unchanged"
+                    )
+                    return
+                elif price_delta < 0.005:
+                    position._price_stale = True
+                    logger.warning(
+                        f"Potentially stale price for {market_id}: moved only ${price_delta:.4f} "
+                        f"in {time_since_update:.0f}s — data feed may be replaying old prices"
+                    )
+                else:
+                    position._price_stale = False
             else:
                 position._price_stale = False
-        else:
-            position._price_stale = False
 
-        # Use the price matching the position's side, but only if valid
-        if position.direction in (Direction.BUY_NO, Direction.SELL_NO):
-            if no_price <= 0:
-                return  # No valid price for this position's side
-            position.current_price = no_price
-        else:
-            if yes_price <= 0:
-                return  # No valid price for this position's side
-            position.current_price = yes_price
-        # P&L = (current - entry) * size for BUY, (entry - current) * size for SELL
-        # Use Decimal arithmetic to prevent floating-point drift (H-1)
-        d_current = Decimal(str(position.current_price))
-        d_entry = Decimal(str(position.avg_entry_price))
-        d_size = Decimal(str(position.size))
-        if position.direction in (Direction.BUY_YES, Direction.BUY_NO):
-            d_pnl = (d_current - d_entry) * d_size
-        else:
-            d_pnl = (d_entry - d_current) * d_size
-        position.unrealized_pnl = float(d_pnl.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
-        # Track peak P&L for trailing stop
-        if position.unrealized_pnl > position.peak_pnl:
-            position.peak_pnl = position.unrealized_pnl
-        position.last_updated = datetime.now(timezone.utc)
+            # Use the price matching the position's side, but only if valid
+            if position.direction in (Direction.BUY_NO, Direction.SELL_NO):
+                if no_price <= 0:
+                    return  # No valid price for this position's side
+                position.current_price = no_price
+            else:
+                if yes_price <= 0:
+                    return  # No valid price for this position's side
+                position.current_price = yes_price
+            # P&L = (current - entry) * size for BUY, (entry - current) * size for SELL
+            # Use Decimal arithmetic to prevent floating-point drift (H-1)
+            d_current = Decimal(str(position.current_price))
+            d_entry = Decimal(str(position.avg_entry_price))
+            d_size = Decimal(str(position.size))
+            if position.direction in (Direction.BUY_YES, Direction.BUY_NO):
+                d_pnl = (d_current - d_entry) * d_size
+            else:
+                d_pnl = (d_entry - d_current) * d_size
+            position.unrealized_pnl = float(d_pnl.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+            # Track peak P&L for trailing stop
+            if position.unrealized_pnl > position.peak_pnl:
+                position.peak_pnl = position.unrealized_pnl
+            position.last_updated = datetime.now(timezone.utc)
 
     def get_position(self, market_id: str) -> Optional[Position]:
         """Get position for a specific market."""
@@ -325,55 +329,56 @@ class PositionManager:
         Creates a synthetic SELL trade at the settlement price to record
         realized P&L, logs it to the database, and removes the position.
         """
-        pos = self._positions.get(market_id)
-        if pos is None:
-            return
+        with self._lock:
+            pos = self._positions.get(market_id)
+            if pos is None:
+                return
 
-        # Calculate realized P&L based on settlement value vs avg entry price.
-        # BUY positions: profit = (settlement - entry) * size
-        # SELL positions: profit = (entry - settlement) * size
-        # Use Decimal arithmetic for settlement P&L to avoid float errors (H-1)
-        d_settlement = Decimal(str(settlement_value))
-        d_entry = Decimal(str(pos.avg_entry_price))
-        d_size = Decimal(str(pos.size))
-        d_buy_fees = Decimal(str(pos.buy_fees))
-        if pos.direction in (Direction.BUY_YES, Direction.BUY_NO):
-            d_realized = (d_settlement - d_entry) * d_size - d_buy_fees
-        else:
-            d_realized = (d_entry - d_settlement) * d_size - d_buy_fees
-        realized_pnl = float(d_realized.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+            # Calculate realized P&L based on settlement value vs avg entry price.
+            # BUY positions: profit = (settlement - entry) * size
+            # SELL positions: profit = (entry - settlement) * size
+            # Use Decimal arithmetic for settlement P&L to avoid float errors (H-1)
+            d_settlement = Decimal(str(settlement_value))
+            d_entry = Decimal(str(pos.avg_entry_price))
+            d_size = Decimal(str(pos.size))
+            d_buy_fees = Decimal(str(pos.buy_fees))
+            if pos.direction in (Direction.BUY_YES, Direction.BUY_NO):
+                d_realized = (d_settlement - d_entry) * d_size - d_buy_fees
+            else:
+                d_realized = (d_entry - d_settlement) * d_size - d_buy_fees
+            realized_pnl = float(d_realized.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
 
-        # Create a synthetic SELL trade to record the settlement in trade history.
-        # H-4: Include accumulated buy_fees to close the fee ledger — without this,
-        # P&L is overstated by the buy-side fees on settled positions.
-        settlement_trade = Trade(
-            order_id=f"settlement-{market_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-            market_id=market_id,
-            token_id=pos.token_id,
-            side=Side.SELL,
-            price=settlement_value,
-            size=pos.size,
-            fee=pos.buy_fees,
-            realized_pnl=realized_pnl,
-            strategy=pos.strategy,
-            paper=pos.paper,
-            timestamp=datetime.now(timezone.utc),
-        )
+            # Create a synthetic SELL trade to record the settlement in trade history.
+            # H-4: Include accumulated buy_fees to close the fee ledger — without this,
+            # P&L is overstated by the buy-side fees on settled positions.
+            settlement_trade = Trade(
+                order_id=f"settlement-{market_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+                market_id=market_id,
+                token_id=pos.token_id,
+                side=Side.SELL,
+                price=settlement_value,
+                size=pos.size,
+                fee=pos.buy_fees,
+                realized_pnl=realized_pnl,
+                strategy=pos.strategy,
+                paper=pos.paper,
+                timestamp=datetime.now(timezone.utc),
+            )
 
-        # Log the synthetic trade to DB
-        try:
-            self.db.log_trade(settlement_trade)
-        except Exception as e:
-            logger.error(f"Failed to log settlement trade for {market_id}: {e}", exc_info=True)
+            # Log the synthetic trade to DB
+            try:
+                self.db.log_trade(settlement_trade)
+            except Exception as e:
+                logger.error(f"Failed to log settlement trade for {market_id}: {e}", exc_info=True)
 
-        logger.info(
-            f"Settlement recorded for {market_id}: value={settlement_value:.2f}, "
-            f"realized P&L=${realized_pnl:+.2f} "
-            f"(entry=${pos.avg_entry_price:.2f}, size={pos.size:.0f})"
-        )
+            logger.info(
+                f"Settlement recorded for {market_id}: value={settlement_value:.2f}, "
+                f"realized P&L=${realized_pnl:+.2f} "
+                f"(entry=${pos.avg_entry_price:.2f}, size={pos.size:.0f})"
+            )
 
-        # Remove the position — it's fully settled
-        self._positions.pop(market_id, None)
+            # Remove the position — it's fully settled
+            self._positions.pop(market_id, None)
 
     def mark_pending_exit(self, market_id: str) -> None:
         """Mark a position as having a resting exit order in flight.
@@ -444,12 +449,21 @@ class PositionManager:
         # H-1 FIX: Skip exit evaluation when price data is stale.
         # Stale prices can trigger false stop-losses or edge-gone exits
         # on illiquid markets where the data feed stopped updating.
+        # C-3 FIX: Allow exits after 10 minutes of stale data to prevent
+        # indefinite blocking if the data feed dies.
         if getattr(position, "_price_stale", False):
-            logger.warning(
-                f"Exit evaluation skipped for {position.market_id}: "
-                f"price data is stale — waiting for fresh update"
-            )
-            return False, ""
+            stale_duration = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
+            if stale_duration < 600:  # Block exits for up to 10 minutes of stale data
+                logger.warning(
+                    f"Exit evaluation skipped for {position.market_id}: "
+                    f"price data is stale — waiting for fresh update"
+                )
+                return False, ""
+            else:
+                logger.error(
+                    f"C-3: Price stale for {stale_duration:.0f}s (>600s) for {position.market_id} — "
+                    f"allowing exit evaluation with stale data to prevent indefinite blocking"
+                )
 
         # 1. Stop-loss check
         #    Require fresh price data (<2 min) to avoid false exits on stale prices.
@@ -459,12 +473,17 @@ class PositionManager:
             loss_pct = abs(position.unrealized_pnl) / cost_basis
             if loss_pct >= effective_stop_loss:
                 price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
-                if price_age > 120:
+                if price_age > 120 and price_age < 600:
                     logger.warning(
                         f"Stop-loss blocked by stale price for {position.market_id}: "
                         f"loss={loss_pct:.0%}, price age={price_age:.0f}s"
                     )
                 else:
+                    if price_age >= 600:
+                        logger.error(
+                            f"C-3: Stop-loss proceeding with stale price ({price_age:.0f}s) "
+                            f"for {position.market_id} to prevent indefinite blocking"
+                        )
                     return True, f"stop_loss: {loss_pct:.0%} loss exceeds {effective_stop_loss:.0%} threshold (incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
 
         # 2. Trailing stop: if we've had a significant gain and it's pulling back.
@@ -479,12 +498,17 @@ class PositionManager:
                 trail_floor = position.peak_pnl * self._trailing_stop_distance
                 if position.unrealized_pnl < trail_floor:
                     price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
-                    if price_age > 120:
+                    if price_age > 120 and price_age < 600:
                         logger.debug(
                             f"Skipping trailing_stop for {position.market_id}: "
                             f"price data stale ({price_age:.0f}s old)"
                         )
                     else:
+                        if price_age >= 600:
+                            logger.error(
+                                f"C-3: Trailing stop proceeding with stale price ({price_age:.0f}s) "
+                                f"for {position.market_id} to prevent indefinite blocking"
+                            )
                         return True, (
                             f"trailing_stop: current P&L ${position.unrealized_pnl:.2f} "
                             f"dropped below trail floor ${trail_floor:.2f} "
@@ -506,12 +530,17 @@ class PositionManager:
             # M-4: Require fresh price data (<2 min) for take-profit to avoid false exits
             # after WebSocket fills when price data may not yet be refreshed.
             price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
-            if price_age > 120:
+            if price_age > 120 and price_age < 600:
                 logger.warning(
                     f"Take-profit blocked by stale price for {position.market_id}: "
                     f"gain={position.unrealized_pnl / max_gain:.0%}, price age={price_age:.0f}s"
                 )
             else:
+                if price_age >= 600:
+                    logger.error(
+                        f"C-3: Take-profit proceeding with stale price ({price_age:.0f}s) "
+                        f"for {position.market_id} to prevent indefinite blocking"
+                    )
                 return True, (
                     f"take_profit: captured {position.unrealized_pnl / max_gain:.0%} of max gain "
                     f"(${position.unrealized_pnl:.2f} / ${max_gain:.2f}, "
@@ -543,12 +572,17 @@ class PositionManager:
                 # M-4: Require fresh price data (<2 min) for edge-gone to avoid false exits
                 # after WebSocket fills when price data may not yet be refreshed.
                 price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
-                if price_age > 120:
+                if price_age > 120 and price_age < 600:
                     logger.debug(
                         f"Skipping edge_gone for {position.market_id}: "
                         f"price data stale ({price_age:.0f}s old)"
                     )
                 else:
+                    if price_age >= 600:
+                        logger.error(
+                            f"C-3: Edge-gone proceeding with stale price ({price_age:.0f}s) "
+                            f"for {position.market_id} to prevent indefinite blocking"
+                        )
                     return True, (
                         f"edge_gone: remaining edge {remaining_edge:.1%} < "
                         f"{effective_edge_gone:.1%} threshold (incl. {SLIPPAGE_BUFFER:.0%} slippage buffer)"
@@ -559,12 +593,17 @@ class PositionManager:
         #    Skip if market price data is stale (>5 min) to avoid exiting on outdated edge calc.
         if market is not None and position.unrealized_pnl > 0:
             price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
-            if price_age > 300:
+            if price_age > 300 and price_age < 600:
                 logger.debug(
                     f"Skipping capital_rotation for {position.market_id}: "
                     f"price data stale ({price_age:.0f}s old)"
                 )
             else:
+                if price_age >= 600:
+                    logger.error(
+                        f"C-3: Capital rotation proceeding with stale price ({price_age:.0f}s) "
+                        f"for {position.market_id} to prevent indefinite blocking"
+                    )
                 exposure_pct = self.get_total_exposure_pct()
                 remaining = self._calculate_remaining_edge(position, market)
                 if exposure_pct > 0.35 and remaining < self._capital_rotation_edge:
@@ -591,7 +630,7 @@ class PositionManager:
         for market_id, position in list(self._positions.items()):
             market = markets.get(market_id) if markets else None
             should, reason = self.should_exit(position, market)
-            if should:
+            if should and position.size > 0:
                 candidates.append((position, reason))
                 logger.info(f"Exit candidate: {market_id} — {reason}")
         return candidates
@@ -696,6 +735,10 @@ class PositionManager:
         mismatches = 0
         api_tickers = set()
 
+        # Build list of corrections to apply, then apply under lock
+        positions_to_add: list[tuple[str, Position]] = []
+        positions_to_log: list[tuple[str, str, int, float]] = []  # (ticker, direction, size, price)
+
         for api_pos in api_positions:
             ticker = api_pos.get("ticker", "")
             if not ticker:
@@ -748,11 +791,8 @@ class PositionManager:
                         opened_at=datetime.now(timezone.utc),
                         last_updated=datetime.now(timezone.utc),
                     )
-                    self._positions[ticker] = position
-                    logger.warning(
-                        f"Position AUTO-CORRECTED: added {direction.value} {size}x "
-                        f"{ticker} @ ${avg_price:.2f} from Kalshi API"
-                    )
+                    positions_to_add.append((ticker, position))
+                    positions_to_log.append((ticker, direction.value, size, avg_price))
                 else:
                     logger.warning(
                         f"Position mismatch: Kalshi has position in {ticker}, "
@@ -761,23 +801,34 @@ class PositionManager:
 
         # Check for local positions not on Kalshi
         stale_keys = []
-        for market_id, local_pos in list(self._positions.items()):
-            if not local_pos.paper and market_id not in api_tickers:
-                mismatches += 1
-                if auto_correct:
-                    stale_keys.append(market_id)
-                    logger.warning(
-                        f"Position AUTO-CORRECTED: removed stale live position "
-                        f"in {market_id} (not found on Kalshi)"
-                    )
-                else:
-                    logger.warning(
-                        f"Position mismatch: local tracker has live position "
-                        f"in {market_id}, Kalshi does not"
-                    )
+        with self._lock:
+            for market_id, local_pos in list(self._positions.items()):
+                if not local_pos.paper and market_id not in api_tickers:
+                    mismatches += 1
+                    if auto_correct:
+                        stale_keys.append(market_id)
+                        logger.warning(
+                            f"Position AUTO-CORRECTED: removed stale live position "
+                            f"in {market_id} (not found on Kalshi)"
+                        )
+                    else:
+                        logger.warning(
+                            f"Position mismatch: local tracker has live position "
+                            f"in {market_id}, Kalshi does not"
+                        )
 
-        for key in stale_keys:
-            self._positions.pop(key, None)
+            for key in stale_keys:
+                self._positions.pop(key, None)
+
+            for ticker, position in positions_to_add:
+                self._positions[ticker] = position
+
+        # Log outside lock to avoid holding it during I/O
+        for ticker, direction_val, size, avg_price in positions_to_log:
+            logger.warning(
+                f"Position AUTO-CORRECTED: added {direction_val} {size}x "
+                f"{ticker} @ ${avg_price:.2f} from Kalshi API"
+            )
 
         if mismatches:
             action = "corrected" if auto_correct else "found"

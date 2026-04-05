@@ -52,7 +52,9 @@ class ManipulationDetector:
         # market_id -> ManipulationFlag
         self._flags: dict[str, ManipulationFlag] = {}
         # Max history entries per market (prevent unbounded growth)
-        self._max_history = 50
+        # M-15: Increased from 50 to 200 snapshots. Memory impact is small
+        # (200 floats per market) and longer history improves drift detection.
+        self._max_history = 200
 
     def update_price(self, market_id: str, yes_price: float) -> None:
         """Record a new price observation for a market."""
@@ -90,8 +92,9 @@ class ManipulationDetector:
         if len(history) < MIN_SNAPSHOTS_FOR_DETECTION:
             return None
 
-        # Check for rapid price move
-        flag = self._check_rapid_move(market_id, history, now)
+        # Check for rapid price move (M-4: pass volume for weighted threshold)
+        volume_24h = getattr(market, 'volume_24h', 0.0) or 0.0
+        flag = self._check_rapid_move(market_id, history, now, volume_24h=volume_24h)
         if flag is not None:
             return flag
 
@@ -126,8 +129,15 @@ class ManipulationDetector:
         market_id: str,
         history: list[tuple[float, float]],
         now: float,
+        volume_24h: float = 0.0,
     ) -> ManipulationFlag | None:
-        """Detect if price moved more than threshold since previous observation."""
+        """Detect if price moved more than threshold since previous observation.
+
+        M-4: Volume-weighted threshold — high-volume markets (>$50K) need a
+        larger move (30%) to flag since big moves on liquid markets are more
+        likely organic. Low-volume markets (<$5K) use a tighter threshold (15%)
+        since they are easier to manipulate.
+        """
         if len(history) < 2:
             return None
 
@@ -137,19 +147,27 @@ class ManipulationDetector:
         if prev_price <= 0:
             return None
 
+        # M-4: Volume-weighted rapid move threshold
+        if volume_24h > 50_000:
+            threshold = max(self.rapid_move_threshold, 0.30)
+        elif volume_24h < 5_000:
+            threshold = min(self.rapid_move_threshold, 0.15)
+        else:
+            threshold = self.rapid_move_threshold
+
         # M-17: Use relative (percentage) price change instead of absolute.
         # This prevents false positives on low-priced markets (e.g., $0.05 → $0.10
         # is a 100% move but only $0.05 absolute) and false negatives on
         # high-priced markets (e.g., $0.80 → $0.95 is only 18.75% but $0.15 absolute).
         price_move = abs(curr_price - prev_price) / max(prev_price, 0.01)
 
-        if price_move >= self.rapid_move_threshold:
+        if price_move >= threshold:
             flag = ManipulationFlag(
                 market_id=market_id,
                 reason=(
                     f"Rapid price move: {prev_price:.2f} → {curr_price:.2f} "
                     f"({price_move:.0%} in {curr_time - prev_time:.0f}s) "
-                    f"exceeds {self.rapid_move_threshold:.0%} threshold"
+                    f"exceeds {threshold:.0%} threshold"
                 ),
                 detected_at=now,
                 price_move=price_move,

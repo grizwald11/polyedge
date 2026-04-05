@@ -217,12 +217,29 @@ class OrderRouter:
         if self.metrics is not None:
             self.metrics.record_order_submitted()
 
-        if order.paper or self.settings.trading.mode == "paper":
-            result = await self._paper_fill(order)
-        elif order.platform == Platform.POLYMARKET:
-            result = await self._poly_live_fill(order)
-        else:
-            result = await self._live_fill(order)
+        # H-12: Reserve pending cost BEFORE submission to prevent race between
+        # concurrent route_order calls that could over-commit capital.
+        is_live = not (order.paper or self.settings.trading.mode == "paper")
+        if is_live:
+            await self._add_pending(order.id, order.cost)
+
+        try:
+            if order.paper or self.settings.trading.mode == "paper":
+                result = await self._paper_fill(order)
+            elif order.platform == Platform.POLYMARKET:
+                result = await self._poly_live_fill(order)
+            else:
+                result = await self._live_fill(order)
+        except Exception:
+            # H-12: Release reserved cost if submission itself raises
+            if is_live:
+                await self._remove_pending(order.id)
+            raise
+
+        # H-12: Release reserved cost if order was not successfully placed
+        # (rejected, failed, etc.). Resting orders keep the reservation.
+        if is_live and not result.success:
+            await self._remove_pending(order.id)
 
         if self.metrics is not None:
             if result.success:
@@ -422,6 +439,13 @@ class OrderRouter:
             if await self.cancel_order(row["id"]):
                 cancelled += 1
         return cancelled
+
+    async def periodic_cleanup(self) -> int:
+        """H-5: Clean up stale pending orders. Call every ~1 hour from orchestrator.
+
+        Returns number of stale orders cleaned up.
+        """
+        return await self.cancel_stale_orders(max_age_seconds=3600)
 
     async def cancel_all_open(self) -> int:
         """Cancel all open (resting) orders.

@@ -40,7 +40,7 @@ class FillTracker:
     - WebSocket: handle_ws_fill() processes real-time fill notifications
     """
 
-    def __init__(self, kalshi: KalshiClient, db: Database, poll_timeout: int = 10, polymarket=None):
+    def __init__(self, kalshi: KalshiClient, db: Database, poll_timeout: int = 15, polymarket=None):
         self.kalshi = kalshi
         self.polymarket = polymarket  # Optional PolymarketClient
         self.db = db
@@ -148,6 +148,26 @@ class FillTracker:
         for oid in resolved:
             self._pending_orders.pop(oid, None)
 
+        # H-3: Escalate orders stuck pending for >1 hour
+        now = datetime.now(timezone.utc)
+        stale_escalate: list[str] = []
+        for oid, order in list(self._pending_orders.items()):
+            if oid in resolved:
+                continue
+            age = (now - order.created_at).total_seconds()
+            if age > 3600:  # 1 hour
+                logger.error(
+                    f"H-3: Order {oid} on {order.market_id} stuck pending for "
+                    f"{age / 60:.0f}min — removing from tracker. "
+                    f"Manual reconciliation may be needed."
+                )
+                order.status = OrderStatus.CANCELLED
+                order.rejection_reason = f"Stale: pending for {age / 60:.0f}min without fill/cancel"
+                self._log_order(order)
+                stale_escalate.append(oid)
+        for oid in stale_escalate:
+            self._pending_orders.pop(oid, None)
+
         if fills:
             logger.info(f"Fill tracker: {len(fills)} new fills detected")
 
@@ -210,11 +230,11 @@ class FillTracker:
             # large ones that could indicate an API bug or data corruption.
             max_allowed_correction = max(1, int(order.size * 0.05))  # 5% of order size
             if abs(delta) > max_allowed_correction:
-                logger.error(
-                    f"SUSPICIOUS fill correction for {order.id}: "
+                logger.critical(
+                    f"H-10: SUSPICIOUS fill correction for {order.id}: "
                     f"API={filled_count}, recorded={already_recorded}, "
                     f"delta={delta}, max_allowed={max_allowed_correction} — "
-                    f"rejecting correction to protect position integrity (M-5)"
+                    f"rejecting correction. MANUAL RECONCILIATION REQUIRED."
                 )
                 return None
             logger.warning(
@@ -306,7 +326,7 @@ class FillTracker:
         if len(self._processed_fills) > MAX_PROCESSED_FILLS:
             # Convert to list, drop oldest half, rebuild set
             fill_list = list(self._processed_fills)
-            pruned = fill_list[len(fill_list) // 2:]
+            pruned = fill_list[len(fill_list) // 4:]  # M-5: Keep 75% (drop oldest 25%)
             self._processed_fills = set(pruned)
             logger.info(f"Pruned _processed_fills from {len(fill_list)} to {len(self._processed_fills)}")
         # Clean up partial tracking now that order is fully resolved
@@ -437,8 +457,14 @@ class FillTracker:
                 logger.info(f"Fill tracker: loaded {len(ids)} previously filled order IDs")
             return ids
         except Exception as e:
-            logger.warning(f"Failed to load filled order IDs: {e}")
-            return set()
+            # C-4: Only swallow "table not found" errors gracefully.
+            # All other DB errors should fail fast to prevent duplicate fills.
+            err_str = str(e).lower()
+            if "no such table" in err_str or "no such column" in err_str:
+                logger.info(f"Fill tracker: trades table not yet created — starting fresh")
+                return set()
+            logger.error(f"C-4: Failed to load filled order IDs — failing fast to prevent duplicates: {e}")
+            raise
 
     def _load_partial_recorded_counts(self) -> dict[str, int]:
         """Load cumulative fill counts per order from the database.
@@ -463,8 +489,25 @@ class FillTracker:
                 logger.info(f"Fill tracker: loaded {len(counts)} partial fill counts")
             return counts
         except Exception as e:
-            logger.warning(f"Failed to load partial fill counts: {e}")
-            return {}
+            err_str = str(e).lower()
+            if "no such table" in err_str or "no such column" in err_str:
+                logger.info(f"Fill tracker: trades table not yet created — starting fresh for partials")
+                return {}
+            logger.error(f"C-4: Failed to load partial fill counts — failing fast: {e}")
+            raise
+
+    def cleanup_stale_state(self) -> None:
+        """M-6: Periodic cleanup of stale tracking state.
+
+        Should be called every ~1 hour from the orchestrator main loop.
+        """
+        self._prune_partial_recorded()
+        # Also prune processed_fills if needed
+        if len(self._processed_fills) > MAX_PROCESSED_FILLS:
+            fill_list = list(self._processed_fills)
+            pruned = fill_list[len(fill_list) // 4:]
+            self._processed_fills = set(pruned)
+            logger.info(f"M-6: Pruned _processed_fills to {len(self._processed_fills)}")
 
     def _prune_partial_recorded(self) -> None:
         """M-5: Remove stale entries from _partial_recorded for orders no longer pending.
