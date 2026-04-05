@@ -103,11 +103,14 @@ class ClaudeForecaster:
     # Uses config value or falls back to 0.15 if not configured.
     EDGE_HIGHSTAKES_THRESHOLD = 0.15
 
-    def _select_model(self, position_value: float = 0.0, edge: float = 0.0) -> str:
-        """Select model based on position value or edge size."""
+    def _select_model(self, position_value: float = 0.0, edge: float = 0.0, category: str = "") -> str:
+        """Select model based on position value, edge size, and category."""
         edge_threshold = getattr(
             self.settings.claude, "edge_highstakes_threshold",
             self.EDGE_HIGHSTAKES_THRESHOLD,
+        )
+        cat_thresholds = getattr(
+            self.settings.claude, "category_highstakes_thresholds", None
         )
         return _select_model_func(
             position_value,
@@ -116,6 +119,8 @@ class ClaudeForecaster:
             model_highstakes=self.settings.claude.model_highstakes,
             model_primary=self.settings.claude.model_primary,
             edge_highstakes_threshold=edge_threshold,
+            category=category,
+            category_highstakes_thresholds=cat_thresholds,
         )
 
     async def health_check(self) -> None:
@@ -315,6 +320,9 @@ class ClaudeForecaster:
             self.settings.claude, "edge_highstakes_threshold",
             self.EDGE_HIGHSTAKES_THRESHOLD,
         )
+        cat_thresholds = getattr(
+            self.settings.claude, "category_highstakes_thresholds", None
+        )
         prompt, model, category, temperature, variant_name = await build_forecaster_prompt(
             market,
             news_context,
@@ -329,6 +337,7 @@ class ClaudeForecaster:
             category_temperatures=self.settings.claude.category_temperatures,
             default_temperature=self.settings.claude.temperature,
             accuracy_context=accuracy_context,
+            category_highstakes_thresholds=cat_thresholds,
         )
         self._last_variant_name = variant_name  # Store for downstream tracking
         return prompt, model, category, temperature
@@ -360,19 +369,14 @@ class ClaudeForecaster:
                 f"Claude API {exc_name}, retrying "
                 f"(attempt {attempt + 1}/3)"
             )
-            # M-1: Track estimated tokens for failed attempts. Rate-limited and
-            # connection-error calls may still consume input tokens on the server
-            # side. Use the running average if available, otherwise a conservative
-            # estimate of input-only tokens (half a typical call).
-            estimated = (
-                self._total_tokens_today // self._call_count_today
-                if self._call_count_today > 0
-                else 1500  # Conservative: ~1500 input tokens for a typical prompt
-            )
-            self._total_tokens_today += estimated
+            # H-5: Do NOT count estimated tokens for failed attempts.
+            # Only actual tokens from response.usage should be tracked.
+            # Failed retries (rate limit, connection error) may not consume
+            # tokens at all, and counting estimates inflates the daily budget
+            # causing premature budget exhaustion.
             logger.debug(
-                f"M-1: Estimated {estimated} tokens for failed attempt "
-                f"(total today: {self._total_tokens_today:,})"
+                f"H-5: Skipping token estimate for failed attempt {attempt + 1} "
+                f"({exc_name}) — only actual usage is counted"
             )
 
         async def _make_request():
@@ -462,11 +466,20 @@ class ClaudeForecaster:
             f"Claude [{model}] assessed '{market.question[:50]}...' → "
             f"{forecast.probability:.0%} (temp={temperature}, latency: {latency_ms}ms, tokens: {tokens_used})"
         )
-        # Flag extreme divergence from market price at the forecaster level
-        # so downstream callers can make informed decisions.
-        max_div = self.settings.claude.max_divergence_from_market
+        # M-4: Early divergence check — flag or skip BEFORE ensemble/downstream.
+        # This catches unreliable forecasts early rather than letting them propagate.
         divergence = abs(forecast.probability - market.yes_price)
-        if divergence > max_div:
+        EXTREME_DIVERGENCE_THRESHOLD = 0.50
+        max_div = self.settings.claude.max_divergence_from_market
+        if divergence > EXTREME_DIVERGENCE_THRESHOLD:
+            logger.warning(
+                f"M-4: EXTREME divergence ({divergence:.0%}): Claude ({forecast.probability:.0%}) "
+                f"vs market ({market.yes_price:.0%}) for '{market.question[:50]}...' "
+                f"— marking as parse_failed to skip signal generation"
+            )
+            forecast.high_divergence = True
+            forecast.parse_failed = True
+        elif divergence > max_div:
             logger.warning(
                 f"High divergence: Claude ({forecast.probability:.0%}) vs market "
                 f"({market.yes_price:.0%}) = {divergence:.0%} for '{market.question[:50]}...'"
@@ -535,8 +548,14 @@ class ClaudeForecaster:
             )
 
         except asyncio.TimeoutError:
-            logger.warning(f"Claude API call timed out after {timeout}s")
-            self._record_api_failure()
+            # H-7: Timeouts are NOT counted as hard failures for the circuit
+            # breaker. Timeouts are transient (network latency, server load)
+            # and should not accumulate toward the 3-failure circuit open
+            # threshold. Only connection errors and rate limits count.
+            logger.warning(
+                f"Claude API call timed out after {timeout}s "
+                f"(not counted as circuit breaker failure)"
+            )
             return ForecastResult(
                 probability=market.yes_price,
                 confidence_low=max(0, market.yes_price - 0.25),
@@ -585,7 +604,7 @@ class ClaudeForecaster:
                 latency_ms=int((time.monotonic() - start_time) * 1000),
                 parse_failed=True,
             )
-        except (anthropic.APIError, asyncio.TimeoutError, json.JSONDecodeError, ValueError, KeyError) as e:
+        except (anthropic.APIError, json.JSONDecodeError, ValueError, KeyError) as e:
             logger.exception(f"Claude assessment failed: {e}")
             self._record_api_failure()
             return ForecastResult(

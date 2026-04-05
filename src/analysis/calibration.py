@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 class CalibrationTracker:
     """Tracks prediction accuracy and calibration metrics."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, brier_half_life_days: float = 30.0):
         self.db = db
+        self.brier_half_life_days = brier_half_life_days  # L-7: configurable
 
     def log_prediction(
         self,
@@ -133,7 +134,7 @@ class CalibrationTracker:
             return None
 
         now = datetime.now(timezone.utc)
-        HALF_LIFE_DAYS = 30.0  # M-2: half-life for exponential decay
+        HALF_LIFE_DAYS = self.brier_half_life_days  # L-7: configurable via constructor
 
         weighted_total = 0.0
         weight_sum = 0.0

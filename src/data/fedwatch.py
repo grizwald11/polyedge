@@ -39,6 +39,11 @@ class FedWatchClient:
         self._max_retries = max_retries
         # Stale fallback: last successful result, served when fetch + parse fail
         self._last_good_result: Optional[list[dict]] = None
+        # H-9: Track consecutive scraping failures for observability.
+        # This HTML scraper is fragile — if CME changes their page format,
+        # parsing will silently fail. Consider FRED API (fred.stlouisfed.org)
+        # as an alternative data source with stable JSON responses.
+        self._consecutive_failures: int = 0
 
     async def get_rate_probabilities(self) -> Optional[list[dict]]:
         """Fetch rate probabilities for upcoming FOMC meetings.
@@ -53,15 +58,32 @@ class FedWatchClient:
 
         html = await self._fetch_page()
         if html is None:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= 3:
+                logger.warning(
+                    f"FedWatch: {self._consecutive_failures} consecutive scraping failures — "
+                    "CME page format may have changed. Consider FRED API as fallback."
+                )
             if self._last_good_result is not None:
                 logger.info("FedWatch: serving stale cached result after fetch failure")
                 return self._last_good_result
             return None
 
         result = self._parse_probabilities(html)
-        if result is None and self._last_good_result is not None:
-            logger.info("FedWatch: parse failed, serving stale cached result")
-            return self._last_good_result
+        if result is None:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= 3:
+                logger.warning(
+                    f"FedWatch: {self._consecutive_failures} consecutive scraping failures — "
+                    "CME page format may have changed. Consider FRED API as fallback."
+                )
+            if self._last_good_result is not None:
+                logger.info("FedWatch: parse failed, serving stale cached result")
+                return self._last_good_result
+            return None
+
+        # Success — reset counter
+        self._consecutive_failures = 0
         return result
 
     async def _fetch_page(self) -> Optional[str]:

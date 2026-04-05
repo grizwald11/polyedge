@@ -186,6 +186,10 @@ class QuestionDecomposer:
             temperature = 0.2  # Low temperature for structured decomposition
             timeout = self.forecaster.settings.claude.api_timeout_seconds
 
+            # M-13: Retry logic is handled inside _call_claude via retry_with_backoff
+            # (retries RateLimitError and APIConnectionError up to 3 times with
+            # exponential backoff). If all retries are exhausted, the exception
+            # propagates here and we return None (caller falls back to single-shot).
             response = await self.forecaster._call_claude(prompt, model, temperature, timeout)
             raw_text = self.forecaster._extract_text(response)
             if raw_text is None:
@@ -202,7 +206,10 @@ class QuestionDecomposer:
 
             return self._parse_decomposition(raw_text)
 
-        except Exception as e:
+        except (asyncio.TimeoutError, Exception) as e:
+            # M-13: Catches both timeout (not retried by _call_claude) and
+            # retried-but-exhausted API errors. Decomposition failure is non-fatal;
+            # caller falls back to single-shot assessment.
             logger.warning(f"Decomposition failed for {market.ticker}: {e}")
             return None
 
@@ -312,6 +319,7 @@ class QuestionDecomposer:
                 temperature = 0.25
                 timeout = self.forecaster.settings.claude.api_timeout_seconds
 
+                # M-13: _call_claude handles retries internally via retry_with_backoff
                 response = await self.forecaster._call_claude(prompt, model, temperature, timeout)
                 raw_text = self.forecaster._extract_text(response)
                 if raw_text is None:
@@ -332,7 +340,9 @@ class QuestionDecomposer:
                     "key_factor": forecast.key_factors_for[0] if forecast.key_factors_for else "",
                     "tokens_used": tokens_used,
                 }
-            except Exception as e:
+            except (asyncio.TimeoutError, Exception) as e:
+                # M-13: Non-fatal — sub-question failure returns None; AND/CONDITIONAL
+                # chains break, OR types skip this sub-question.
                 logger.warning(f"Sub-question assessment failed: {question[:50]}... — {e}")
                 return None
 

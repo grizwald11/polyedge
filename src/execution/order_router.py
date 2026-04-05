@@ -206,7 +206,13 @@ class OrderRouter:
                     fee_dollars = kalshi_maker_fee(int(order.size), price_cents) / 100.0
                 else:
                     fee_dollars = kalshi_taker_fee(int(order.size), price_cents) / 100.0
-                order.cost = round(order.price * order.size + fee_dollars, 4)
+                # M-1 FIX: Use Decimal arithmetic to avoid float rounding errors
+                from decimal import Decimal, ROUND_HALF_UP
+                order.cost = float(
+                    (Decimal(str(order.price)) * Decimal(str(order.size))
+                     + Decimal(str(fee_dollars)))
+                    .quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                )
 
         if self.metrics is not None:
             self.metrics.record_order_submitted()

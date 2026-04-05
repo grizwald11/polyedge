@@ -99,7 +99,13 @@ class PositionManager:
         self._take_profit_pct = take_profit_pct
         self._capital_rotation_edge = capital_rotation_edge
         self._positions: dict[str, Position] = {}  # market_id -> Position
-        self._pending_exits: set[str] = set()  # market_ids with resting exit orders
+        # C-4: Load pending exits from DB to survive restarts
+        try:
+            self._pending_exits: set[str] = db.load_pending_exits()
+            if self._pending_exits:
+                logger.info(f"Restored {len(self._pending_exits)} pending exit(s) from DB: {self._pending_exits}")
+        except Exception:
+            self._pending_exits: set[str] = set()  # Fresh start if table doesn't exist yet
         # Note: no asyncio.Lock here — creating a Lock outside an event loop
         # causes test flakiness with pytest-asyncio auto mode on Python 3.9.
         # The _positions dict is only mutated from a single async task anyway.
@@ -213,7 +219,7 @@ class PositionManager:
             )
             return existing
 
-    def update_price(self, market_id: str, yes_price: float, no_price: float = 0.0):
+    def update_price(self, market_id: str, yes_price: float, no_price: float = 0.0) -> None:
         """Update current price and recalculate unrealized P&L.
 
         Args:
@@ -231,10 +237,12 @@ class PositionManager:
 
         # Stale price detection: warn if price hasn't changed in a while.
         # This catches dead data feeds that silently replay old prices.
+        # M-12 FIX: Skip for resolved markets where price is legitimately static at 0/1.
         now = datetime.now(timezone.utc)
         time_since_update = (now - position.last_updated).total_seconds()
         price_for_side = no_price if position.direction in (Direction.BUY_NO, Direction.SELL_NO) else yes_price
-        if time_since_update > 300 and position.current_price > 0:
+        is_resolved_price = (yes_price <= 0.01 or yes_price >= 0.99) and (no_price <= 0.01 or no_price >= 0.99)
+        if time_since_update > 300 and position.current_price > 0 and not is_resolved_price:
             price_delta = abs(price_for_side - position.current_price)
             if price_delta == 0:
                 position._price_stale = True
@@ -368,12 +376,26 @@ class PositionManager:
         self._positions.pop(market_id, None)
 
     def mark_pending_exit(self, market_id: str) -> None:
-        """Mark a position as having a resting exit order in flight."""
+        """Mark a position as having a resting exit order in flight.
+
+        C-4: Persists to DB so pending exits survive restarts.
+        """
         self._pending_exits.add(market_id)
+        try:
+            self.db.save_pending_exit(market_id)
+        except Exception as e:
+            logger.warning(f"Failed to persist pending exit for {market_id}: {e}")
 
     def clear_pending_exit(self, market_id: str) -> None:
-        """Clear pending exit flag (order filled or cancelled)."""
+        """Clear pending exit flag (order filled or cancelled).
+
+        C-4: Removes from DB as well.
+        """
         self._pending_exits.discard(market_id)
+        try:
+            self.db.delete_pending_exit(market_id)
+        except Exception as e:
+            logger.warning(f"Failed to remove pending exit for {market_id}: {e}")
 
     def has_pending_exit(self, market_id: str) -> bool:
         """Check if a position has a resting exit order already submitted."""

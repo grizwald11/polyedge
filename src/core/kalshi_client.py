@@ -242,8 +242,9 @@ class KalshiClient:
 
             client = await self._get_client()
             max_retries = 3
-            auth_retried = False  # H-5: track single auth retry
-            for attempt in range(max_retries):
+            max_auth_retries = 3  # H-1: up to 3 auth retries with exponential backoff
+            auth_retry_count = 0
+            for attempt in range(max_retries + max_auth_retries):
                 try:
                     headers = self._auth_headers(method, path)
                     _req_start = time.monotonic()
@@ -296,13 +297,16 @@ class KalshiClient:
                         logger.error(f"Rate limited on {path} after {max_retries} attempts")
                         raise KalshiRateLimitError(f"Rate limited on {path} after {max_retries} attempts")
 
-                    # H-5: Retry once on 401/403 auth errors with backoff
-                    if resp.status_code in (401, 403) and not auth_retried:
-                        auth_retried = True
+                    # H-1: Retry up to 3 times on 401/403 auth errors with exponential backoff + jitter
+                    if resp.status_code in (401, 403) and auth_retry_count < 3:
+                        auth_retry_count += 1
+                        wait = (2 ** auth_retry_count) + random.uniform(0, 1)
                         logger.warning(
-                            f"Auth error {resp.status_code} on {path}, retrying once after 2s"
+                            f"Auth error {resp.status_code} on {path}, "
+                            f"retrying after {wait:.1f}s "
+                            f"(auth retry {auth_retry_count}/3)"
                         )
-                        await asyncio.sleep(2.0)
+                        await asyncio.sleep(wait)
                         continue
 
                     resp.raise_for_status()
@@ -321,6 +325,17 @@ class KalshiClient:
                             self._recovery_successes = 0
                     else:
                         self._consecutive_5xx = 0
+                    # L-6: Check for API version changes via response headers
+                    api_version = resp.headers.get("x-api-version") or resp.headers.get("api-version")
+                    if api_version and not hasattr(self, "_api_version_warned"):
+                        if "v2" not in str(api_version).lower():
+                            logger.warning(
+                                f"L-6: Kalshi API version may have changed: "
+                                f"header={api_version} (expected v2). "
+                                f"Check for breaking changes."
+                            )
+                            self._api_version_warned = True
+
                     if resp.status_code == 204:
                         return {}
                     # H-10: Wrap JSON parsing in try/except

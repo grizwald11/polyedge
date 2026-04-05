@@ -198,3 +198,27 @@ class CalibrationMixin:
         )
         conn.commit()
         return cursor.rowcount
+
+    def cleanup_old_calibration_records(self, max_age_days: int = 365) -> int:
+        """M-14: Remove resolved calibration records older than max_age_days.
+
+        Only removes RESOLVED records (actual_outcome IS NOT NULL) to preserve
+        pending predictions that haven't resolved yet.
+
+        Returns:
+            Number of records deleted.
+        """
+        conn = self._get_conn()
+        cutoff = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute(
+            """DELETE FROM calibration_records
+               WHERE actual_outcome IS NOT NULL
+               AND resolved_at IS NOT NULL
+               AND julianday(?) - julianday(resolved_at) > ?""",
+            (cutoff, max_age_days),
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        if deleted > 0:
+            logger.info(f"M-14: Cleaned up {deleted} calibration records older than {max_age_days} days")
+        return deleted

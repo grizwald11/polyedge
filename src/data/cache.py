@@ -41,7 +41,8 @@ class TTLCache:
         self._store[key] = (time.monotonic() + self.ttl_seconds, data)
         # Auto-cleanup: prune expired entries when cache grows large
         # to prevent unbounded memory growth from never-accessed keys
-        if len(self._store) > 500:
+        # M-6 FIX: Reduced from 500 to 100 for more aggressive cleanup
+        if len(self._store) > 100:
             self.cleanup_expired()
 
     def clear(self) -> None:

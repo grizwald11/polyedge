@@ -154,6 +154,16 @@ class ClaudeConfig(BaseModel):
         "Tech/AI": 0.30,
         "Culture": 0.40,
     })
+    # M-8: Category-specific highstakes thresholds for model selection.
+    # Data-rich categories (Politics) can use sonnet longer; data-sparse
+    # categories (Geopolitics) should escalate to opus earlier.
+    category_highstakes_thresholds: dict[str, float] = Field(default_factory=lambda: {
+        "Politics": 75.0,       # Data-rich: higher threshold, sonnet handles well
+        "Fed/Macro": 60.0,      # Moderate data availability
+        "Geopolitics": 30.0,    # Data-sparse: escalate to opus earlier
+        "Tech/AI": 50.0,        # Default level
+        "Culture": 50.0,        # Default level
+    })
     cross_check_enabled: bool = True
     cross_check_top_n: int = 3
     cross_check_temp_low: float = 0.2

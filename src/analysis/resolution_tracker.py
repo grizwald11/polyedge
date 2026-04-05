@@ -20,11 +20,12 @@ logger = logging.getLogger(__name__)
 class ResolutionTracker:
     """Checks Kalshi and Polymarket APIs for settled markets and resolves calibration predictions."""
 
-    def __init__(self, kalshi: KalshiClient, db: Database, polymarket_discovery=None, variant_manager=None):
+    def __init__(self, kalshi: KalshiClient, db: Database, polymarket_discovery=None, variant_manager=None, calibration_tracker=None):
         self.kalshi = kalshi
         self.db = db
         self.polymarket_discovery = polymarket_discovery  # Optional PolymarketDiscovery
         self.variant_manager = variant_manager  # Optional PromptVariantManager for A/B outcome tracking
+        self.calibration_tracker = calibration_tracker  # H-4: Auto-resolve calibration on settlement
 
     async def check_resolutions(self) -> int:
         """Check all unresolved predictions against the Kalshi API.
@@ -158,9 +159,22 @@ class ResolutionTracker:
         Filters by both market_id AND platform to prevent cross-platform
         calibration data corruption.
 
+        H-4: Also delegates to CalibrationTracker.resolve_prediction() so that
+        calibration records are automatically resolved when markets settle.
+
         Returns:
             Number of predictions resolved.
         """
+        # H-4: Resolve via CalibrationTracker first (sets actual_outcome + resolved_at)
+        if self.calibration_tracker is not None:
+            try:
+                self.calibration_tracker.resolve_prediction(market_id, actual_outcome)
+            except Exception as e:
+                logger.warning(
+                    f"H-4: CalibrationTracker.resolve_prediction failed for "
+                    f"{market_id}: {e} — falling through to direct DB update"
+                )
+
         now = datetime.now(timezone.utc).isoformat()
         outcome_int = 1 if actual_outcome else 0
 

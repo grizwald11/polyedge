@@ -132,13 +132,23 @@ def ensemble_forecast(
     # Threshold at 5%/95% (not 15%/85%) to avoid filtering out legitimate
     # mid-rare opportunities like FDA approvals at 10-15%.
     divergence = abs(claude_forecast.probability - market_price)
-    extreme_price = market_price < 0.05 or market_price > 0.95
+    # M-5 FIX: Tightened from 0.05/0.95 to 0.02/0.98 — 5c markets still have
+    # tradeable volume and shouldn't automatically discount Claude's view.
+    extreme_price = market_price < 0.02 or market_price > 0.98
 
     # Dynamic efficiency adjustment: when market is highly efficient (>0.7),
     # trust market price more on divergence; when inefficient (<0.5),
     # trust Claude more. Falls back to original hardcoded behavior when
     # efficiency is not provided.
     eff = market_efficiency if market_efficiency is not None else 0.7
+
+    # H-8: Scale Claude weight by market efficiency. More efficient markets
+    # (higher liquidity/volume) deserve more market weight. Scale factor
+    # ranges from 1.0 (eff=0.3, least efficient) to ~0.87 (eff=0.95, most
+    # efficient), reducing Claude's weight for well-traded markets.
+    efficiency_scale = 1.0 - (eff - 0.3) * 0.2  # 1.0 at eff=0.3, 0.87 at eff=0.95
+    efficiency_scale = max(0.80, min(1.0, efficiency_scale))
+    effective_claude_weight *= efficiency_scale
 
     if extreme_price:
         # On extreme-price markets, trust the market more — Claude divergence

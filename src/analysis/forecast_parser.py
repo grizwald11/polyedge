@@ -171,7 +171,22 @@ def build_forecast(data: dict) -> ForecastResult:
             f"Clamped probability from {raw_probability:.6f} to {probability:.2f}"
         )
 
+    # H-6: Warn when confidence interval fields are missing and widen CI
+    ci_low_missing = "confidence_low" not in data
+    ci_high_missing = "confidence_high" not in data
+    if ci_low_missing or ci_high_missing:
+        missing_fields = []
+        if ci_low_missing:
+            missing_fields.append("confidence_low")
+        if ci_high_missing:
+            missing_fields.append("confidence_high")
+        logger.warning(
+            f"JSON schema validation: missing fields {missing_fields} — "
+            f"widening CI to ±0.25 around probability {probability:.2f}"
+        )
+
     # Safe CI extraction with fallback defaults
+    # H-6: Use wider ±0.25 default when fields are missing (vs ±0.20 when present)
     def _safe_float(value, default: float) -> float:
         """Safely convert to float, returning default on failure."""
         if value is None:
@@ -182,8 +197,9 @@ def build_forecast(data: dict) -> ForecastResult:
             logger.warning(f"Non-numeric CI value: {value!r} — using default {default}")
             return default
 
-    ci_low_raw = _safe_float(data.get("confidence_low"), max(0, probability - 0.20))
-    ci_high_raw = _safe_float(data.get("confidence_high"), min(1, probability + 0.20))
+    ci_default_width = 0.25 if (ci_low_missing or ci_high_missing) else 0.20
+    ci_low_raw = _safe_float(data.get("confidence_low"), max(0, probability - ci_default_width))
+    ci_high_raw = _safe_float(data.get("confidence_high"), min(1, probability + ci_default_width))
 
     return ForecastResult(
         probability=probability,

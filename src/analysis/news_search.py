@@ -2,6 +2,10 @@
 
 Extracted from news_researcher.py — provides search functions that return
 NewsResult objects from different search providers.
+
+L-2 NOTE: DuckDuckGo search uses the unofficial `ddgs` library which has no
+stable API contract. It may be rate-limited or blocked without warning.
+Serper is the preferred backend for production reliability.
 """
 
 from __future__ import annotations
@@ -51,8 +55,14 @@ async def search_ddg(query: str) -> list[NewsResult]:
 
     Uses the news endpoint for recency, falls back to text search.
     Runs synchronous DDGS in a thread to avoid blocking the event loop.
+
+    M-9: Retry logic — DDG calls are retried up to 2 times with backoff
+    via retry_with_backoff. Serper calls (search_serper below) already have
+    retry_with_backoff. The caller (NewsResearcher._search_serper) manages
+    a 3-strike permanent disable state machine for auth failures.
     """
     import asyncio
+    from src.core.retry_helper import retry_with_backoff
 
     def _do_search() -> list[NewsResult]:
         results = []
@@ -90,14 +100,34 @@ async def search_ddg(query: str) -> list[NewsResult]:
 
         return results
 
-    loop = asyncio.get_event_loop()
-    try:
+    async def _run_ddg_search() -> list[NewsResult]:
+        loop = asyncio.get_event_loop()
         return await asyncio.wait_for(
             loop.run_in_executor(None, _do_search),
             timeout=8.0,
         )
-    except asyncio.TimeoutError:
-        logger.warning(f"DDG search timed out after 8s for '{query[:50]}'")
+
+    def _on_ddg_retry(attempt: int, exc: BaseException) -> None:
+        logger.debug(
+            f"M-9: DDG search retry {attempt + 1}/2 for '{query[:50]}': "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    try:
+        return await retry_with_backoff(
+            _run_ddg_search,
+            max_retries=2,
+            base_delay=1.0,
+            max_delay=5.0,
+            retryable_exceptions=(asyncio.TimeoutError, OSError, RuntimeError),
+            on_retry=_on_ddg_retry,
+        )
+    except (asyncio.TimeoutError, OSError, RuntimeError):
+        # M-9: All retries exhausted — DDG is down, caller falls back to Serper
+        logger.warning(
+            f"M-9: DDG search retries exhausted for '{query[:50]}' — "
+            "falling back to Serper if available"
+        )
         return []
 
 

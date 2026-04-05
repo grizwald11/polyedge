@@ -182,6 +182,22 @@ async def _create_order(
     from src.execution.order_router import OrderResult
 
     kalshi_type = "limit" if order.order_type == OrderType.GTC else "market"
+
+    # C-1 FIX: Check per-market cooldown to prevent duplicate orders after timeout
+    cooldown_key = f"{order.market_id}:{order.side.value}"
+    if hasattr(router, "_timeout_cooldowns"):
+        cooldown_until = router._timeout_cooldowns.get(cooldown_key)
+        if cooldown_until is not None and datetime.now(timezone.utc) < cooldown_until:
+            remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds()
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = (
+                f"Market {order.market_id} under timeout cooldown "
+                f"({remaining:.0f}s remaining) -- previous order may still be processing"
+            )
+            router._log_order(order)
+            logger.warning(f"C-1: {order.rejection_reason}")
+            return OrderResult(success=False, order=order, error=order.rejection_reason)
+
     try:
         result = await asyncio.wait_for(
             router.kalshi.create_order(
@@ -192,22 +208,29 @@ async def _create_order(
                 order_type=kalshi_type,
                 action=order.side.value.lower(),
             ),
-            timeout=15.0,
+            timeout=25.0,  # C-1 FIX: Increased from 15s to 25s
         )
     except asyncio.TimeoutError:
         logger.error(
             f"Order creation timed out for {order.market_id} -- "
             f"order may exist on Kalshi. Checking open orders for reconciliation."
         )
+        # C-1 FIX: Set 120s cooldown on this market/side to prevent duplicate orders
+        if not hasattr(router, "_timeout_cooldowns"):
+            router._timeout_cooldowns = {}
+        from datetime import timedelta
+        router._timeout_cooldowns[cooldown_key] = datetime.now(timezone.utc) + timedelta(seconds=120)
+
         result = await _reconcile_after_timeout(router, order)
         if result is None:
-            order.status = OrderStatus.OPEN
+            order.status = OrderStatus.PENDING_REVIEW
             order.rejection_reason = "Timeout creating order -- may exist on Kalshi (unconfirmed)"
             router._log_order(order)
             logger.critical(
                 f"ORPHANED ORDER RISK: order for {order.market_id} timed out and reconciliation "
-                f"found no match. Order may still be processing on Kalshi. "
-                f"Manual review required -- check Kalshi dashboard."
+                f"found no match after 3 attempts. Order may still be processing on Kalshi. "
+                f"Manual review required -- check Kalshi dashboard. "
+                f"120s cooldown set on {cooldown_key}."
             )
             return OrderResult(success=False, order=order, error="Timeout -- order status unknown, manual review required")
     return result
@@ -386,29 +409,54 @@ async def _balance_preflight(router: OrderRouter, order: Order) -> Optional[Orde
 async def _reconcile_after_timeout(router: OrderRouter, order: Order) -> Optional[dict]:
     """After a create_order timeout, check Kalshi for matching recent orders.
 
+    C-1 FIX: Retries up to 3 times with 5s waits between attempts.
     Returns the matching order dict if found, None otherwise.
     """
-    try:
-        open_orders = await asyncio.wait_for(
-            router.kalshi.get_open_orders(),
-            timeout=10.0,
-        )
-        for oo in open_orders:
-            price_match = abs(oo.get("yes_price", 0) / 100 - order.price) < 0.01
-            # C-3: Also check side to avoid confusing BUY YES with BUY NO
-            side_match = oo.get("side", "").lower() == (order.kalshi_side or "").lower()
-            if (
-                oo.get("ticker") == order.market_id
-                and oo.get("count") == int(order.size)
-                and price_match
-                and side_match
-            ):
-                logger.warning(
-                    f"Reconciliation found matching order on Kalshi: {oo.get('order_id')}"
-                )
-                return oo
-    except Exception as e:
-        logger.error(f"Reconciliation check failed: {e}", exc_info=True)
+    max_reconcile_attempts = 3
+    reconcile_delay = 5.0
+
+    for attempt in range(max_reconcile_attempts):
+        if attempt > 0:
+            logger.info(
+                f"Reconciliation attempt {attempt + 1}/{max_reconcile_attempts} "
+                f"for {order.market_id} (waiting {reconcile_delay}s for order to propagate)"
+            )
+            await asyncio.sleep(reconcile_delay)
+
+        try:
+            open_orders = await asyncio.wait_for(
+                router.kalshi.get_open_orders(),
+                timeout=10.0,
+            )
+            for oo in open_orders:
+                price_match = abs(oo.get("yes_price", 0) / 100 - order.price) < 0.01
+                side_match = oo.get("side", "").lower() == (order.kalshi_side or "").lower()
+                if (
+                    oo.get("ticker") == order.market_id
+                    and oo.get("count") == int(order.size)
+                    and price_match
+                    and side_match
+                ):
+                    logger.warning(
+                        f"Reconciliation found matching order on Kalshi "
+                        f"(attempt {attempt + 1}): {oo.get('order_id')}"
+                    )
+                    return oo
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Reconciliation attempt {attempt + 1}/{max_reconcile_attempts} "
+                f"timed out for {order.market_id}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Reconciliation attempt {attempt + 1}/{max_reconcile_attempts} "
+                f"failed: {e}", exc_info=True
+            )
+
+    logger.error(
+        f"All {max_reconcile_attempts} reconciliation attempts failed "
+        f"for {order.market_id} -- order status unknown"
+    )
     return None
 
 

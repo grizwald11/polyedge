@@ -154,6 +154,61 @@ def _acquire_pid_lock(lock_path: str = "data/polyedge.pid") -> bool:
     return True
 
 
+def _check_db_encryption(settings, logger) -> None:
+    """M-2: Warn about unencrypted database at startup."""
+    db_path = Path(settings.database.path)
+    if db_path.exists() and str(db_path) != ":memory:":
+        logger.info(
+            f"Database at {db_path} is unencrypted. "
+            "Ensure FileVault is enabled on macOS for at-rest protection."
+        )
+
+
+def _check_env_security(logger) -> None:
+    """C-5: Warn about plaintext API keys in config/.env at startup.
+
+    Checks file permissions and reminds operator about key rotation.
+    """
+    env_path = Path("config/.env")
+    if not env_path.exists():
+        return
+
+    try:
+        mode = env_path.stat().st_mode & 0o777
+        if mode & 0o077:  # Group or world readable
+            logger.critical(
+                f"SECURITY: config/.env has loose permissions ({oct(mode)}). "
+                f"Run: chmod 600 config/.env"
+            )
+            try:
+                os.chmod(env_path, 0o600)
+                logger.info("Auto-fixed config/.env permissions to 600")
+            except OSError:
+                pass
+        else:
+            logger.debug("config/.env permissions OK (600)")
+    except OSError:
+        pass
+
+    # Check PEM file permissions too
+    pem_path = Path("config/kalshi_private_key.pem")
+    if pem_path.exists():
+        try:
+            mode = pem_path.stat().st_mode & 0o777
+            if mode & 0o077:
+                logger.critical(
+                    f"SECURITY: kalshi_private_key.pem has loose permissions ({oct(mode)}). "
+                    f"Run: chmod 600 config/kalshi_private_key.pem"
+                )
+                try:
+                    os.chmod(pem_path, 0o600)
+                    logger.info("Auto-fixed kalshi_private_key.pem permissions to 600")
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+
 def _release_pid_lock(lock_path: str = "data/polyedge.pid"):
     """Release the PID lock file on shutdown."""
     lock_file = Path(lock_path)

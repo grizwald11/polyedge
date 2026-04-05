@@ -756,4 +756,14 @@ class Database(
             conn.execute("ALTER TABLE circuit_breaker_state ADD COLUMN high_water_mark REAL")
             logger.info("Migration v15: added high_water_mark to circuit_breaker_state")
 
+        # Migration v16: pending_exits table for crash-recovery of exit orders (C-4)
+        if "pending_exits" not in tables:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_exits (
+                    market_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            logger.info("Migration v16: created pending_exits table for exit order persistence")
+
         conn.commit()

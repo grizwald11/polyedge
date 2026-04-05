@@ -591,7 +591,7 @@ class TestRequestRetries:
 
     @pytest.mark.asyncio
     async def test_auth_retry_on_401(self):
-        """401 should trigger a single retry with 2s sleep before re-raising."""
+        """401 should trigger up to 3 retries with exponential backoff + jitter."""
         client = KalshiClient()
         mock_http = MagicMock()
         mock_http.is_closed = False
@@ -599,7 +599,8 @@ class TestRequestRetries:
         auth_err_resp = _make_resp(401)
         ok_resp = _make_resp(200, {"ok": True})
 
-        mock_http.get = AsyncMock(side_effect=[auth_err_resp, ok_resp])
+        # Fail twice, succeed on third retry
+        mock_http.get = AsyncMock(side_effect=[auth_err_resp, auth_err_resp, ok_resp])
         client._client = mock_http
 
         sleep_calls = []
@@ -611,7 +612,37 @@ class TestRequestRetries:
             result = await client._request("GET", "/markets")
 
         assert result == {"ok": True}
-        assert any(s == 2.0 for s in sleep_calls), "Should sleep 2s after 401"
+        assert len(sleep_calls) == 2, f"Should sleep twice for 2 auth retries, got {len(sleep_calls)}"
+        # First backoff: 2^1 + jitter (2.0-3.0), second: 2^2 + jitter (4.0-5.0)
+        assert 2.0 <= sleep_calls[0] < 3.0, f"First backoff should be ~2s, got {sleep_calls[0]}"
+        assert 4.0 <= sleep_calls[1] < 5.0, f"Second backoff should be ~4s, got {sleep_calls[1]}"
+
+    @pytest.mark.asyncio
+    async def test_auth_retry_exhausted_after_3(self):
+        """401 should raise after 3 retries are exhausted."""
+        client = KalshiClient()
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+
+        auth_err_resp = _make_resp(401)
+        # 4 auth errors: initial + 3 retries, then should hit raise_for_status
+        mock_http.get = AsyncMock(side_effect=[auth_err_resp, auth_err_resp, auth_err_resp, auth_err_resp])
+        client._client = mock_http
+
+        sleep_calls = []
+
+        async def fake_sleep(s):
+            sleep_calls.append(s)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep):
+            with pytest.raises(httpx.HTTPStatusError):
+                await client._request("GET", "/markets")
+
+        assert len(sleep_calls) == 3, f"Should sleep 3 times for 3 auth retries, got {len(sleep_calls)}"
+        # Verify exponential backoff: ~2s, ~4s, ~8s (with jitter)
+        assert 2.0 <= sleep_calls[0] < 3.0
+        assert 4.0 <= sleep_calls[1] < 5.0
+        assert 8.0 <= sleep_calls[2] < 9.0
 
     @pytest.mark.asyncio
     async def test_metrics_latency_recorded(self):

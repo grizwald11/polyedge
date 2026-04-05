@@ -42,13 +42,30 @@ def select_model(
     model_highstakes: str,
     model_primary: str,
     edge_highstakes_threshold: float = 0.15,
+    category: str = "",
+    category_highstakes_thresholds: dict[str, float] | None = None,
 ) -> str:
-    """Select model based on position value or edge size.
+    """Select model based on position value, edge size, and market category.
 
     Uses opus for high-stakes positions or large detected edges,
     since opus catches more nuances in resolution criteria and temporal reasoning.
+
+    M-8: Category-aware thresholds — data-rich categories (Politics) can tolerate
+    higher thresholds (sonnet handles well), while data-sparse categories
+    (Geopolitics) escalate to opus earlier for better reasoning.
     """
-    if position_value > highstakes_threshold:
+    # M-8: Use category-specific threshold if available, else fall back to global
+    effective_threshold = highstakes_threshold
+    if category and category_highstakes_thresholds:
+        cat_threshold = category_highstakes_thresholds.get(category)
+        if cat_threshold is not None:
+            effective_threshold = cat_threshold
+            logger.debug(
+                f"M-8: Using category '{category}' highstakes threshold "
+                f"${cat_threshold:.0f} (global: ${highstakes_threshold:.0f})"
+            )
+
+    if position_value > effective_threshold:
         return model_highstakes
     if abs(edge) > edge_highstakes_threshold:
         return model_highstakes
@@ -83,12 +100,14 @@ async def build_forecaster_prompt(
     category_temperatures: dict,
     default_temperature: float,
     accuracy_context: str = "",
+    category_highstakes_thresholds: dict[str, float] | None = None,
 ) -> tuple[str, str, MarketCategory, float, str]:
     """Build the Claude prompt with news enrichment and context.
 
     Returns:
         Tuple of (prompt, model, category, temperature, variant_name)
     """
+    category = classify_market(market)
     model = select_model(
         position_value,
         0.0,
@@ -96,8 +115,9 @@ async def build_forecaster_prompt(
         model_highstakes=model_highstakes,
         model_primary=model_primary,
         edge_highstakes_threshold=edge_highstakes_threshold,
+        category=category.value,
+        category_highstakes_thresholds=category_highstakes_thresholds,
     )
-    category = classify_market(market)
     temperature = select_temperature(category, category_temperatures, default_temperature)
 
     # Enrich with news research if no context was provided

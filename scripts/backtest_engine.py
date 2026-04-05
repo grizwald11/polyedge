@@ -125,6 +125,10 @@ class BacktestResult:
     ci_total_checked: int = 0
     # M-8: Category-level breakdown of P&L, win rate, and trade count
     category_metrics: dict[str, dict] = field(default_factory=dict)
+    # M-11: Probability bucket analysis — win rate by predicted probability decile
+    # Keys are bucket labels like "0.50-0.60", values are dicts with
+    # {count, wins, win_rate, avg_pnl}
+    probability_buckets: dict[str, dict] = field(default_factory=dict)
     equity_curve: list[float] = field(default_factory=list)
     daily_returns: list[float] = field(default_factory=list)
     trades: list[BacktestTrade] = field(default_factory=list)
@@ -569,8 +573,19 @@ class BacktestEngine:
                 continue
 
             # H-7: Simulate fill with parameterized miss/partial fill rates.
-            # miss_rate of orders miss entirely, 25% of large orders
-            # (>partial_fill_threshold contracts) get partial fills.
+            #
+            # M-10: FILL SIMULATION LIMITATIONS
+            # The miss_rate (default 15%) and partial_fill_chance (25%) are
+            # heuristic values, NOT calibrated to historical Kalshi fill data.
+            # In practice, actual miss rates depend on:
+            #   - Order type (maker vs taker)
+            #   - Market liquidity at time of order
+            #   - Time-to-resolution (thinner books near expiry)
+            #   - Order size relative to book depth
+            # FUTURE IMPROVEMENT: Calibrate miss_rate and partial_fill_chance
+            # against actual Kalshi fill rate data from the fills table. Track
+            # historical fill rates by market category, liquidity tier, and
+            # order size to build a data-driven fill model.
             import random
             if random.random() < self.miss_rate:
                 continue  # Simulated order miss
@@ -837,6 +852,36 @@ class BacktestEngine:
                 "win_count": len(cat_wins),
                 "win_rate": len(cat_wins) / len(cat_trades) if cat_trades else 0.0,
                 "total_pnl": cat_pnl,
+            }
+
+        # M-11: Probability bucket analysis — group resolved trades by predicted
+        # probability decile and compute win rate per bucket. Uses the forecast
+        # probability (not the market price) to evaluate calibration across ranges.
+        bucket_data: dict[str, list[BacktestTrade]] = {}
+        for t in resolved_trades:
+            if t.outcome is None:
+                continue
+            # Use forecast probability if available, else fall back to trade price
+            if trade_forecasts and t.market_id in trade_forecasts:
+                prob = trade_forecasts[t.market_id].probability
+            else:
+                prob = t.price if t.direction == Direction.BUY_YES else (1.0 - t.price)
+            # Clamp to [0.50, 1.0] range (we always trade when we think prob > 0.5)
+            prob = max(0.50, min(0.99, prob))
+            # Assign to decile bucket
+            bucket_lower = int(prob * 10) / 10  # e.g., 0.73 -> 0.70
+            bucket_lower = max(0.50, bucket_lower)  # Floor at 0.50
+            bucket_label = f"{bucket_lower:.2f}-{bucket_lower + 0.10:.2f}"
+            bucket_data.setdefault(bucket_label, []).append(t)
+
+        for label, bucket_trades in sorted(bucket_data.items()):
+            wins = [t for t in bucket_trades if t.pnl > 0]
+            avg_pnl = sum(t.pnl for t in bucket_trades) / len(bucket_trades)
+            result.probability_buckets[label] = {
+                "count": len(bucket_trades),
+                "wins": len(wins),
+                "win_rate": len(wins) / len(bucket_trades) if bucket_trades else 0.0,
+                "avg_pnl": avg_pnl,
             }
 
         return result

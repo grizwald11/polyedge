@@ -120,6 +120,7 @@ class OrderStatus(str, Enum):
     PARTIAL = "PARTIAL"
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
+    PENDING_REVIEW = "PENDING_REVIEW"  # C-1: Timeout with unconfirmed order status
 
 
 class StrategyName(str, Enum):

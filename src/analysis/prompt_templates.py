@@ -42,9 +42,10 @@ When the question involves compound events (A AND B, sequential steps, condition
 
 TEMPORAL CALIBRATION:
 - Check how many days remain until resolution (provided in the market details).
-- If resolving within 7 days: focus on scheduled events, announced decisions, and near-certain developments. Narrow your CI.
-- If resolving 7-30 days: include announced events but widen CI for unknown catalysts.
-- If resolving 30+ days: materially reduce confidence — many unforecast developments will occur. Widen CI significantly.
+- If resolving within 7 days: focus on scheduled events, announced decisions, and near-certain developments. Narrow your CI (e.g., width ±0.03 to ±0.08).
+- If resolving 7-30 days: include announced events but widen CI for unknown catalysts (e.g., width ±0.08 to ±0.15).
+- If resolving 30+ days: materially reduce confidence — many unforecast developments will occur. Widen CI significantly (e.g., width ±0.15 to ±0.25).
+- Example: For a 3-day market at 0.70, CI might be [0.64, 0.76]. For a 90-day market at 0.70, CI might be [0.50, 0.85].
 
 BASE RATE REQUIREMENT:
 - You MUST state an explicit base rate in your reasoning: "In historically similar situations, the base rate is approximately X%."

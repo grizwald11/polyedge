@@ -59,9 +59,10 @@ class TestBuildForecast:
         assert result.probability == 0.99
 
     def test_confidence_interval_defaults(self):
+        # H-6: When CI fields are missing, defaults widen to ±0.25 (was ±0.20)
         result = build_forecast({"probability": 0.60})
-        assert result.confidence_low == pytest.approx(0.40, abs=0.01)
-        assert result.confidence_high == pytest.approx(0.80, abs=0.01)
+        assert result.confidence_low == pytest.approx(0.35, abs=0.01)
+        assert result.confidence_high == pytest.approx(0.85, abs=0.01)
 
     def test_confidence_interval_explicit(self):
         result = build_forecast({

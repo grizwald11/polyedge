@@ -420,6 +420,10 @@ class AIProbabilityStrategy:
             market, forecast, category,
         )
 
+        # H-10: ensemble is None when post-ensemble validation fails
+        if ensemble is None:
+            return None
+
         # 7. Edge calculation, significance check, and signal generation
         return await self._calculate_edge_and_signal(
             market=market,
@@ -879,6 +883,19 @@ class AIProbabilityStrategy:
                 edge=clamped_prob - market.yes_price,
                 confidence=ensemble.confidence,
             )
+
+        # H-10: Post-ensemble reasonableness validation. Reject non-finite or
+        # out-of-range probabilities before they propagate to edge calculation
+        # and signal generation. This guards against NaN/inf from numerical
+        # instabilities in Platt calibration, extremization, or log-odds math.
+        import math as _math
+        final_p = ensemble.final_probability
+        if not _math.isfinite(final_p) or final_p < 0.01 or final_p > 0.99:
+            logger.warning(
+                f"H-10 reasonableness rejection: {market.ticker} ensemble probability "
+                f"{final_p} is non-finite or outside [0.01, 0.99] — skipping"
+            )
+            return None, consensus_forecasts, market_eff, cat_brier_dict
 
         return ensemble, consensus_forecasts, market_eff, cat_brier_dict
 

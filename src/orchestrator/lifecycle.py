@@ -7,6 +7,9 @@ import logging
 import sys
 from datetime import datetime, timezone
 
+import anthropic
+import httpx
+
 from src.alerts.alert_manager import AlertManager, LogBackend
 from src.alerts.daily_report import DailyReport
 from src.alerts.imessage_alert import IMessageBackend
@@ -35,7 +38,7 @@ from src.execution.order_router import OrderRouter
 from src.execution.position_manager import PositionManager
 from src.metrics import Metrics
 from src.orchestrator.scan_cycle import scan_and_trade
-from src.orchestrator.startup import _acquire_pid_lock, _release_pid_lock, setup_logging
+from src.orchestrator.startup import _acquire_pid_lock, _check_env_security, _release_pid_lock, setup_logging
 from src.risk.circuit_breaker import CircuitBreaker
 from src.risk.correlation_detector import CorrelationDetector
 from src.risk.kelly_sizer import KellySizer
@@ -63,7 +66,7 @@ async def run_trading_loop(
     mean_reversion_strategy=None, late_resolution_strategy=None,
     price_monitor=None,
     shutdown_event: asyncio.Event | None = None,
-):
+) -> None:
     """Run the scan-assess-trade loop on an interval."""
     logger = logging.getLogger("polyedge.main")
     cycle_count = 0
@@ -157,7 +160,8 @@ async def run_trading_loop(
                     mismatches = await position_manager.sync_with_kalshi(kalshi)
                     if mismatches:
                         logger.warning(f"Post-timeout sync found {mismatches} position mismatches")
-                except Exception as sync_err:
+                except (httpx.HTTPError, asyncio.TimeoutError, ConnectionError, RuntimeError, OSError) as sync_err:
+                    # M-3: Narrowed from bare Exception — catch network/API/runtime errors
                     logger.error(f"Post-timeout position sync failed: {sync_err}", exc_info=True)
                     logger.critical(
                         "CRITICAL: Post-timeout position sync also failed. "
@@ -281,7 +285,14 @@ async def _initialize_services(settings, logger) -> _Components:
         try:
             await c.forecaster.health_check()
             logger.info("Anthropic API: key validated successfully")
-        except Exception as e:
+        except (
+            anthropic.APIError,
+            anthropic.AuthenticationError,
+            anthropic.APIConnectionError,
+            asyncio.TimeoutError,
+            RuntimeError,
+        ) as e:
+            # M-3: Narrowed from bare Exception — catch Anthropic API and runtime errors
             logger.critical(
                 f"Anthropic API key validation FAILED: {e}. "
                 "WARNING: The bot will have DEGRADED SIGNAL GENERATION. "
@@ -291,7 +302,7 @@ async def _initialize_services(settings, logger) -> _Components:
                 exc_info=True,
             )
     c.calibration = CalibrationTracker(c.db)
-    c.resolution_tracker = ResolutionTracker(c.kalshi, c.db)
+    c.resolution_tracker = ResolutionTracker(c.kalshi, c.db, calibration_tracker=c.calibration)
     c.calibration_analyzer = CalibrationAnalyzer(c.db)
     c.data_enricher = DataEnricher(settings)
     return c
@@ -437,7 +448,8 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
                     f"these may be orphaned from a previous crash. "
                     f"Order IDs: {[o.get('order_id', '?') for o in open_orders[:5]]}"
                 )
-        except Exception as e:
+        except (httpx.HTTPError, asyncio.TimeoutError, ConnectionError) as e:
+            # M-3: Narrowed from bare Exception — only catch network/API errors
             logger.info(f"Could not check for orphaned orders: {e}")
 
         # H-5: Reconcile DB pending orders against Kalshi actual order states.
@@ -462,11 +474,13 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
                                 f"  Reconciled order {order_id}: {kalshi_status} "
                                 f"(removed from pending)"
                             )
-                    except Exception as e:
+                    except (httpx.HTTPError, asyncio.TimeoutError, KeyError) as e:
+                        # M-3: Narrowed — catch API errors + KeyError for malformed responses
                         logger.warning(f"  Failed to reconcile order {order_id}: {e}")
                 if reconciled:
                     logger.info(f"Fill reconciliation: resolved {reconciled}/{len(db_pending)} stale pending orders")
-        except Exception as e:
+        except (httpx.HTTPError, asyncio.TimeoutError, OSError) as e:
+            # M-3: Narrowed — catch network/API/DB errors for reconciliation
             logger.warning(f"Fill reconciliation failed (non-fatal): {e}")
 
     # Alerts
@@ -694,7 +708,7 @@ async def _shutdown(c: _Components, logger) -> None:
         logger.warning(f"Database close failed: {e}")
 
 
-async def main():
+async def main() -> None:
     """Main entry point — orchestrates initialization, trading loop, and shutdown."""
     if not _acquire_pid_lock():
         logging.critical("Another PolyEdge instance is already running (PID lock exists). Exiting.")
@@ -705,6 +719,7 @@ async def main():
     logger = logging.getLogger("polyedge.main")
 
     settings.validate_required_keys()
+    _check_env_security(logger)  # C-5: Warn about plaintext keys
 
     logger.info("=" * 60)
     logger.info("PolyEdge Starting — Phase 3: Paper Trading")
@@ -717,6 +732,13 @@ async def main():
     logger.info(f"  Kalshi API: {settings.kalshi.active_host}")
     logger.info(f"  Polymarket: {'enabled' if settings.polymarket.enabled else 'disabled'}")
     logger.info("=" * 60)
+
+    # H-12: Warn when running paper mode against production Kalshi API
+    if not settings.kalshi.use_demo and settings.trading.mode == "paper":
+        logger.warning(
+            "Running paper mode against PRODUCTION Kalshi API — "
+            "set kalshi.use_demo: true for full sandbox isolation"
+        )
 
     # Phase 1: Initialize all services
     c = await _initialize_services(settings, logger)

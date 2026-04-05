@@ -200,6 +200,43 @@ class TradesMixin:
         rows = conn.execute("SELECT order_id, cost FROM pending_orders").fetchall()
         return {row["order_id"]: row["cost"] for row in rows}
 
+    # --- Pending exits persistence (C-4) ---
+
+    def save_pending_exit(self, market_id: str) -> None:
+        """Persist a pending exit order to survive restarts."""
+        _acquire_write_lock(self._write_lock, "save_pending_exit")
+        try:
+            conn = self._get_conn()
+            conn.execute(
+                "INSERT OR REPLACE INTO pending_exits (market_id, created_at) VALUES (?, ?)",
+                (market_id, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+        finally:
+            self._write_lock.release()
+
+    def delete_pending_exit(self, market_id: str) -> None:
+        """Remove a pending exit after fill or cancellation."""
+        _acquire_write_lock(self._write_lock, "delete_pending_exit")
+        try:
+            conn = self._get_conn()
+            conn.execute(
+                "DELETE FROM pending_exits WHERE market_id = ?",
+                (market_id,),
+            )
+            conn.commit()
+        finally:
+            self._write_lock.release()
+
+    def load_pending_exits(self) -> set[str]:
+        """Load all persisted pending exits on startup.
+
+        Returns set of market_ids with resting exit orders.
+        """
+        conn = self._get_conn()
+        rows = conn.execute("SELECT market_id FROM pending_exits").fetchall()
+        return {row["market_id"] for row in rows}
+
     def log_exit_reason(
         self,
         market_id: str,
