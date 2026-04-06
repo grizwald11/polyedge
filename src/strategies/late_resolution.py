@@ -35,6 +35,10 @@ MAX_MARKET_PRICE = 0.80          # Market must still show uncertainty (<80%)
 MIN_VOLUME = 10_000              # $10K minimum 24h volume
 MAX_CONCURRENT = 5               # Max markets to assess per scan cycle
 CONFIDENCE_BASE = 0.85           # Higher base confidence — speed advantage on public info
+# Conservative probability for keyword-only assessment.
+# Keyword ratios measure text skew, not outcome probability.
+# When keywords strongly favour one side, assign this fixed estimate.
+KEYWORD_FALLBACK_PROBABILITY = 0.92
 
 
 class LateResolutionStrategy:
@@ -221,11 +225,13 @@ class LateResolutionStrategy:
             return None
 
         yes_evidence_ratio = yes_signals / total_signals
+        # Keyword ratio is a text-skew metric, not a probability.
+        # Use it as a gating check and assign a conservative fixed probability.
         if yes_evidence_ratio >= MIN_EVIDENCE_PROBABILITY:
             return self._build_signal(
                 market=market,
                 direction=Direction.BUY_YES,
-                estimated_probability=yes_evidence_ratio,
+                estimated_probability=KEYWORD_FALLBACK_PROBABILITY,
                 market_price=market.yes_price,
                 news_context=news_context,
             )
@@ -233,7 +239,7 @@ class LateResolutionStrategy:
             return self._build_signal(
                 market=market,
                 direction=Direction.BUY_NO,
-                estimated_probability=1.0 - yes_evidence_ratio,
+                estimated_probability=KEYWORD_FALLBACK_PROBABILITY,
                 market_price=market.no_price,
                 news_context=news_context,
             )

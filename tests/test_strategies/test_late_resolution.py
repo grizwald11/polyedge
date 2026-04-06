@@ -19,6 +19,7 @@ from src.core.models import (
 )
 from src.strategies.late_resolution import (
     CONFIDENCE_BASE,
+    KEYWORD_FALLBACK_PROBABILITY,
     MAX_HOURS_TO_RESOLUTION,
     MAX_MARKET_PRICE,
     MIN_EVIDENCE_PROBABILITY,
@@ -299,6 +300,44 @@ class TestSignalGeneration:
         for sig in signals:
             expected_edge = round(sig.probability_estimate - sig.market_price, 4)
             assert sig.edge == expected_edge
+
+
+class TestKeywordProbabilityNotRatio:
+    """Keyword fallback must use a fixed probability, not the keyword ratio."""
+
+    @pytest.mark.asyncio
+    async def test_keyword_uses_fixed_probability_not_ratio(self):
+        """Keyword-based signal should use KEYWORD_FALLBACK_PROBABILITY, not the raw ratio."""
+        # 10 YES keywords, 0 NO → ratio = 1.0, but probability should be 0.92
+        news = (
+            "Confirmed. Officially approved. Passed. Signed. Announced. "
+            "Agreed. Completed. Succeeded. Enacted. Ratified."
+        )
+        strategy = _make_strategy(news_context=news)
+        market = _make_market(yes_price=0.50)
+
+        signals = await strategy.generate_signals([market])
+
+        assert len(signals) == 1
+        assert signals[0].probability_estimate == pytest.approx(KEYWORD_FALLBACK_PROBABILITY)
+        # Must NOT be 1.0 (the raw keyword ratio)
+        assert signals[0].probability_estimate < 1.0
+
+    @pytest.mark.asyncio
+    async def test_keyword_no_direction_uses_fixed_probability(self):
+        """BUY_NO keyword signal should also use fixed probability."""
+        news = (
+            "Rejected. Denied. Failed. Vetoed. Blocked. "
+            "Cancelled. Postponed. Withdrawn. Defeated."
+        )
+        strategy = _make_strategy(news_context=news)
+        market = _make_market(yes_price=0.55, no_price=0.45)
+
+        signals = await strategy.generate_signals([market])
+
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.BUY_NO
+        assert signals[0].probability_estimate == pytest.approx(KEYWORD_FALLBACK_PROBABILITY)
 
 
 class TestEvidenceCounting:

@@ -248,3 +248,53 @@ class TestScanForOpportunities:
         strat = CrossPlatformArbStrategy(mock_settings, db, mock_cross_ref)
         assert "K-CACHED" in strat._pair_cache
         assert strat._pair_cache["K-CACHED"]["condition_id"] == "0xcached"
+
+    @pytest.mark.asyncio
+    async def test_cached_pair_below_similarity_threshold_skipped(self, strategy):
+        """Cached pair with similarity < 0.55 should not generate signals."""
+        kalshi = _kalshi_market(ticker="K-LOW", yes_price=0.30)
+        poly = _poly_market(ticker="0xlow", yes_price=0.55)
+        strategy._pair_cache["K-LOW"] = {
+            "condition_id": "0xlow",
+            "question": "Q",
+            "similarity": 0.40,  # Below MIN_PAIR_SIMILARITY (0.55)
+        }
+        signals = await strategy.scan_for_opportunities([kalshi], [poly])
+        assert len(signals) == 0
+
+    @pytest.mark.asyncio
+    async def test_discovery_below_similarity_threshold_skipped(self, strategy, mock_cross_ref):
+        """Discovered pair with similarity < 0.55 should be skipped entirely."""
+        kalshi = _kalshi_market(ticker="K-WEAK", yes_price=0.30)
+        poly = _poly_market(ticker="0xweak", yes_price=0.55)
+
+        mock_cross_ref.get_best_match = AsyncMock(return_value={
+            "condition_id": "0xweak",
+            "question": "Q",
+            "similarity": 0.30,  # Below threshold
+            "yes_price": 0.55,
+        })
+
+        signals = await strategy.scan_for_opportunities([kalshi], [poly])
+        assert len(signals) == 0
+        # Should NOT be cached
+        assert "K-WEAK" not in strategy._pair_cache
+        # Should NOT be saved to DB
+        strategy.db.upsert_cross_platform_pair.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_discovery_at_similarity_threshold_accepted(self, strategy, mock_cross_ref):
+        """Pair at exactly MIN_PAIR_SIMILARITY (0.55) should be accepted."""
+        kalshi = _kalshi_market(ticker="K-EDGE", yes_price=0.30)
+        poly = _poly_market(ticker="0xedge", yes_price=0.55)
+
+        mock_cross_ref.get_best_match = AsyncMock(return_value={
+            "condition_id": "0xedge",
+            "question": "Q",
+            "similarity": 0.55,
+            "yes_price": 0.55,
+        })
+
+        signals = await strategy.scan_for_opportunities([kalshi], [poly])
+        assert len(signals) == 1
+        assert "K-EDGE" in strategy._pair_cache

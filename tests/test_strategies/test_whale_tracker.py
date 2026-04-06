@@ -149,7 +149,7 @@ class TestWhaleTrackerStrategy:
             monitor._basket.append(WhaleWallet(address=f"whale-{i}"))
 
         now = datetime.now(timezone.utc)
-        # 4/5 whales agree (80% consensus), entry 18h ago (H-3: timing weight = 0.5)
+        # 4 YES + 1 NO = consensus 4/5 = 0.80, entry 18h ago (timing weight = 0.5)
         for i in range(4):
             monitor.update_positions(f"whale-{i}", {
                 "FED-RATE": WhalePosition(
@@ -160,13 +160,23 @@ class TestWhaleTrackerStrategy:
                     detected_at=now - timedelta(hours=18),
                 ),
             })
+        # 1 whale votes NO to make denominator = 5
+        monitor.update_positions("whale-4", {
+            "FED-RATE": WhalePosition(
+                wallet="whale-4",
+                market_id="FED-RATE",
+                direction=Direction.BUY_NO,
+                entry_price=0.50,
+                detected_at=now - timedelta(hours=18),
+            ),
+        })
 
         strategy = WhaleTrackerStrategy(monitor, settings, tmp_db)
         markets = [_make_market(yes_price=0.34)]
         signals = strategy.scan_for_opportunities(markets)
 
         assert len(signals) == 1
-        # H-3: timing_weight(18h) = 0.5, consensus = 0.8
+        # H-3: timing_weight(18h) = 0.5, consensus = 4/5 = 0.8
         # Average: (0.5 + 0.8) / 2 = 0.65
         # Multiplication would give: 0.5 * 0.8 = 0.40
         assert signals[0].confidence == pytest.approx(0.65, abs=0.01)

@@ -144,26 +144,40 @@ class WhaleMonitor:
         if total == 0 or len(self._basket) == 0:
             return None
 
+        # Require at least 3 positioned whales to avoid thin consensus (e.g. 1/1)
+        MIN_POSITIONED_WHALES = 3
+        if total < MIN_POSITIONED_WHALES:
+            logger.debug(
+                "Whale consensus: only %d/%d whales positioned on %s (need %d)",
+                total, len(self._basket), market_id, MIN_POSITIONED_WHALES,
+            )
+            return None
+
         threshold = self.settings.whales.consensus_threshold
 
-        if yes_count / len(self._basket) >= threshold:
+        # Consensus is among positioned whales, not entire basket.
+        # A whale with no position on this market hasn't "voted" either way.
+        yes_pct = yes_count / total
+        no_pct = no_count / total
+
+        if yes_pct >= threshold:
             return WhaleSignal(
                 market_id=market_id,
                 direction=Direction.BUY_YES,
                 whale_count=yes_count,
                 basket_size=len(self._basket),
-                consensus_pct=yes_count / len(self._basket),
+                consensus_pct=yes_pct,
                 avg_entry_price=sum(prices_yes) / len(prices_yes) if prices_yes else 0.0,
                 earliest_entry=earliest_entry,
                 wallets=wallets_yes,
             )
-        elif no_count / len(self._basket) >= threshold:
+        elif no_pct >= threshold:
             return WhaleSignal(
                 market_id=market_id,
                 direction=Direction.BUY_NO,
                 whale_count=no_count,
                 basket_size=len(self._basket),
-                consensus_pct=no_count / len(self._basket),
+                consensus_pct=no_pct,
                 avg_entry_price=sum(prices_no) / len(prices_no) if prices_no else 0.0,
                 earliest_entry=earliest_entry,
                 wallets=wallets_no,

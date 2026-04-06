@@ -85,6 +85,8 @@ class CrossPlatformArbStrategy:
         for kalshi_market in kalshi_markets:
             cached = self._pair_cache.get(kalshi_market.ticker)
             if cached and cached["condition_id"] in poly_by_id:
+                if cached["similarity"] < MIN_PAIR_SIMILARITY:
+                    continue
                 poly_market = poly_by_id[cached["condition_id"]]
                 arb_signals = self._check_price_discrepancy(
                     kalshi_market, poly_market, cached["similarity"], min_edge
@@ -100,6 +102,13 @@ class CrossPlatformArbStrategy:
                 if match and match.get("condition_id"):
                     condition_id = match["condition_id"]
                     similarity = match.get("similarity", 0.0)
+
+                    if similarity < MIN_PAIR_SIMILARITY:
+                        logger.debug(
+                            "Cross-platform arb: skipping %s — similarity %.2f < %.2f",
+                            kalshi_market.ticker, similarity, MIN_PAIR_SIMILARITY,
+                        )
+                        continue
 
                     # Cache the pair
                     self._pair_cache[kalshi_market.ticker] = {
