@@ -32,32 +32,32 @@ class RiskMixin:
     ):
         """Persist circuit breaker state (singleton row, id=1)."""
         now = datetime.now(timezone.utc).isoformat()
-        conn = self._get_conn()
-        conn.execute("""
-            INSERT INTO circuit_breaker_state
-                (id, consecutive_losing_days, reduced_sizing, halted,
-                 halt_reason, halt_time, last_recorded_day, high_water_mark, last_updated)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                consecutive_losing_days=excluded.consecutive_losing_days,
-                reduced_sizing=excluded.reduced_sizing,
-                halted=excluded.halted,
-                halt_reason=excluded.halt_reason,
-                halt_time=excluded.halt_time,
-                last_recorded_day=excluded.last_recorded_day,
-                high_water_mark=excluded.high_water_mark,
-                last_updated=excluded.last_updated
-        """, (
-            consecutive_losing_days,
-            int(reduced_sizing),
-            int(halted),
-            halt_reason,
-            halt_time,
-            last_recorded_day,
-            high_water_mark,
-            now,
-        ))
-        conn.commit()
+        with self._write("save_circuit_breaker_state") as conn:
+            conn.execute("""
+                INSERT INTO circuit_breaker_state
+                    (id, consecutive_losing_days, reduced_sizing, halted,
+                     halt_reason, halt_time, last_recorded_day, high_water_mark, last_updated)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    consecutive_losing_days=excluded.consecutive_losing_days,
+                    reduced_sizing=excluded.reduced_sizing,
+                    halted=excluded.halted,
+                    halt_reason=excluded.halt_reason,
+                    halt_time=excluded.halt_time,
+                    last_recorded_day=excluded.last_recorded_day,
+                    high_water_mark=excluded.high_water_mark,
+                    last_updated=excluded.last_updated
+            """, (
+                consecutive_losing_days,
+                int(reduced_sizing),
+                int(halted),
+                halt_reason,
+                halt_time,
+                last_recorded_day,
+                high_water_mark,
+                now,
+            ))
+            conn.commit()
 
     def load_circuit_breaker_state(self) -> Optional[dict]:
         """Load persisted circuit breaker state. Returns None if no state saved."""
@@ -73,12 +73,12 @@ class RiskMixin:
 
     def save_cooldown(self, market_id: str, exit_time: datetime, duration_seconds: int | None = None):
         """Persist a cooldown entry with optional duration (H-15)."""
-        conn = self._get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO cooldowns (market_id, exit_time, duration_seconds) VALUES (?, ?, ?)",
-            (market_id, exit_time.isoformat(), duration_seconds),
-        )
-        conn.commit()
+        with self._write("save_cooldown") as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO cooldowns (market_id, exit_time, duration_seconds) VALUES (?, ?, ?)",
+                (market_id, exit_time.isoformat(), duration_seconds),
+            )
+            conn.commit()
 
     def load_cooldowns(self, max_age_seconds: int = 3600) -> dict[str, datetime]:
         """Load valid cooldowns, deleting expired ones.
@@ -116,11 +116,12 @@ class RiskMixin:
 
         # Clean up expired
         if expired:
-            conn.executemany(
-                "DELETE FROM cooldowns WHERE market_id=?",
-                [(m,) for m in expired],
-            )
-            conn.commit()
+            with self._write("load_cooldowns_cleanup") as wconn:
+                wconn.executemany(
+                    "DELETE FROM cooldowns WHERE market_id=?",
+                    [(m,) for m in expired],
+                )
+                wconn.commit()
 
         return active
 
@@ -132,9 +133,9 @@ class RiskMixin:
 
     def delete_cooldown(self, market_id: str):
         """Remove a cooldown entry."""
-        conn = self._get_conn()
-        conn.execute("DELETE FROM cooldowns WHERE market_id=?", (market_id,))
-        conn.commit()
+        with self._write("delete_cooldown") as conn:
+            conn.execute("DELETE FROM cooldowns WHERE market_id=?", (market_id,))
+            conn.commit()
 
     # ──────────────────────────────────────
     # Key-value settings (for runtime state persistence)
@@ -142,15 +143,15 @@ class RiskMixin:
 
     def save_setting(self, key: str, value: str) -> None:
         """Persist a key-value setting (e.g., live bankroll)."""
-        conn = self._get_conn()
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, value),
-        )
-        conn.commit()
+        with self._write("save_setting") as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            conn.commit()
 
     def load_setting(self, key: str) -> str | None:
         """Load a persisted setting by key. Returns None if not found."""

@@ -10,6 +10,7 @@ import pytest
 
 from src.core.models import (
     Direction,
+    ForecastResult,
     Market,
     MarketCategory,
     MarketToken,
@@ -321,3 +322,145 @@ class TestEvidenceCounting:
         neg = _count_evidence_signals(text, positive=False)
         assert pos >= 1
         assert neg >= 1
+
+
+class TestClaudeAssessment:
+    """Tests for Claude-based evidence assessment."""
+
+    def _make_strategy_with_claude(self, forecast_result, news_context="some news"):
+        """Build strategy with a mocked forecaster."""
+        settings = MagicMock()
+        db = MagicMock()
+        researcher = AsyncMock()
+        researcher.get_context = AsyncMock(return_value=news_context)
+
+        forecaster = AsyncMock()
+        forecaster.assess_market_with_prompt = AsyncMock(return_value=forecast_result)
+
+        strategy = LateResolutionStrategy(
+            settings=settings, db=db,
+            news_researcher=researcher, forecaster=forecaster,
+        )
+        return strategy
+
+    @pytest.mark.asyncio
+    async def test_claude_buy_yes_signal(self):
+        """Claude estimates high probability => BUY_YES signal."""
+        forecast = ForecastResult(
+            probability=0.95,
+            confidence_low=0.90,
+            confidence_high=0.98,
+            reasoning="Vote confirmed by official sources",
+            model_used="claude-sonnet-4-6",
+        )
+        strategy = self._make_strategy_with_claude(forecast)
+        market = _make_market(yes_price=0.60)
+
+        signals = await strategy.generate_signals([market])
+
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.BUY_YES
+        assert signals[0].probability_estimate == 0.95
+        assert signals[0].edge > 0
+
+    @pytest.mark.asyncio
+    async def test_claude_buy_no_signal(self):
+        """Claude estimates low probability => BUY_NO signal."""
+        forecast = ForecastResult(
+            probability=0.05,
+            confidence_low=0.02,
+            confidence_high=0.10,
+            reasoning="Proposal was officially rejected",
+            model_used="claude-sonnet-4-6",
+        )
+        strategy = self._make_strategy_with_claude(forecast)
+        market = _make_market(yes_price=0.55, no_price=0.45)
+
+        signals = await strategy.generate_signals([market])
+
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.BUY_NO
+        assert signals[0].probability_estimate == 0.95
+
+    @pytest.mark.asyncio
+    async def test_claude_ambiguous_no_signal(self):
+        """Claude estimates ~50% => no signal (below threshold)."""
+        forecast = ForecastResult(
+            probability=0.55,
+            confidence_low=0.40,
+            confidence_high=0.70,
+            reasoning="Evidence is mixed",
+            model_used="claude-sonnet-4-6",
+        )
+        strategy = self._make_strategy_with_claude(forecast)
+        market = _make_market(yes_price=0.50)
+
+        signals = await strategy.generate_signals([market])
+        assert len(signals) == 0
+
+    @pytest.mark.asyncio
+    async def test_claude_failure_falls_back_to_keywords(self):
+        """If Claude raises an exception, fall back to keyword heuristic."""
+        settings = MagicMock()
+        db = MagicMock()
+        news = (
+            "The bill was confirmed and officially approved. "
+            "It was signed and has been announced."
+        )
+        researcher = AsyncMock()
+        researcher.get_context = AsyncMock(return_value=news)
+
+        forecaster = AsyncMock()
+        forecaster.assess_market_with_prompt = AsyncMock(
+            side_effect=RuntimeError("API error")
+        )
+
+        strategy = LateResolutionStrategy(
+            settings=settings, db=db,
+            news_researcher=researcher, forecaster=forecaster,
+        )
+        market = _make_market(yes_price=0.60)
+
+        signals = await strategy.generate_signals([market])
+
+        # Should fall back to keywords and still produce a signal
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.BUY_YES
+
+    @pytest.mark.asyncio
+    async def test_claude_parse_failed_falls_back_to_keywords(self):
+        """If Claude returns parse_failed, fall back to keyword heuristic."""
+        failed_forecast = ForecastResult(
+            probability=0.50,
+            confidence_low=0.25,
+            confidence_high=0.75,
+            reasoning="Parse failed",
+            model_used="claude-sonnet-4-6",
+            parse_failed=True,
+        )
+        news = (
+            "The bill was confirmed and officially approved. "
+            "It was signed and has been announced."
+        )
+        strategy = self._make_strategy_with_claude(failed_forecast, news_context=news)
+        market = _make_market(yes_price=0.60)
+
+        signals = await strategy.generate_signals([market])
+
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.BUY_YES
+
+    @pytest.mark.asyncio
+    async def test_claude_none_result_falls_back(self):
+        """If Claude returns None, fall back to keyword heuristic."""
+        news = (
+            "The bill was confirmed and officially approved. "
+            "It was signed and has been announced."
+        )
+        strategy = self._make_strategy_with_claude(None, news_context=news)
+        market = _make_market(yes_price=0.60)
+
+        signals = await strategy.generate_signals([market])
+
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.BUY_YES

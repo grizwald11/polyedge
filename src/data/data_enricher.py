@@ -51,8 +51,8 @@ class DataEnricher:
             staleness_thresholds=settings.news.staleness_thresholds,
         )
         self.fred = FREDClient(api_key=settings.fred_api_key)
-        self.cleveland_fed = ClevelandFedNowcast()
-        self.fedwatch = FedWatchClient()
+        self.cleveland_fed = ClevelandFedNowcast(api_key=settings.fred_api_key)
+        self.fedwatch = FedWatchClient(api_key=settings.fred_api_key)
         self.metaculus = MetaculusClient(api_token=settings.metaculus_api_token)
         self.manifold = ManifoldClient()
         self.polymarket = PolymarketCrossRef()

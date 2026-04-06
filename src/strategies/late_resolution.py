@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
+from src.analysis.prompt_templates import LATE_RESOLUTION_TEMPLATE
 from src.core.models import (
     Direction,
     Market,
@@ -21,6 +22,9 @@ from src.core.models import (
     StrategyName,
 )
 from src.storage.database import Database
+
+if TYPE_CHECKING:
+    from src.analysis.claude_forecaster import ClaudeForecaster
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +45,12 @@ class LateResolutionStrategy:
         settings,
         db: Database,
         news_researcher=None,
+        forecaster: ClaudeForecaster | None = None,
     ):
         self.settings = settings
         self.db = db
         self.news_researcher = news_researcher
+        self.forecaster = forecaster
 
     async def generate_signals(self, markets: list[Market]) -> list[Signal]:
         """Scan markets for late-resolution opportunities.
@@ -119,11 +125,10 @@ class LateResolutionStrategy:
         return candidates
 
     async def _assess_market(self, market: Market) -> Optional[Signal]:
-        """Assess a single market using news context.
+        """Assess a single market using news context + Claude.
 
-        Fetches recent news, evaluates evidence strength, and generates a
-        signal if the evidence clearly supports one side while the market
-        lags behind.
+        Fetches recent news, then uses Claude to evaluate evidence strength.
+        Falls back to keyword heuristic if Claude is unavailable.
         """
         news_context = ""
         if self.news_researcher is not None:
@@ -140,25 +145,74 @@ class LateResolutionStrategy:
             )
             return None
 
-        # Analyze evidence to determine which side is supported
-        return self._evaluate_evidence(market, news_context)
+        # Use Claude for evidence assessment when available, keyword fallback otherwise
+        if self.forecaster is not None:
+            return await self._evaluate_with_claude(market, news_context)
+        return self._evaluate_with_keywords(market, news_context)
 
-    def _evaluate_evidence(
+    async def _evaluate_with_claude(
         self, market: Market, news_context: str
     ) -> Optional[Signal]:
-        """Evaluate news evidence against market prices.
+        """Evaluate evidence using Claude for accurate probability assessment."""
+        hours_left = (market.days_to_resolution or 0) * 24.0
 
-        Uses simple heuristics on news context to estimate outcome probability.
-        A more sophisticated version could use Claude for assessment, but for
-        near-resolution markets we prioritize speed.
+        prompt = LATE_RESOLUTION_TEMPLATE.format(
+            question=market.question,
+            resolution_criteria=market.description or "Not specified",
+            market_price=market.yes_price,
+            hours_left=hours_left,
+            news_context=news_context,
+        )
 
-        The evidence assessment looks for strong affirmative/negative signals
-        in the news context. If the evidence is ambiguous, no signal is generated.
+        try:
+            forecast = await self.forecaster.assess_market_with_prompt(
+                market=market,
+                custom_prompt=prompt,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Late resolution: Claude assessment failed for "
+                f"'{market.question[:50]}': {e}, falling back to keywords"
+            )
+            return self._evaluate_with_keywords(market, news_context)
+
+        if forecast is None or forecast.parse_failed:
+            logger.debug(
+                f"Late resolution: Claude parse failed for '{market.question[:50]}', "
+                "falling back to keywords"
+            )
+            return self._evaluate_with_keywords(market, news_context)
+
+        prob = forecast.probability
+        if prob >= MIN_EVIDENCE_PROBABILITY:
+            return self._build_signal(
+                market=market,
+                direction=Direction.BUY_YES,
+                estimated_probability=prob,
+                market_price=market.yes_price,
+                news_context=news_context,
+            )
+        elif (1.0 - prob) >= MIN_EVIDENCE_PROBABILITY:
+            return self._build_signal(
+                market=market,
+                direction=Direction.BUY_NO,
+                estimated_probability=1.0 - prob,
+                market_price=market.no_price,
+                news_context=news_context,
+            )
+
+        return None
+
+    def _evaluate_with_keywords(
+        self, market: Market, news_context: str
+    ) -> Optional[Signal]:
+        """Fallback: evaluate news evidence using keyword heuristic.
+
+        Used when Claude is unavailable. Counts positive/negative keywords
+        to estimate outcome probability.
         """
         news_lower = news_context.lower()
-        question_lower = market.question.lower()
 
-        # Count evidence signals for YES and NO outcomes
         yes_signals = _count_evidence_signals(news_lower, positive=True)
         no_signals = _count_evidence_signals(news_lower, positive=False)
 
@@ -166,7 +220,6 @@ class LateResolutionStrategy:
         if total_signals == 0:
             return None
 
-        # Estimate probability from evidence balance
         yes_evidence_ratio = yes_signals / total_signals
         if yes_evidence_ratio >= MIN_EVIDENCE_PROBABILITY:
             return self._build_signal(

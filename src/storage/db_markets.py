@@ -27,63 +27,7 @@ class MarketsMixin:
         """Insert or update a market."""
         now = datetime.now(timezone.utc).isoformat()
         platform = market.platform.value if hasattr(market.platform, 'value') else str(market.platform)
-        conn = self._get_conn()
-        conn.execute("""
-            INSERT INTO markets (
-                ticker, platform, question, description, category, tags, tokens,
-                end_date, volume_24h, volume_total, liquidity, spread,
-                active, closed, resolution_source, slug, subtitle, event_ticker,
-                result, first_seen, last_updated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(ticker, platform) DO UPDATE SET
-                question=excluded.question,
-                description=excluded.description,
-                category=excluded.category,
-                tags=excluded.tags,
-                tokens=excluded.tokens,
-                end_date=excluded.end_date,
-                volume_24h=excluded.volume_24h,
-                volume_total=excluded.volume_total,
-                liquidity=excluded.liquidity,
-                spread=excluded.spread,
-                active=excluded.active,
-                closed=excluded.closed,
-                resolution_source=excluded.resolution_source,
-                result=excluded.result,
-                last_updated=excluded.last_updated
-        """, (
-            market.ticker,
-            platform,
-            market.question,
-            market.description,
-            market.category.value,
-            json.dumps(market.tags),
-            json.dumps([t.model_dump() for t in market.tokens]),
-            market.end_date.isoformat() if market.end_date else None,
-            market.volume_24h,
-            market.volume_total,
-            market.liquidity,
-            market.spread,
-            int(market.active),
-            int(market.closed),
-            market.resolution_source,
-            market.slug,
-            market.subtitle,
-            market.event_ticker,
-            market.result,
-            now,
-            now,
-        ))
-        conn.commit()
-
-    def upsert_markets(self, markets: list[Market]):
-        """Bulk upsert markets in a single transaction (much faster than N separate calls)."""
-        if not markets:
-            return
-        now = datetime.now(timezone.utc).isoformat()
-        conn = self._get_conn()
-        for market in markets:
-            platform = market.platform.value if hasattr(market.platform, 'value') else str(market.platform)
+        with self._write("upsert_market") as conn:
             conn.execute("""
                 INSERT INTO markets (
                     ticker, platform, question, description, category, tags, tokens,
@@ -130,7 +74,63 @@ class MarketsMixin:
                 now,
                 now,
             ))
-        conn.commit()
+            conn.commit()
+
+    def upsert_markets(self, markets: list[Market]):
+        """Bulk upsert markets in a single transaction (much faster than N separate calls)."""
+        if not markets:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self._write("upsert_markets") as conn:
+            for market in markets:
+                platform = market.platform.value if hasattr(market.platform, 'value') else str(market.platform)
+                conn.execute("""
+                    INSERT INTO markets (
+                        ticker, platform, question, description, category, tags, tokens,
+                        end_date, volume_24h, volume_total, liquidity, spread,
+                        active, closed, resolution_source, slug, subtitle, event_ticker,
+                        result, first_seen, last_updated
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ticker, platform) DO UPDATE SET
+                        question=excluded.question,
+                        description=excluded.description,
+                        category=excluded.category,
+                        tags=excluded.tags,
+                        tokens=excluded.tokens,
+                        end_date=excluded.end_date,
+                        volume_24h=excluded.volume_24h,
+                        volume_total=excluded.volume_total,
+                        liquidity=excluded.liquidity,
+                        spread=excluded.spread,
+                        active=excluded.active,
+                        closed=excluded.closed,
+                        resolution_source=excluded.resolution_source,
+                        result=excluded.result,
+                        last_updated=excluded.last_updated
+                """, (
+                    market.ticker,
+                    platform,
+                    market.question,
+                    market.description,
+                    market.category.value,
+                    json.dumps(market.tags),
+                    json.dumps([t.model_dump() for t in market.tokens]),
+                    market.end_date.isoformat() if market.end_date else None,
+                    market.volume_24h,
+                    market.volume_total,
+                    market.liquidity,
+                    market.spread,
+                    int(market.active),
+                    int(market.closed),
+                    market.resolution_source,
+                    market.slug,
+                    market.subtitle,
+                    market.event_ticker,
+                    market.result,
+                    now,
+                    now,
+                ))
+            conn.commit()
 
     def get_active_markets(self) -> list[dict]:
         """Get all active markets from database."""
@@ -170,20 +170,21 @@ class MarketsMixin:
 
     def log_snapshot(self, snapshot: MarketSnapshot):
         """Log a market price snapshot. Replaces if same market+timestamp exists."""
-        conn = self._get_conn()
-        conn.execute("""
-            INSERT OR REPLACE INTO market_snapshots (market_id, timestamp, yes_price, no_price, spread, volume_1h, liquidity)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            snapshot.market_id,
-            snapshot.timestamp.isoformat(),
-            snapshot.yes_price,
-            snapshot.no_price,
-            snapshot.spread,
-            snapshot.volume_1h,
-            snapshot.liquidity,
-        ))
-        conn.commit()
+        with self._write("log_snapshot") as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO market_snapshots (market_id, timestamp, yes_price, no_price, spread, volume_1h, liquidity, is_synthetic)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                snapshot.market_id,
+                snapshot.timestamp.isoformat(),
+                snapshot.yes_price,
+                snapshot.no_price,
+                snapshot.spread,
+                snapshot.volume_1h,
+                snapshot.liquidity,
+                int(snapshot.is_synthetic),
+            ))
+            conn.commit()
 
     def get_snapshots_for_market(
         self,
@@ -224,12 +225,12 @@ class MarketsMixin:
         """
         from datetime import timedelta
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
-        conn = self._get_conn()
-        cursor = conn.execute(
-            "DELETE FROM market_snapshots WHERE timestamp < ?", (cutoff,)
-        )
-        conn.commit()
-        deleted = cursor.rowcount
+        with self._write("cleanup_old_snapshots") as conn:
+            cursor = conn.execute(
+                "DELETE FROM market_snapshots WHERE timestamp < ?", (cutoff,)
+            )
+            conn.commit()
+            deleted = cursor.rowcount
         if deleted > 0:
             logger.info(f"Cleaned up {deleted} snapshots older than {max_age_days} days")
         return deleted
@@ -244,23 +245,23 @@ class MarketsMixin:
 
         Returns dict of {table_name: rows_deleted}.
         """
-        conn = self._get_conn()
-        deleted: dict[str, int] = {}
-        child_tables = [
-            "market_snapshots", "signals", "orders", "trades",
-            "calibration_records", "prices",
-        ]
-        for table in child_tables:
-            try:
-                cursor = conn.execute(f"""
-                    DELETE FROM {table}
-                    WHERE market_id NOT IN (SELECT ticker FROM markets)
-                """)
-                if cursor.rowcount > 0:
-                    deleted[table] = cursor.rowcount
-            except Exception as e:
-                logger.debug(f"Orphan cleanup skipped for {table}: {e}")
-        if deleted:
-            conn.commit()
-            logger.info(f"Orphan cleanup: {deleted}")
-        return deleted
+        with self._write("cleanup_orphaned_records") as conn:
+            deleted: dict[str, int] = {}
+            child_tables = [
+                "market_snapshots", "signals", "orders", "trades",
+                "calibration_records", "prices",
+            ]
+            for table in child_tables:
+                try:
+                    cursor = conn.execute(f"""
+                        DELETE FROM {table}
+                        WHERE market_id NOT IN (SELECT ticker FROM markets)
+                    """)
+                    if cursor.rowcount > 0:
+                        deleted[table] = cursor.rowcount
+                except Exception as e:
+                    logger.debug(f"Orphan cleanup skipped for {table}: {e}")
+            if deleted:
+                conn.commit()
+                logger.info(f"Orphan cleanup: {deleted}")
+            return deleted

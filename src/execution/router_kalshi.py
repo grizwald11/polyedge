@@ -377,15 +377,16 @@ async def _balance_preflight(router: OrderRouter, order: Order) -> Optional[Orde
     balance_checked = False
     for _bal_attempt in range(balance_retries):
         try:
-            balance = await asyncio.wait_for(router.kalshi.get_balance(), timeout=5.0)
-            if balance is not None:
+            raw_balance = await asyncio.wait_for(router.kalshi.get_balance(), timeout=5.0)
+            if raw_balance is not None:
+                balance = float(raw_balance)
                 # H-1 FIX: Subtract pending order cost to avoid over-committing
                 available = balance - router.pending_order_cost
                 logger.debug(
                     "Balance preflight: exchange=$%.2f - pending=$%.2f = available=$%.2f, order=$%.2f",
                     balance, router.pending_order_cost, available, order.cost,
                 )
-            if balance is not None and order.cost > available:
+            if raw_balance is not None and order.cost > available:
                 order.status = OrderStatus.REJECTED
                 order.rejection_reason = (
                     f"Insufficient balance: order cost ${order.cost:.2f} > "

@@ -244,6 +244,7 @@ class MarketSnapshot(BaseModel):
     spread: float
     volume_1h: float = 0.0
     liquidity: float = 0.0
+    is_synthetic: bool = False
 
 
 # ──────────────────────────────────────────────

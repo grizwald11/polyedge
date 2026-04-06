@@ -18,6 +18,7 @@ import logging
 import ssl
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Callable, Coroutine, Optional
 
 logger = logging.getLogger(__name__)
@@ -54,9 +55,9 @@ class TickerUpdate:
     """Parsed ticker channel message."""
 
     market_ticker: str
-    price: float  # last trade price in dollars
-    yes_bid: float
-    yes_ask: float
+    price: Decimal  # last trade price in dollars
+    yes_bid: Decimal
+    yes_ask: Decimal
     volume: float
     open_interest: float
     ts: int  # unix ms
@@ -69,7 +70,7 @@ class FillUpdate:
     order_id: str
     market_ticker: str
     side: str
-    price: float
+    price: Decimal
     count: int
     ts: int
 
@@ -496,9 +497,9 @@ class KalshiWebSocket:
             data = msg.get("msg", msg)
             return TickerUpdate(
                 market_ticker=data.get("market_ticker", ""),
-                price=float(data.get("price_dollars", data.get("price", 0))),
-                yes_bid=float(data.get("yes_bid_dollars", data.get("yes_bid", 0))),
-                yes_ask=float(data.get("yes_ask_dollars", data.get("yes_ask", 0))),
+                price=Decimal(str(data.get("price_dollars", data.get("price", 0)))),
+                yes_bid=Decimal(str(data.get("yes_bid_dollars", data.get("yes_bid", 0)))),
+                yes_ask=Decimal(str(data.get("yes_ask_dollars", data.get("yes_ask", 0)))),
                 volume=float(data.get("volume_fp", data.get("volume", 0))),
                 open_interest=float(data.get("open_interest_fp", data.get("open_interest", 0))),
                 ts=int(data.get("ts", 0)),
@@ -515,7 +516,7 @@ class KalshiWebSocket:
                 order_id=data.get("order_id", ""),
                 market_ticker=data.get("market_ticker", data.get("ticker", "")),
                 side=data.get("side", ""),
-                price=float(data.get("yes_price_dollars", data.get("price", 0))),
+                price=Decimal(str(data.get("yes_price_dollars", data.get("price", 0)))),
                 count=int(data.get("count_fp", data.get("count", 0))),
                 ts=int(data.get("ts", 0)),
             )

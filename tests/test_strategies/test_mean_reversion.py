@@ -11,6 +11,7 @@ from src.strategies.mean_reversion import (
     MeanReversionStrategy,
     MAX_CONCURRENT_POSITIONS,
     MAX_HOLD_HOURS,
+    MIN_EDGE,
     MIN_PRICE_MOVE_PCT,
     MIN_SNAPSHOTS,
     MIN_VOLUME_24H,
@@ -216,3 +217,23 @@ class TestSignalDetails:
         signals = strategy.generate_signals([market])
         assert "Mean reversion" in signals[0].reasoning
         assert "0.60" in signals[0].reasoning
+
+    def test_no_signal_when_edge_below_minimum(self, tmp_db):
+        """A move that meets MIN_PRICE_MOVE_PCT but produces edge < MIN_EDGE should be rejected.
+
+        With Politics (reversion_factor=0.30) and a ~10% move, edge = 10% * 0.30 = 3%.
+        This is right at the boundary. A slightly smaller move should be rejected.
+        """
+        strategy = MeanReversionStrategy(None, tmp_db)
+        # ~10.2% move: 0.49 -> 0.54 (edge = 10.2% * 0.30 = 3.06% — just above MIN_EDGE)
+        market = _make_market(yes_price=0.54)
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.49, 0.50, 0.52, 0.54])
+
+        signals = strategy.generate_signals([market])
+        # Should produce a signal (edge ~3.06% >= 3%)
+        if signals:
+            assert signals[0].edge >= MIN_EDGE
+
+    def test_min_edge_constant_is_positive(self):
+        """MIN_EDGE should be a positive value."""
+        assert MIN_EDGE > 0

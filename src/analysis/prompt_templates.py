@@ -234,6 +234,31 @@ Consider:
 Provide your probability estimate as JSON."""
 
 
+LATE_RESOLUTION_TEMPLATE = """LATE RESOLUTION EVIDENCE ASSESSMENT
+
+This market resolves in {hours_left:.1f} hours. Public information may already determine the outcome, but the market hasn't repriced yet.
+
+MARKET: {question}
+RESOLUTION CRITERIA: {resolution_criteria}
+CURRENT MARKET PRICE: {market_price:.0%} (YES)
+TIME TO RESOLUTION: {hours_left:.1f} hours
+
+RECENT NEWS/EVIDENCE:
+{news_context}
+
+Your task: Based on the evidence above, determine whether the outcome is already known or nearly certain.
+
+Consider:
+1. Has the event already occurred? Is there direct confirmation?
+2. How strong is the evidence — confirmed fact vs. rumor/prediction?
+3. Does the evidence directly address the resolution criteria?
+4. What is your probability estimate that this market resolves YES?
+
+IMPORTANT: Only assign probability >90% if the evidence is a confirmed, authoritative source directly addressing the resolution criteria. Rumors, predictions, and indirect evidence should not push above 85%.
+
+Respond with JSON: {{"probability": 0.XX, "confidence_low": 0.XX, "confidence_high": 0.XX, "reasoning": "..."}}\n"""
+
+
 DECOMPOSITION_TEMPLATE = """QUESTION DECOMPOSITION
 
 Analyze this prediction market question and determine if it involves compound events that can be decomposed into independent sub-questions.

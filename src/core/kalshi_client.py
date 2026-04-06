@@ -246,6 +246,7 @@ class KalshiClient:
             max_retries = 3
             max_auth_retries = 3  # H-1: up to 3 auth retries with exponential backoff
             auth_retry_count = 0
+            rate_limit_retries = 0
             for attempt in range(max_retries + max_auth_retries):
                 try:
                     headers = self._auth_headers(method, path)
@@ -264,14 +265,14 @@ class KalshiClient:
                         self._metrics.record_api_latency(path, _latency_ms)
 
                     if resp.status_code == 429:
-                        if attempt < max_retries - 1:
+                        if rate_limit_retries < max_retries:
                             retry_after = resp.headers.get("Retry-After")
                             if retry_after:
                                 try:
                                     wait = float(retry_after)
                                     logger.warning(
                                         f"Rate limited on {path}, using Retry-After={wait:.1f}s "
-                                        f"(attempt {attempt + 1}/{max_retries})"
+                                        f"(rate limit retry {rate_limit_retries + 1}/{max_retries})"
                                     )
                                 except ValueError:
                                     # H-4: Try HTTP-date format (e.g. "Sun, 30 Mar 2026 12:00:00 GMT")
@@ -282,22 +283,23 @@ class KalshiClient:
                                         wait = max(0, (retry_dt - datetime.now(timezone.utc)).total_seconds())
                                         logger.warning(
                                             f"Rate limited on {path}, parsed HTTP-date Retry-After, "
-                                            f"waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})"
+                                            f"waiting {wait:.1f}s (rate limit retry {rate_limit_retries + 1}/{max_retries})"
                                         )
                                     except Exception:
-                                        wait = min(10, 2 ** (attempt + 1) + random.uniform(0, 1))
+                                        wait = min(10, 2 ** (rate_limit_retries + 1) + random.uniform(0, 1))
                                         logger.warning(
                                             f"Rate limited on {path}, invalid Retry-After header "
                                             f"'{retry_after}', using backoff {wait:.1f}s "
-                                            f"(attempt {attempt + 1}/{max_retries})"
+                                            f"(rate limit retry {rate_limit_retries + 1}/{max_retries})"
                                         )
                             else:
-                                wait = min(10, 2 ** (attempt + 1) + random.uniform(0, 1))
-                                logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
+                                wait = min(10, 2 ** (rate_limit_retries + 1) + random.uniform(0, 1))
+                                logger.warning(f"Rate limited on {path}, waiting {wait:.1f}s (rate limit retry {rate_limit_retries + 1}/{max_retries})")
+                            rate_limit_retries += 1
                             await asyncio.sleep(wait)
                             continue
-                        logger.error(f"Rate limited on {path} after {max_retries} attempts")
-                        raise KalshiRateLimitError(f"Rate limited on {path} after {max_retries} attempts")
+                        logger.error(f"Rate limited on {path} after {max_retries} retries")
+                        raise KalshiRateLimitError(f"Rate limited on {path} after {max_retries} retries")
 
                     # H-1: Retry up to 3 times on 401/403 auth errors with exponential backoff + jitter
                     if resp.status_code in (401, 403) and auth_retry_count < 3:
@@ -391,10 +393,13 @@ class KalshiClient:
                         await asyncio.sleep(wait)
                         continue
                     raise
-            # L-5: All retry attempts exhausted without raising — should not normally
-            # be reached, but return None explicitly rather than falling through.
-            logger.error(f"All {max_retries} retry attempts exhausted for {method} {path}")
-            return None
+            # All retry attempts exhausted without raising — this indicates a logic
+            # bug or an unexpected combination of retries.  Raise explicitly so
+            # callers never silently receive None.
+            logger.error(f"All retry attempts exhausted for {method} {path}")
+            raise KalshiRateLimitError(
+                f"All retry attempts exhausted for {method} {path}"
+            )
 
     async def close(self):
         if self._client and not self._client.is_closed:
@@ -542,16 +547,15 @@ class KalshiClient:
                 raw_balance = data["balance"]
                 try:
                     # C-1: Use Decimal to avoid float precision loss on money.
-                    balance = float(
-                        (Decimal(str(raw_balance)) / Decimal(100))
-                        .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                    )
+                    balance = (
+                        Decimal(str(raw_balance)) / Decimal(100)
+                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 except (TypeError, ValueError, ArithmeticError):
                     logger.error(f"Invalid balance value from Kalshi: {raw_balance!r}")
                     return None
                 if balance < 0:
-                    logger.warning(f"Kalshi returned negative balance: ${balance:.2f}")
-                    return 0.0
+                    logger.warning(f"Kalshi returned negative balance: ${float(balance):.2f}")
+                    return Decimal("0.00")
                 if balance > 1_000_000:
                     logger.warning(f"Kalshi returned unusually large balance: ${balance:.2f}")
                 return balance
@@ -564,18 +568,36 @@ class KalshiClient:
             return None
 
     async def get_positions(self) -> list[dict]:
-        """Get all open positions."""
+        """Get all open positions (paginated, up to 20 pages)."""
+        all_positions: list[dict] = []
+        cursor: Optional[str] = None
+        max_pages = 20
+
         try:
-            data = await self._request("GET", "/portfolio/positions")
-            if data and "market_positions" in data:
-                return data["market_positions"]
-            return []
+            for _ in range(max_pages):
+                params: dict[str, Any] = {"limit": 100}
+                if cursor:
+                    params["cursor"] = cursor
+
+                data = await self._request("GET", "/portfolio/positions", params=params)
+                if not data:
+                    break
+
+                positions = data.get("market_positions", [])
+                if not positions:
+                    break
+
+                all_positions.extend(positions)
+                cursor = data.get("cursor")
+                if not cursor:
+                    break
+
         except (httpx.HTTPStatusError, httpx.RequestError, KalshiRateLimitError) as e:
             logger.error(f"Failed to get positions: {e}", exc_info=True)
-            return []
         except Exception as e:
             logger.error("Unexpected error getting positions", exc_info=True)
-            return []
+
+        return all_positions
 
     # ──────────────────────────────────────
     # Order Management (auth required)
@@ -658,15 +680,33 @@ class KalshiClient:
             return None
 
     async def get_open_orders(self) -> list[dict]:
-        """Get all open orders."""
+        """Get all open orders (paginated, up to 20 pages)."""
+        all_orders: list[dict] = []
+        cursor: Optional[str] = None
+        max_pages = 20
+
         try:
-            data = await self._request("GET", "/portfolio/orders", params={"status": "resting"})
-            if data and "orders" in data:
-                return data["orders"]
-            return []
+            for _ in range(max_pages):
+                params: dict[str, Any] = {"status": "resting", "limit": 100}
+                if cursor:
+                    params["cursor"] = cursor
+
+                data = await self._request("GET", "/portfolio/orders", params=params)
+                if not data:
+                    break
+
+                orders = data.get("orders", [])
+                if not orders:
+                    break
+
+                all_orders.extend(orders)
+                cursor = data.get("cursor")
+                if not cursor:
+                    break
+
         except (httpx.HTTPStatusError, httpx.RequestError, KalshiRateLimitError) as e:
             logger.error(f"Failed to get open orders: {e}", exc_info=True)
-            return []
         except Exception as e:
             logger.error("Unexpected error getting open orders", exc_info=True)
-            return []
+
+        return all_orders

@@ -24,25 +24,25 @@ class CalibrationMixin:
 
     def log_calibration(self, record: CalibrationRecord) -> int:
         """Log a calibration prediction."""
-        conn = self._get_conn()
-        cursor = conn.execute("""
-            INSERT INTO calibration_records (
-                market_id, market_question, strategy,
-                predicted_probability, market_price_at_prediction,
-                actual_outcome, predicted_at, resolved_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            record.market_id,
-            record.market_question,
-            record.strategy.value,
-            record.predicted_probability,
-            record.market_price_at_prediction,
-            record.actual_outcome,
-            record.predicted_at.isoformat(),
-            record.resolved_at.isoformat() if record.resolved_at else None,
-        ))
-        conn.commit()
-        return cursor.lastrowid
+        with self._write("log_calibration") as conn:
+            cursor = conn.execute("""
+                INSERT INTO calibration_records (
+                    market_id, market_question, strategy,
+                    predicted_probability, market_price_at_prediction,
+                    actual_outcome, predicted_at, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                record.market_id,
+                record.market_question,
+                record.strategy.value,
+                record.predicted_probability,
+                record.market_price_at_prediction,
+                record.actual_outcome,
+                record.predicted_at.isoformat(),
+                record.resolved_at.isoformat() if record.resolved_at else None,
+            ))
+            conn.commit()
+            return cursor.lastrowid
 
     def get_unresolved_predictions(self) -> list[dict]:
         """Get predictions that haven't been resolved yet."""
@@ -105,24 +105,24 @@ class CalibrationMixin:
             Database row ID.
         """
         now = datetime.now(timezone.utc).isoformat()
-        conn = self._get_conn()
-        cursor = conn.execute("""
-            INSERT INTO calibration_records (
-                market_id, market_question, strategy,
-                predicted_probability, market_price_at_prediction,
-                predicted_at, prompt_variant
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            market_ticker,
-            market_question,
-            strategy,
-            predicted_probability,
-            market_price,
-            now,
-            prompt_variant,
-        ))
-        conn.commit()
-        return cursor.lastrowid
+        with self._write("store_prediction") as conn:
+            cursor = conn.execute("""
+                INSERT INTO calibration_records (
+                    market_id, market_question, strategy,
+                    predicted_probability, market_price_at_prediction,
+                    predicted_at, prompt_variant
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                market_ticker,
+                market_question,
+                strategy,
+                predicted_probability,
+                market_price,
+                now,
+                prompt_variant,
+            ))
+            conn.commit()
+            return cursor.lastrowid
 
     def get_latest_prediction(self, market_ticker: str) -> Optional[dict]:
         """Get the most recent prediction for a market.
@@ -188,16 +188,16 @@ class CalibrationMixin:
             Number of records updated.
         """
         now = datetime.now(timezone.utc).isoformat()
-        conn = self._get_conn()
-        cursor = conn.execute(
-            """UPDATE calibration_records
-               SET actual_outcome = ?, resolved_at = ?,
-                   brier_score = ?, profit_loss = ?
-               WHERE market_id = ? AND actual_outcome IS NULL""",
-            (actual_outcome, now, brier_score, profit_loss, market_id),
-        )
-        conn.commit()
-        return cursor.rowcount
+        with self._write("update_resolution") as conn:
+            cursor = conn.execute(
+                """UPDATE calibration_records
+                   SET actual_outcome = ?, resolved_at = ?,
+                       brier_score = ?, profit_loss = ?
+                   WHERE market_id = ? AND actual_outcome IS NULL""",
+                (actual_outcome, now, brier_score, profit_loss, market_id),
+            )
+            conn.commit()
+            return cursor.rowcount
 
     def cleanup_old_calibration_records(self, max_age_days: int = 365) -> int:
         """M-14: Remove resolved calibration records older than max_age_days.
@@ -208,17 +208,17 @@ class CalibrationMixin:
         Returns:
             Number of records deleted.
         """
-        conn = self._get_conn()
-        cutoff = datetime.now(timezone.utc).isoformat()
-        cursor = conn.execute(
-            """DELETE FROM calibration_records
-               WHERE actual_outcome IS NOT NULL
-               AND resolved_at IS NOT NULL
-               AND julianday(?) - julianday(resolved_at) > ?""",
-            (cutoff, max_age_days),
-        )
-        deleted = cursor.rowcount
-        conn.commit()
+        with self._write("cleanup_old_calibration_records") as conn:
+            cutoff = datetime.now(timezone.utc).isoformat()
+            cursor = conn.execute(
+                """DELETE FROM calibration_records
+                   WHERE actual_outcome IS NOT NULL
+                   AND resolved_at IS NOT NULL
+                   AND julianday(?) - julianday(resolved_at) > ?""",
+                (cutoff, max_age_days),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
         if deleted > 0:
             logger.info(f"M-14: Cleaned up {deleted} calibration records older than {max_age_days} days")
         return deleted

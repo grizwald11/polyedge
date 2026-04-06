@@ -96,11 +96,12 @@ class TestKalshiRequests:
 
     @pytest.mark.asyncio
     async def test_get_balance_parses_cents(self):
+        from decimal import Decimal
         client = KalshiClient()
         with patch.object(client, "_request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = {"balance": 5000}
             balance = await client.get_balance()
-        assert balance == 50.0
+        assert balance == Decimal("50.00")
 
     @pytest.mark.asyncio
     async def test_429_exhausts_retries_raises(self):
@@ -119,8 +120,8 @@ class TestKalshiRequests:
 
         with pytest.raises(KalshiRateLimitError):
             await client._request("GET", "/markets")
-        # Should have been called max_retries times (3)
-        assert mock_http.get.call_count == 3
+        # Should have been called max_retries + 1 times (3 retries + 1 final attempt that raises)
+        assert mock_http.get.call_count == 4
 
     @pytest.mark.asyncio
     async def test_close(self):
@@ -131,6 +132,135 @@ class TestKalshiRequests:
 
         await client.close()
         mock_http.aclose.assert_called_once()
+
+
+class TestRateLimitAfterAuthRetry:
+    """429 retry counter must be independent of auth retry counter."""
+
+    @pytest.mark.asyncio
+    async def test_429_retries_work_after_auth_retries(self):
+        """Auth retries should not consume 429 retry budget.
+
+        Scenario: 2 x 401 (auth retries) then 2 x 429 (rate-limit retries)
+        then success.  All should succeed without raising.
+        """
+        client = KalshiClient()
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+
+        auth_err = _make_resp(401)
+
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "0.01"}
+        rate_limited.request = MagicMock()
+
+        ok = _make_resp(200, {"result": "ok"})
+
+        mock_http.get = AsyncMock(
+            side_effect=[auth_err, auth_err, rate_limited, rate_limited, ok]
+        )
+        client._client = mock_http
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await client._request("GET", "/markets")
+
+        assert result == {"result": "ok"}
+        assert mock_http.get.call_count == 5
+
+    @pytest.mark.asyncio
+    async def test_429_exhausted_raises_after_auth_retries(self):
+        """After auth retries, 429 should still get its full retry budget.
+
+        Scenario: 1 x 401, then 4 x 429 (max_retries=3, so 3 retries + final raise).
+        Should raise KalshiRateLimitError, not silently return None.
+        """
+        client = KalshiClient()
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+
+        auth_err = _make_resp(401)
+
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {}
+        rate_limited.request = MagicMock()
+
+        mock_http.get = AsyncMock(
+            side_effect=[auth_err, rate_limited, rate_limited, rate_limited, rate_limited]
+        )
+        client._client = mock_http
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(KalshiRateLimitError):
+                await client._request("GET", "/markets")
+
+    @pytest.mark.asyncio
+    async def test_429_retry_counter_tracks_correctly(self):
+        """Verify 429 retries exactly max_retries times before raising.
+
+        The retry counter must increment on each 429 response and stop after
+        exactly max_retries attempts (not max_retries - 1). With max_retries=3,
+        we expect 3 retries + 1 final attempt = 4 total HTTP calls.
+        """
+        client = KalshiClient()
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "0.01"}
+        rate_limited.request = MagicMock()
+
+        # Provide enough 429 responses to exhaust all retries
+        mock_http.get = AsyncMock(
+            side_effect=[rate_limited, rate_limited, rate_limited, rate_limited]
+        )
+        client._client = mock_http
+
+        sleep_calls = []
+
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep):
+            with pytest.raises(KalshiRateLimitError, match="after 3 retries"):
+                await client._request("GET", "/markets")
+
+        # 1 initial attempt + 3 retries = 4 total HTTP calls
+        assert mock_http.get.call_count == 4
+        # Should have slept 3 times (once per retry, not on the final attempt)
+        assert len(sleep_calls) == 3
+
+    @pytest.mark.asyncio
+    async def test_429_succeeds_on_last_retry(self):
+        """Verify that a success on the last retry attempt is accepted.
+
+        With max_retries=3, the 4th attempt (after 3 retries) should still
+        succeed if the server responds with 200.
+        """
+        client = KalshiClient()
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "0.01"}
+        rate_limited.request = MagicMock()
+
+        ok = _make_resp(200, {"result": "ok"})
+
+        # 3 x 429 then success on 4th attempt
+        mock_http.get = AsyncMock(
+            side_effect=[rate_limited, rate_limited, rate_limited, ok]
+        )
+        client._client = mock_http
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await client._request("GET", "/markets")
+
+        assert result == {"result": "ok"}
+        assert mock_http.get.call_count == 4
 
 
 class TestRetryAfterHeader:
@@ -836,10 +966,11 @@ class TestGetMarketHistory:
 class TestGetBalance:
     @pytest.mark.asyncio
     async def test_get_balance_converts_cents_to_dollars(self):
+        from decimal import Decimal
         client = KalshiClient()
         with patch.object(client, "_request", new_callable=AsyncMock, return_value={"balance": 12345}):
             result = await client.get_balance()
-        assert result == 123.45
+        assert result == Decimal("123.45")
 
     @pytest.mark.asyncio
     async def test_get_balance_returns_none_on_missing_key(self):
@@ -857,10 +988,11 @@ class TestGetBalance:
 
     @pytest.mark.asyncio
     async def test_get_balance_clamps_negative_to_zero(self):
+        from decimal import Decimal
         client = KalshiClient()
         with patch.object(client, "_request", new_callable=AsyncMock, return_value={"balance": -100}):
             result = await client.get_balance()
-        assert result == 0.0
+        assert result == Decimal("0.00")
 
     @pytest.mark.asyncio
     async def test_get_balance_returns_none_on_http_error(self):
@@ -902,6 +1034,35 @@ class TestGetPositions:
         with patch.object(client, "_request", side_effect=KalshiRateLimitError("rate limit")):
             result = await client.get_positions()
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_positions_single_page_no_cursor(self):
+        """Single page with no cursor returns normally without extra requests."""
+        client = KalshiClient()
+        positions = [{"market": f"MKT-{i}"} for i in range(3)]
+        mock_req = AsyncMock(return_value={"market_positions": positions})
+        with patch.object(client, "_request", mock_req):
+            result = await client.get_positions()
+        assert result == positions
+        assert mock_req.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_get_positions_multi_page_pagination(self):
+        """Multiple pages are followed via cursor until exhausted."""
+        client = KalshiClient()
+        page1 = [{"market": f"MKT-{i}"} for i in range(100)]
+        page2 = [{"market": f"MKT-{i}"} for i in range(100, 150)]
+        mock_req = AsyncMock(side_effect=[
+            {"market_positions": page1, "cursor": "cursor_page2"},
+            {"market_positions": page2},
+        ])
+        with patch.object(client, "_request", mock_req):
+            result = await client.get_positions()
+        assert result == page1 + page2
+        assert mock_req.call_count == 2
+        # Verify cursor was passed on second call
+        _, kwargs2 = mock_req.call_args_list[1]
+        assert kwargs2.get("params", {}).get("cursor") == "cursor_page2"
 
 
 class TestCreateOrder:
@@ -1005,6 +1166,35 @@ class TestGetOpenOrders:
         with patch.object(client, "_request", side_effect=RuntimeError("fail")):
             result = await client.get_open_orders()
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_open_orders_single_page_no_cursor(self):
+        """Single page with no cursor returns normally without extra requests."""
+        client = KalshiClient()
+        orders = [{"id": "ord-1"}]
+        mock_req = AsyncMock(return_value={"orders": orders})
+        with patch.object(client, "_request", mock_req):
+            result = await client.get_open_orders()
+        assert result == orders
+        assert mock_req.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_get_open_orders_multi_page_pagination(self):
+        """Multiple pages are followed via cursor until exhausted."""
+        client = KalshiClient()
+        page1 = [{"id": f"ord-{i}"} for i in range(100)]
+        page2 = [{"id": f"ord-{i}"} for i in range(100, 130)]
+        mock_req = AsyncMock(side_effect=[
+            {"orders": page1, "cursor": "cursor_page2"},
+            {"orders": page2},
+        ])
+        with patch.object(client, "_request", mock_req):
+            result = await client.get_open_orders()
+        assert result == page1 + page2
+        assert mock_req.call_count == 2
+        # Verify cursor was passed on second call
+        _, kwargs2 = mock_req.call_args_list[1]
+        assert kwargs2.get("params", {}).get("cursor") == "cursor_page2"
 
 
 class TestHealthCheck:

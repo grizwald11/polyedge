@@ -14,24 +14,6 @@ from src.core.models import Signal, Trade
 logger = logging.getLogger(__name__)
 
 
-def _acquire_write_lock(lock, caller: str, max_retries: int = 1, timeout: int = 60) -> None:
-    """Acquire write lock with retry. Raises TimeoutError if exhausted.
-
-    M-4: Prevents silent failure when DB write lock is contended.
-    Critical writes (log_trade, save_pending_order) get 1 retry.
-    """
-    for attempt in range(max_retries + 1):
-        if lock.acquire(timeout=timeout):
-            return
-        logger.warning(
-            f"Database write lock timeout ({timeout}s) in {caller} "
-            f"(attempt {attempt + 1}/{max_retries + 1})"
-        )
-    raise TimeoutError(
-        f"Database write lock acquisition timed out in {caller} "
-        f"after {max_retries + 1} attempts"
-    )
-
 
 class TradesMixin:
     """Database mixin for trade, order, signal, and position operations."""
@@ -42,61 +24,61 @@ class TradesMixin:
 
     def log_signal(self, signal: Signal) -> int:
         """Log a trading signal, return the row ID."""
-        conn = self._get_conn()
         platform = signal.platform.value if hasattr(signal.platform, 'value') else str(signal.platform)
-        cursor = conn.execute("""
-            INSERT INTO signals (
-                strategy, market_id, platform, market_question, direction,
-                edge, probability_estimate, market_price, confidence,
-                reasoning, timestamp, acted_on, order_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            signal.strategy.value,
-            signal.market_id,
-            platform,
-            signal.market_question,
-            signal.direction.value,
-            signal.edge,
-            signal.probability_estimate,
-            signal.market_price,
-            signal.confidence,
-            signal.reasoning,
-            signal.timestamp.isoformat(),
-            int(signal.acted_on),
-            signal.order_id,
-        ))
-        conn.commit()
-        return cursor.lastrowid
+        with self._write("log_signal") as conn:
+            cursor = conn.execute("""
+                INSERT INTO signals (
+                    strategy, market_id, platform, market_question, direction,
+                    edge, probability_estimate, market_price, confidence,
+                    reasoning, timestamp, acted_on, order_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                signal.strategy.value,
+                signal.market_id,
+                platform,
+                signal.market_question,
+                signal.direction.value,
+                signal.edge,
+                signal.probability_estimate,
+                signal.market_price,
+                signal.confidence,
+                signal.reasoning,
+                signal.timestamp.isoformat(),
+                int(signal.acted_on),
+                signal.order_id,
+            ))
+            conn.commit()
+            return cursor.lastrowid
 
     def update_signal_acted_on(self, signal_id: int, order_id: str):
         """Mark a signal as acted on after successful trade execution."""
-        conn = self._get_conn()
-        conn.execute(
-            "UPDATE signals SET acted_on=1, order_id=?, status='executed' WHERE id=?",
-            (order_id, signal_id),
-        )
-        conn.commit()
+        with self._write("update_signal_acted_on") as conn:
+            conn.execute(
+                "UPDATE signals SET acted_on=1, order_id=?, status='executed' WHERE id=?",
+                (order_id, signal_id),
+            )
+            conn.commit()
 
     def update_signal_risk_result(
         self, signal_id: int, passed: bool,
         failed_checks: list[str], warnings: list[str],
     ) -> None:
         """Record risk gate results for a signal (H-1/H-5)."""
-        conn = self._get_conn()
         status = "generated" if passed else "risk_gated"
-        conn.execute(
-            """UPDATE signals
-               SET risk_passed=?, risk_failed_checks=?, risk_warnings=?, status=?
-               WHERE id=?""",
-            (
-                int(passed),
-                ", ".join(failed_checks),
-                ", ".join(warnings),
-                status,
-                signal_id,
-            ),
-        )
-        conn.commit()
+        with self._write("update_signal_risk_result") as conn:
+            conn.execute(
+                """UPDATE signals
+                   SET risk_passed=?, risk_failed_checks=?, risk_warnings=?, status=?
+                   WHERE id=?""",
+                (
+                    int(passed),
+                    ", ".join(failed_checks),
+                    ", ".join(warnings),
+                    status,
+                    signal_id,
+                ),
+            )
+            conn.commit()
 
     def get_recent_signals(self, limit: int = 50) -> list[dict]:
         """Get recent signals."""
@@ -131,10 +113,8 @@ class TradesMixin:
 
     def log_trade(self, trade: Trade) -> int:
         """Log a completed trade. Ignores duplicates (same order_id + side)."""
-        conn = self._get_conn()
         platform = trade.platform.value if hasattr(trade.platform, 'value') else str(trade.platform)
-        _acquire_write_lock(self._write_lock, "log_trade", max_retries=1)
-        try:
+        with self._write("log_trade") as conn:
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO trades (order_id, market_id, platform, token_id, side, price, size, fee, realized_pnl, strategy, paper, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -154,8 +134,6 @@ class TradesMixin:
             ))
             conn.commit()
             return cursor.lastrowid
-        finally:
-            self._write_lock.release()
 
     # ──────────────────────────────────────
     # Pending Order Operations (H-1)
@@ -167,29 +145,21 @@ class TradesMixin:
         Called by OrderRouter after adding an order to the in-memory pending dict.
         On restart, load_pending_orders() rebuilds the dict from this table.
         """
-        conn = self._get_conn()
-        _acquire_write_lock(self._write_lock, "save_pending_order", max_retries=1)
-        try:
+        with self._write("save_pending_order") as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO pending_orders (order_id, cost) VALUES (?, ?)",
                 (order_id, cost),
             )
             conn.commit()
-        finally:
-            self._write_lock.release()
 
     def delete_pending_order(self, order_id: str) -> None:
         """Remove a pending order record (order filled, cancelled, or expired)."""
-        conn = self._get_conn()
-        _acquire_write_lock(self._write_lock, "delete_pending_order")
-        try:
+        with self._write("delete_pending_order") as conn:
             conn.execute(
                 "DELETE FROM pending_orders WHERE order_id = ?",
                 (order_id,),
             )
             conn.commit()
-        finally:
-            self._write_lock.release()
 
     def load_pending_orders(self) -> dict[str, float]:
         """Load all persisted pending orders on startup.
@@ -204,29 +174,21 @@ class TradesMixin:
 
     def save_pending_exit(self, market_id: str) -> None:
         """Persist a pending exit order to survive restarts."""
-        _acquire_write_lock(self._write_lock, "save_pending_exit")
-        try:
-            conn = self._get_conn()
+        with self._write("save_pending_exit") as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO pending_exits (market_id, created_at) VALUES (?, ?)",
                 (market_id, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
-        finally:
-            self._write_lock.release()
 
     def delete_pending_exit(self, market_id: str) -> None:
         """Remove a pending exit after fill or cancellation."""
-        _acquire_write_lock(self._write_lock, "delete_pending_exit")
-        try:
-            conn = self._get_conn()
+        with self._write("delete_pending_exit") as conn:
             conn.execute(
                 "DELETE FROM pending_exits WHERE market_id = ?",
                 (market_id,),
             )
             conn.commit()
-        finally:
-            self._write_lock.release()
 
     def load_pending_exits(self) -> set[str]:
         """Load all persisted pending exits on startup.
@@ -248,10 +210,8 @@ class TradesMixin:
         platform: str = "kalshi",
     ):
         """Log the reason a position was exited."""
-        conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
-        _acquire_write_lock(self._write_lock, "log_exit_reason")
-        try:
+        with self._write("log_exit_reason") as conn:
             conn.execute("""
                 INSERT INTO position_exits
                     (market_id, platform, strategy, exit_reason, exit_price,
@@ -262,8 +222,6 @@ class TradesMixin:
                 exit_price, position_size, realized_pnl, now,
             ))
             conn.commit()
-        finally:
-            self._write_lock.release()
 
     def has_recent_trade(self, market_id: str, seconds: int = 300) -> bool:
         """Check if a BUY trade was placed on this market within the last N seconds.

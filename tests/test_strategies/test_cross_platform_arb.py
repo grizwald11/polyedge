@@ -91,15 +91,18 @@ class TestPriceDiscrepancy:
         assert signals[0].direction == Direction.BUY_YES
         assert signals[0].edge == pytest.approx(0.10)
 
-    def test_poly_cheaper_generates_buy_poly(self, strategy):
-        """When Poly YES < Kalshi YES, buy YES on Polymarket."""
+    def test_poly_cheaper_generates_buy_no_on_kalshi(self, strategy):
+        """When Poly YES < Kalshi YES, buy NO on Kalshi (Polymarket is read-only)."""
         kalshi = _kalshi_market(yes_price=0.55)
         poly = _poly_market(yes_price=0.45)
         signals = strategy._check_price_discrepancy(kalshi, poly, similarity=0.85, min_edge=0.03)
         assert len(signals) == 1
-        assert signals[0].platform == Platform.POLYMARKET
-        assert signals[0].direction == Direction.BUY_YES
+        assert signals[0].platform == Platform.KALSHI
+        assert signals[0].direction == Direction.BUY_NO
+        assert signals[0].market_id == kalshi.ticker
         assert signals[0].edge == pytest.approx(0.10)
+        assert signals[0].market_price == pytest.approx(0.45)  # Kalshi NO price
+        assert signals[0].probability_estimate == pytest.approx(0.55)  # Poly NO price
 
     def test_no_signal_below_min_edge(self, strategy):
         """No signal when edge is below threshold."""
@@ -134,6 +137,24 @@ class TestPriceDiscrepancy:
         signals = strategy._check_price_discrepancy(kalshi, poly, similarity=0.85, min_edge=0.03)
         assert signals[0].strategy == StrategyName.CROSS_PLATFORM_ARB
 
+    def test_no_signal_ever_targets_polymarket(self, strategy):
+        """All signals must target Kalshi — Polymarket is read-only."""
+        cases = [
+            (0.40, 0.55),  # Kalshi cheaper
+            (0.55, 0.40),  # Poly cheaper
+            (0.30, 0.50),  # Large edge, Kalshi cheaper
+            (0.70, 0.50),  # Large edge, Poly cheaper
+        ]
+        for kalshi_yes, poly_yes in cases:
+            kalshi = _kalshi_market(yes_price=kalshi_yes)
+            poly = _poly_market(yes_price=poly_yes)
+            signals = strategy._check_price_discrepancy(kalshi, poly, similarity=0.85, min_edge=0.03)
+            for sig in signals:
+                assert sig.platform == Platform.KALSHI, (
+                    f"Signal targeted {sig.platform} instead of Kalshi "
+                    f"for kalshi_yes={kalshi_yes}, poly_yes={poly_yes}"
+                )
+
 
 class TestPriceDiscrepancyFromRef:
     def test_kalshi_cheaper_from_ref(self, strategy):
@@ -144,12 +165,16 @@ class TestPriceDiscrepancyFromRef:
         assert signals[0].platform == Platform.KALSHI
         assert signals[0].confidence == pytest.approx(0.80)  # Lower cap for ref data
 
-    def test_no_signal_for_poly_cheaper_from_ref(self, strategy):
-        """Ref-based only generates signals for Kalshi cheaper (one-sided)."""
+    def test_poly_cheaper_from_ref_generates_buy_no_on_kalshi(self, strategy):
+        """Ref-based: when Poly YES is cheaper, generate BUY_NO on Kalshi."""
         kalshi = _kalshi_market(yes_price=0.60)
         ref = {"yes_price": 0.40, "condition_id": "0xcond"}
         signals = strategy._check_price_discrepancy_from_ref(kalshi, ref, similarity=0.80, min_edge=0.03)
-        assert len(signals) == 0
+        assert len(signals) == 1
+        assert signals[0].platform == Platform.KALSHI
+        assert signals[0].direction == Direction.BUY_NO
+        assert signals[0].market_id == kalshi.ticker
+        assert signals[0].edge == pytest.approx(0.20)
 
     def test_no_signal_missing_ref_price(self, strategy):
         kalshi = _kalshi_market(yes_price=0.40)

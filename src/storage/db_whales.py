@@ -34,16 +34,15 @@ class WhalesMixin:
         L-1: Provides a proper abstraction layer so callers don't need
         to access _get_conn() directly.
         """
-        conn = self._get_conn()
         try:
-            conn.execute(
-                "INSERT INTO whale_trades (wallet_address, market_id, direction, size, price, detected_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (wallet_address, market_id, direction, size, price, detected_at),
-            )
-            conn.commit()
-        except (sqlite3.Error, ValueError) as e:
-            conn.rollback()
+            with self._write("log_whale_trade") as conn:
+                conn.execute(
+                    "INSERT INTO whale_trades (wallet_address, market_id, direction, size, price, detected_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (wallet_address, market_id, direction, size, price, detected_at),
+                )
+                conn.commit()
+        except (sqlite3.Error, ValueError, TimeoutError) as e:
             logger.warning(f"Failed to log whale trade: {e}")
 
     def get_whale_activity(self, limit: int = 50) -> list[dict]:
@@ -69,26 +68,26 @@ class WhalesMixin:
         validated: bool = False,
     ):
         """Insert or update a cross-platform market pair."""
-        conn = self._get_conn()
-        conn.execute("""
-            INSERT INTO cross_platform_pairs
-                (kalshi_ticker, poly_condition_id, kalshi_question, poly_question,
-                 similarity, validated, validated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(kalshi_ticker, poly_condition_id) DO UPDATE SET
-                similarity=excluded.similarity,
-                validated=excluded.validated,
-                validated_at=excluded.validated_at
-        """, (
-            kalshi_ticker,
-            poly_condition_id,
-            kalshi_question,
-            poly_question,
-            similarity,
-            int(validated),
-            datetime.now(timezone.utc).isoformat() if validated else None,
-        ))
-        conn.commit()
+        with self._write("upsert_cross_platform_pair") as conn:
+            conn.execute("""
+                INSERT INTO cross_platform_pairs
+                    (kalshi_ticker, poly_condition_id, kalshi_question, poly_question,
+                     similarity, validated, validated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(kalshi_ticker, poly_condition_id) DO UPDATE SET
+                    similarity=excluded.similarity,
+                    validated=excluded.validated,
+                    validated_at=excluded.validated_at
+            """, (
+                kalshi_ticker,
+                poly_condition_id,
+                kalshi_question,
+                poly_question,
+                similarity,
+                int(validated),
+                datetime.now(timezone.utc).isoformat() if validated else None,
+            ))
+            conn.commit()
 
     def get_cross_platform_pairs(self, validated_only: bool = False) -> list[dict]:
         """Get all cross-platform market pairs."""

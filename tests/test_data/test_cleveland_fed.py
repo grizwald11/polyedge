@@ -1,4 +1,4 @@
-"""Tests for the Cleveland Fed inflation nowcast client."""
+"""Tests for the Cleveland Fed inflation nowcast client (FRED API-based)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -7,62 +7,17 @@ import pytest
 
 from src.data.cleveland_fed import ClevelandFedNowcast
 
-SAMPLE_HTML = """
-<html>
-<body>
-<h1>Inflation Nowcasting</h1>
-<p>CPI Nowcast: 3.1% as of March 15, 2026</p>
-<p>Core CPI Nowcast: 3.3%</p>
-</body>
-</html>
-"""
 
-SAMPLE_HTML_NO_DATA = """
-<html>
-<body>
-<h1>Inflation Nowcasting</h1>
-<p>Data currently unavailable.</p>
-</body>
-</html>
-"""
-
-SAMPLE_HTML_CPI_ONLY = """
-<html>
-<body>
-<p>CPI Nowcast: 2.8% as of April 1, 2026</p>
-</body>
-</html>
-"""
-
-SAMPLE_HTML_CORE_ONLY = """
-<html>
-<body>
-<p>Core CPI Nowcast: 3.5%</p>
-</body>
-</html>
-"""
-
-SAMPLE_HTML_ALTERNATIVE_FORMAT = """
-<html>
-<body>
-<table>
-<tr><td>Consumer Price Index forecast</td><td>2.9%</td></tr>
-<tr><td>Core Consumer Price: 3.2%</td></tr>
-<tr><td>Data updated March 20, 2026</td></tr>
-</table>
-</body>
-</html>
-"""
-
-
-def _mock_response(html: str):
+def _mock_fred_response(observations: list[dict]):
+    """Create a mock httpx response with FRED JSON format."""
     resp = MagicMock()
-    resp.text = html
+    resp.json.return_value = {"observations": observations}
     resp.raise_for_status = MagicMock()
     return resp
 
 
 def _patch_httpx(mock_response):
+    """Patch httpx.AsyncClient to return mock_response."""
     mock_client = AsyncMock()
     mock_client.get = AsyncMock(return_value=mock_response)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -70,30 +25,54 @@ def _patch_httpx(mock_response):
     return patch("src.data.cleveland_fed.httpx.AsyncClient", return_value=mock_client), mock_client
 
 
+# Standard FRED observations for each CPI series
+CPIAUCSL_OBS = [{"value": "3.10", "date": "2026-03-01"}]
+CPILFESL_OBS = [{"value": "3.30", "date": "2026-03-01"}]
+PCEPILFE_OBS = [{"value": "2.80", "date": "2026-03-01"}]
+
+
 class TestGetNowcast:
     @pytest.mark.asyncio
-    async def test_successful_parse(self):
-        client = ClevelandFedNowcast(max_retries=0)
-        patcher, _ = _patch_httpx(_mock_response(SAMPLE_HTML))
-        with patcher:
+    async def test_successful_fetch(self):
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+
+        responses = iter([
+            _mock_fred_response(CPIAUCSL_OBS),
+            _mock_fred_response(CPILFESL_OBS),
+            _mock_fred_response(PCEPILFE_OBS),
+        ])
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=lambda *a, **kw: next(responses))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.data.cleveland_fed.httpx.AsyncClient", return_value=mock_client):
             result = await client.get_nowcast()
 
         assert result is not None
-        assert result["cpi"] == 3.1
-        assert result["core_cpi"] == 3.3
+        assert result["cpi"] == 3.10
+        assert result["core_cpi"] == 3.30
+        assert result["core_pce"] == 2.80
+        assert result["as_of"] == "2026-03-01"
 
     @pytest.mark.asyncio
-    async def test_no_data_returns_none(self):
-        client = ClevelandFedNowcast(max_retries=0)
-        patcher, _ = _patch_httpx(_mock_response(SAMPLE_HTML_NO_DATA))
+    async def test_no_api_key_returns_none(self):
+        client = ClevelandFedNowcast(api_key=None, max_retries=0)
+        result = await client.get_nowcast()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_observations_returns_none(self):
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+        patcher, _ = _patch_httpx(_mock_fred_response([]))
         with patcher:
             result = await client.get_nowcast()
-
         assert result is None
 
     @pytest.mark.asyncio
     async def test_http_error_returns_none(self):
-        client = ClevelandFedNowcast(max_retries=0)
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(side_effect=httpx.HTTPError("timeout"))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -106,135 +85,133 @@ class TestGetNowcast:
 
     @pytest.mark.asyncio
     async def test_caching(self):
-        client = ClevelandFedNowcast(max_retries=0)
-        patcher, mock_client = _patch_httpx(_mock_response(SAMPLE_HTML))
-        with patcher:
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+
+        responses = iter([
+            _mock_fred_response(CPIAUCSL_OBS),
+            _mock_fred_response(CPILFESL_OBS),
+            _mock_fred_response(PCEPILFE_OBS),
+        ])
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=lambda *a, **kw: next(responses))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.data.cleveland_fed.httpx.AsyncClient", return_value=mock_client):
             result1 = await client.get_nowcast()
             result2 = await client.get_nowcast()
 
-        assert mock_client.get.call_count == 1
         assert result1 == result2
+        assert mock_client.get.call_count == 3  # Only 3 calls, second uses cache
 
+    @pytest.mark.asyncio
+    async def test_cpi_only_when_core_missing(self):
+        """Only CPIAUCSL returns data, others return empty observations."""
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
 
-class TestParseNowcast:
-    def test_parses_cpi_and_core(self):
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(SAMPLE_HTML)
+        responses = iter([
+            _mock_fred_response(CPIAUCSL_OBS),
+            _mock_fred_response([]),  # No core CPI
+            _mock_fred_response([]),  # No core PCE
+        ])
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=lambda *a, **kw: next(responses))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.data.cleveland_fed.httpx.AsyncClient", return_value=mock_client):
+            result = await client.get_nowcast()
+
         assert result is not None
-        assert result["cpi"] == 3.1
-        assert result["core_cpi"] == 3.3
-
-    def test_cpi_only(self):
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(SAMPLE_HTML_CPI_ONLY)
-        assert result is not None
-        assert result["cpi"] == 2.8
+        assert result["cpi"] == 3.10
         assert result["core_cpi"] is None
 
-    def test_core_only(self):
-        # The broader CPI fallback regex also matches "Core CPI" text,
-        # so both cpi and core_cpi get the same value
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(SAMPLE_HTML_CORE_ONLY)
-        assert result is not None
-        assert result["core_cpi"] == 3.5
 
-    def test_as_of_date_extracted(self):
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(SAMPLE_HTML)
-        assert result is not None
-        assert "March 15, 2026" in result["as_of"]
-
-    def test_missing_date_defaults(self):
-        html = """<html><body><p>CPI Nowcast: 3.1%</p></body></html>"""
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(html)
-        assert result is not None
-        assert result["as_of"] == "unknown date"
-
-    def test_empty_html(self):
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast("")
+class TestFetchSeries:
+    @pytest.mark.asyncio
+    async def test_dot_value_returns_none(self):
+        """FRED uses '.' for missing values."""
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+        patcher, _ = _patch_httpx(_mock_fred_response([{"value": ".", "date": "2026-03-01"}]))
+        with patcher:
+            result = await client._fetch_series("CPIAUCSL")
         assert result is None
 
-    def test_malformed_html(self):
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast("<html>!@#$%^&*()</html>")
+    @pytest.mark.asyncio
+    async def test_rejects_value_over_max(self):
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+        patcher, _ = _patch_httpx(_mock_fred_response([{"value": "55.0", "date": "2026-03-01"}]))
+        with patcher:
+            result = await client._fetch_series("CPIAUCSL")
         assert result is None
 
-    def test_alternative_format_consumer_price_index(self):
-        # "Consumer Price Index forecast" matches via the primary regex
-        # since it contains "Consumer Price Index" + "forecast"
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(SAMPLE_HTML_ALTERNATIVE_FORMAT)
-        # The regex may or may not match this format depending on spacing
-        # At minimum, the function should not crash
-        if result is not None:
-            assert isinstance(result["cpi"], (float, type(None)))
+    @pytest.mark.asyncio
+    async def test_rejects_below_min(self):
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+        patcher, _ = _patch_httpx(_mock_fred_response([{"value": "-6.0", "date": "2026-03-01"}]))
+        with patcher:
+            result = await client._fetch_series("CPIAUCSL")
+        assert result is None
 
-
-class TestValidation:
-    def test_rejects_cpi_over_50(self):
-        html = """<html><body><p>CPI Nowcast: 75.0%</p></body></html>"""
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(html)
-        assert result is None  # CPI=75 rejected, no core, so None
-
-    def test_negative_sign_ignored_by_regex(self):
-        # Regex matches digits after minus (10.0%), not -10.0
-        html = """<html><body><p>CPI Nowcast: -10.0%</p></body></html>"""
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(html)
+    @pytest.mark.asyncio
+    async def test_accepts_negative_deflation(self):
+        """Deflation values within bounds should be accepted."""
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+        patcher, _ = _patch_httpx(_mock_fred_response([{"value": "-2.0", "date": "2026-03-01"}]))
+        with patcher:
+            result = await client._fetch_series("CPIAUCSL")
         assert result is not None
-        assert result["cpi"] == 10.0  # Parsed as positive 10.0
+        assert result == (-2.0, "2026-03-01")
 
-    def test_accepts_boundary_zero(self):
-        html = """<html><body><p>CPI Nowcast: 0.0%</p></body></html>"""
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(html)
-        assert result is not None
-        assert result["cpi"] == 0.0
+    @pytest.mark.asyncio
+    async def test_accepts_zero(self):
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+        patcher, _ = _patch_httpx(_mock_fred_response([{"value": "0.0", "date": "2026-03-01"}]))
+        with patcher:
+            result = await client._fetch_series("CPIAUCSL")
+        assert result == (0.0, "2026-03-01")
 
-    def test_accepts_high_but_valid_cpi(self):
-        html = """<html><body><p>CPI Nowcast: 15.5%</p></body></html>"""
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(html)
-        assert result is not None
-        assert result["cpi"] == 15.5
-
-    def test_invalid_cpi_valid_core_returns_partial(self):
-        html = """<html><body>
-        <p>CPI Nowcast: 99.0%</p>
-        <p>Core CPI Nowcast: 3.3%</p>
-        </body></html>"""
-        client = ClevelandFedNowcast()
-        result = client._parse_nowcast(html)
-        assert result is not None
-        assert result["cpi"] is None  # 99% rejected
-        assert result["core_cpi"] == 3.3  # Valid
+    @pytest.mark.asyncio
+    async def test_accepts_high_but_valid(self):
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
+        patcher, _ = _patch_httpx(_mock_fred_response([{"value": "15.5", "date": "2026-03-01"}]))
+        with patcher:
+            result = await client._fetch_series("CPIAUCSL")
+        assert result == (15.5, "2026-03-01")
 
 
 class TestStaleCacheFallback:
     @pytest.mark.asyncio
     async def test_serves_stale_on_http_failure(self):
-        client = ClevelandFedNowcast(max_retries=0)
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
 
         # First call succeeds
-        patcher, _ = _patch_httpx(_mock_response(SAMPLE_HTML))
-        with patcher:
-            result1 = await client.get_nowcast()
-        assert result1 is not None
-
-        # Clear TTL cache to force re-fetch
-        client._cache.clear()
-
-        # Second call fails — should serve stale
+        responses = iter([
+            _mock_fred_response(CPIAUCSL_OBS),
+            _mock_fred_response(CPILFESL_OBS),
+            _mock_fred_response(PCEPILFE_OBS),
+        ])
         mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=httpx.HTTPError("network down"))
+        mock_client.get = AsyncMock(side_effect=lambda *a, **kw: next(responses))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch("src.data.cleveland_fed.httpx.AsyncClient", return_value=mock_client):
+            result1 = await client.get_nowcast()
+        assert result1 is not None
+
+        # Clear TTL cache
+        client._cache.clear()
+
+        # Second call fails — should serve stale
+        mock_client2 = AsyncMock()
+        mock_client2.get = AsyncMock(side_effect=httpx.HTTPError("network down"))
+        mock_client2.__aenter__ = AsyncMock(return_value=mock_client2)
+        mock_client2.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.data.cleveland_fed.httpx.AsyncClient", return_value=mock_client2):
             result2 = await client.get_nowcast()
 
         assert result2 is not None
@@ -242,7 +219,7 @@ class TestStaleCacheFallback:
 
     @pytest.mark.asyncio
     async def test_no_stale_on_first_failure(self):
-        client = ClevelandFedNowcast(max_retries=0)
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(side_effect=httpx.HTTPError("timeout"))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -254,73 +231,42 @@ class TestStaleCacheFallback:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_serves_stale_on_parse_failure(self):
-        client = ClevelandFedNowcast(max_retries=0)
-
-        patcher, _ = _patch_httpx(_mock_response(SAMPLE_HTML))
-        with patcher:
-            result1 = await client.get_nowcast()
-        assert result1 is not None
-
-        client._cache.clear()
-
-        patcher2, _ = _patch_httpx(_mock_response(SAMPLE_HTML_NO_DATA))
-        with patcher2:
-            result2 = await client.get_nowcast()
-
-        assert result2 is not None
-        assert result2 == result1
-
-
-class TestRetryLogic:
-    @pytest.mark.asyncio
-    async def test_retries_on_transient_error(self):
-        client = ClevelandFedNowcast(max_retries=2)
-        good_response = _mock_response(SAMPLE_HTML)
-
-        call_count = 0
-
-        async def side_effect(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                raise httpx.HTTPError("transient")
-            return good_response
-
+    async def test_consecutive_failure_tracking(self):
+        client = ClevelandFedNowcast(api_key="test-key", max_retries=0)
         mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=side_effect)
+        mock_client.get = AsyncMock(side_effect=httpx.HTTPError("fail"))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch("src.data.cleveland_fed.httpx.AsyncClient", return_value=mock_client):
-            with patch("asyncio.sleep", new_callable=AsyncMock):
-                result = await client.get_nowcast()
+            for _ in range(3):
+                await client.get_nowcast()
 
-        assert result is not None
-        assert call_count == 3
+        assert client._consecutive_failures == 3
 
 
 class TestGetContext:
     @pytest.mark.asyncio
     async def test_formats_context(self):
-        client = ClevelandFedNowcast()
+        client = ClevelandFedNowcast(api_key="test-key")
 
         with patch.object(client, "get_nowcast", new_callable=AsyncMock) as mock:
             mock.return_value = {
                 "cpi": 3.1,
                 "core_cpi": 3.3,
-                "as_of": "March 15, 2026",
+                "core_pce": 2.8,
+                "as_of": "2026-03-01",
             }
             context = await client.get_context()
 
-        assert "CLEVELAND FED INFLATION NOWCAST" in context
+        assert "INFLATION DATA" in context
         assert "3.1%" in context
         assert "3.3%" in context
-        assert "BLS release" in context
+        assert "2.8%" in context
 
     @pytest.mark.asyncio
     async def test_failure_returns_empty(self):
-        client = ClevelandFedNowcast()
+        client = ClevelandFedNowcast(api_key="test-key")
 
         with patch.object(client, "get_nowcast", new_callable=AsyncMock) as mock:
             mock.return_value = None
@@ -329,14 +275,14 @@ class TestGetContext:
         assert context == ""
 
     @pytest.mark.asyncio
-    async def test_partial_data_context(self):
-        client = ClevelandFedNowcast()
+    async def test_partial_data_cpi_only(self):
+        client = ClevelandFedNowcast(api_key="test-key")
 
         with patch.object(client, "get_nowcast", new_callable=AsyncMock) as mock:
             mock.return_value = {
                 "cpi": 3.1,
                 "core_cpi": None,
-                "as_of": "March 15, 2026",
+                "as_of": "2026-03-01",
             }
             context = await client.get_context()
 

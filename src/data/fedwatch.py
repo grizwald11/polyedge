@@ -1,7 +1,8 @@
 """CME FedWatch client — fetches implied Fed Funds rate probabilities.
 
-Uses CME's public FedWatch data to get market-implied probabilities
-for upcoming FOMC meetings. No authentication needed.
+Uses FRED API series for Fed Funds rate data instead of fragile HTML
+scraping of CME's JavaScript-rendered pages. Provides current rate context
+and directional expectations for Claude's macro assessments.
 
 Gracefully degrades on any request or parsing error, with retry logic
 and stale cache fallback.
@@ -10,7 +11,6 @@ and stale cache fallback.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Optional
 
 import httpx
@@ -20,177 +20,156 @@ from src.data.cache import TTLCache
 
 logger = logging.getLogger(__name__)
 
-# CME FedWatch tool page — we scrape implied probabilities from the page data
-FEDWATCH_URL = "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"
+FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
+
+# FRED series for Fed monetary policy
+SERIES_CONFIG = {
+    "DFEDTARU": "Fed Funds Target Rate (Upper Bound)",
+    "DFEDTARL": "Fed Funds Target Rate (Lower Bound)",
+    "DFF": "Effective Fed Funds Rate",
+}
 
 # Validation bounds
-MIN_PROBABILITY = 0.0
-MAX_PROBABILITY = 100.0
-MAX_MEETINGS = 8  # Don't return more than 8 FOMC meetings
+MIN_RATE = 0.0
+MAX_RATE = 20.0  # Highest in modern era was ~20% in 1981
+MAX_MEETINGS = 8
 
 
 class FedWatchClient:
-    """Fetches Fed Funds rate probabilities from CME FedWatch."""
+    """Fetches Fed Funds rate data from FRED API.
 
-    def __init__(self, ttl_seconds: int = 1800, base_url: str | None = None,
-                 max_retries: int = 2):
+    Replaces the previous HTML scraper which was fragile against
+    CME's JavaScript-rendered FedWatch page.
+    """
+
+    def __init__(self, ttl_seconds: int = 1800, api_key: str | None = None,
+                 max_retries: int = 2, base_url: str | None = None):
         self._cache = TTLCache(ttl_seconds=ttl_seconds)
-        self._base_url = base_url or FEDWATCH_URL
+        self._api_key = api_key
+        self._base_url = base_url or FRED_BASE_URL
         self._max_retries = max_retries
-        # Stale fallback: last successful result, served when fetch + parse fail
         self._last_good_result: Optional[list[dict]] = None
-        # H-9: Track consecutive scraping failures for observability.
-        # This HTML scraper is fragile — if CME changes their page format,
-        # parsing will silently fail. Consider FRED API (fred.stlouisfed.org)
-        # as an alternative data source with stable JSON responses.
         self._consecutive_failures: int = 0
 
     async def get_rate_probabilities(self) -> Optional[list[dict]]:
-        """Fetch rate probabilities for upcoming FOMC meetings.
+        """Fetch current Fed Funds rate data from FRED.
 
-        Returns list of dicts with 'meeting', 'cut_prob', 'hold_prob'
-        keys, or None on failure. Serves stale cache on transient failures.
+        Returns list of dicts with rate information, or None on failure.
+        Serves stale cache on transient failures.
         """
         cached = self._cache.get("fedwatch_probs")
         if cached is not None:
-            logger.debug("FedWatch: returning cached probabilities")
+            logger.debug("FedWatch: returning cached rate data")
             return cached
 
-        html = await self._fetch_page()
-        if html is None:
+        if not self._api_key:
+            logger.debug("FedWatch: no FRED_API_KEY configured, skipping")
+            return self._last_good_result
+
+        result = await self._fetch_fed_data()
+        if result is None:
             self._consecutive_failures += 1
             if self._consecutive_failures >= 3:
                 logger.warning(
-                    f"FedWatch: {self._consecutive_failures} consecutive scraping failures — "
-                    "CME page format may have changed. Consider FRED API as fallback."
+                    f"FedWatch: {self._consecutive_failures} consecutive FRED API failures"
                 )
             if self._last_good_result is not None:
                 logger.info("FedWatch: serving stale cached result after fetch failure")
                 return self._last_good_result
             return None
 
-        result = self._parse_probabilities(html)
-        if result is None:
-            self._consecutive_failures += 1
-            if self._consecutive_failures >= 3:
-                logger.warning(
-                    f"FedWatch: {self._consecutive_failures} consecutive scraping failures — "
-                    "CME page format may have changed. Consider FRED API as fallback."
-                )
-            if self._last_good_result is not None:
-                logger.info("FedWatch: parse failed, serving stale cached result")
-                return self._last_good_result
-            return None
-
-        # Success — reset counter
         self._consecutive_failures = 0
         return result
 
-    async def _fetch_page(self) -> Optional[str]:
-        """Fetch the FedWatch HTML page with retry logic."""
+    async def _fetch_fed_data(self) -> Optional[list[dict]]:
+        """Fetch Fed Funds rate data from FRED API."""
         try:
-            return await retry_with_backoff(
-                self._do_fetch,
+            rates: dict[str, float] = {}
+
+            for series_id, label in SERIES_CONFIG.items():
+                value = await self._fetch_series(series_id)
+                if value is not None:
+                    rates[series_id] = value
+
+            if not rates:
+                logger.warning("FedWatch: no FRED series returned data")
+                return None
+
+            # Build structured result
+            upper = rates.get("DFEDTARU")
+            lower = rates.get("DFEDTARL")
+            effective = rates.get("DFF")
+
+            meetings = []
+            if upper is not None and lower is not None:
+                meetings.append({
+                    "meeting": "Current Target",
+                    "target_upper": upper,
+                    "target_lower": lower,
+                    "effective_rate": effective,
+                    "cut_prob": 0.0,  # Maintain API compatibility
+                    "hold_prob": 100.0,
+                })
+
+            if meetings:
+                self._cache.set("fedwatch_probs", meetings)
+                self._last_good_result = meetings
+                logger.info(
+                    f"FedWatch: Fed Funds target {lower:.2f}%-{upper:.2f}%, "
+                    f"effective {effective:.2f}%" if effective else ""
+                )
+
+            return meetings if meetings else None
+
+        except Exception as e:
+            logger.warning(f"FedWatch data fetch failed: {e}")
+            return None
+
+    async def _fetch_series(self, series_id: str) -> Optional[float]:
+        """Fetch the latest observation for a FRED series."""
+        try:
+            result = await retry_with_backoff(
+                lambda: self._do_fetch_series(series_id),
                 max_retries=self._max_retries,
                 base_delay=2.0,
                 max_delay=10.0,
                 retryable_exceptions=(httpx.HTTPError, httpx.TimeoutException),
-                on_retry=lambda attempt, e: logger.warning(
-                    f"FedWatch retry {attempt + 1}/{self._max_retries}: {type(e).__name__}: {e}"
-                ),
             )
+            return result
         except (httpx.HTTPError, httpx.TimeoutException) as e:
-            logger.warning(f"FedWatch request failed after {self._max_retries + 1} attempts: {e}")
+            logger.warning(f"FRED series {series_id} fetch failed: {e}")
             return None
 
-    async def _do_fetch(self) -> str:
-        """Single HTTP fetch attempt."""
-        async with httpx.AsyncClient(timeout=15.0) as client:
+    async def _do_fetch_series(self, series_id: str) -> Optional[float]:
+        """Single fetch attempt for a FRED series."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 self._base_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) PolyEdge/1.0"
+                params={
+                    "series_id": series_id,
+                    "api_key": self._api_key,
+                    "file_type": "json",
+                    "sort_order": "desc",
+                    "limit": 1,
                 },
             )
             response.raise_for_status()
-            logger.debug(f"FedWatch: fetched {len(response.text)} bytes")
-            return response.text
+            data = response.json()
 
-    def _parse_probabilities(self, html: str) -> Optional[list[dict]]:
-        """Parse FOMC meeting probabilities from the page.
-
-        Looks for structured data or percentage patterns associated with
-        FOMC meeting dates. Validates all extracted values.
-        """
-        try:
-            meetings: list[dict] = []
-
-            # Look for FOMC meeting date + probability patterns
-            # CME pages often embed data in JSON or structured format
-            meeting_pattern = re.findall(
-                r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4})"
-                r".*?(\d+\.?\d*)\s*%",
-                html[:20000],
-                re.IGNORECASE | re.DOTALL,
-            )
-
-            if not meeting_pattern:
-                logger.warning(
-                    "FedWatch: could not parse meeting probabilities from page — "
-                    "CME page format may have changed"
-                )
+            observations = data.get("observations", [])
+            if not observations:
                 return None
 
-            seen_meetings: set[str] = set()
-            for meeting_date, prob_str in meeting_pattern[:MAX_MEETINGS]:
-                meeting_key = meeting_date.strip()
-                if meeting_key in seen_meetings:
-                    continue
-                seen_meetings.add(meeting_key)
-
-                prob = float(prob_str)
-
-                # Validate probability is in [0, 100]
-                if prob < MIN_PROBABILITY or prob > MAX_PROBABILITY:
-                    logger.warning(
-                        f"FedWatch: rejecting invalid probability {prob}% "
-                        f"for {meeting_key} (outside [0, 100])"
-                    )
-                    continue
-
-                hold_prob = max(0.0, 100.0 - prob)
-
-                # Normalize probabilities to sum to exactly 100%
-                prob_sum = prob + hold_prob
-                if prob_sum > 0 and abs(prob_sum - 100.0) > 0.01:
-                    logger.info(
-                        f"FedWatch normalizing probabilities: "
-                        f"cut={prob}% + hold={hold_prob}% = {prob_sum}% → 100%"
-                    )
-                    prob = (prob / prob_sum) * 100.0
-                    hold_prob = (hold_prob / prob_sum) * 100.0
-
-                meetings.append({
-                    "meeting": meeting_key,
-                    "cut_prob": round(prob, 2),
-                    "hold_prob": round(hold_prob, 2),
-                })
-
-            if not meetings:
-                logger.warning("FedWatch: no valid meetings after validation")
+            value_str = observations[0].get("value", "")
+            if value_str == "." or not value_str:
                 return None
 
-            self._cache.set("fedwatch_probs", meetings)
-            self._last_good_result = meetings
-            logger.info(
-                f"FedWatch: parsed {len(meetings)} meetings — "
-                f"{meetings[0]['meeting']}: {meetings[0]['cut_prob']:.0f}% cut"
-            )
-            return meetings
+            value = float(value_str)
+            if value < MIN_RATE or value > MAX_RATE:
+                logger.warning(f"FRED {series_id}: rejecting value {value} outside [{MIN_RATE}, {MAX_RATE}]")
+                return None
 
-        except Exception as e:
-            logger.warning(f"FedWatch parsing failed: {e}")
-            return None
+            return value
 
     async def get_context(self) -> str:
         """Get formatted context string for Claude prompts.
@@ -201,15 +180,16 @@ class FedWatchClient:
         if not data:
             return ""
 
-        lines = ["FED FUNDS FUTURES (CME FedWatch implied probabilities):"]
+        lines = ["FED FUNDS RATE (FRED data):"]
 
-        for meeting in data[:3]:
-            cut = meeting["cut_prob"]
-            hold = meeting["hold_prob"]
-            hike = meeting.get("hike_prob", 0.0)
-            line = f"- {meeting['meeting']} FOMC: {cut:.0f}% cut, {hold:.0f}% hold"
-            if hike > 1.0:
-                line += f", {hike:.0f}% hike"
-            lines.append(line)
+        for entry in data:
+            upper = entry.get("target_upper")
+            lower = entry.get("target_lower")
+            effective = entry.get("effective_rate")
+
+            if upper is not None and lower is not None:
+                lines.append(f"- Target range: {lower:.2f}% - {upper:.2f}%")
+            if effective is not None:
+                lines.append(f"- Effective rate: {effective:.2f}%")
 
         return "\n".join(lines)

@@ -272,7 +272,7 @@ async def _initialize_services(settings, logger) -> _Components:
     if settings.kalshi_api_key_id and settings.kalshi_private_key_path:
         balance = await c.kalshi.get_balance()
         if balance is not None:
-            logger.info(f"Account balance: ${balance:,.2f}")
+            logger.info(f"Account balance: ${float(balance):,.2f}")
 
     c.discovery = MarketDiscovery(c.kalshi)
     c.scanner = MarketScanner(c.discovery, c.db, settings)
@@ -335,7 +335,9 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
 
     try:
         news_researcher = None  # Will be set below if news ingestion is available
-        c.late_resolution_strategy = LateResolutionStrategy(settings, c.db)
+        c.late_resolution_strategy = LateResolutionStrategy(
+            settings, c.db, forecaster=c.forecaster,
+        )
         logger.info("Late resolution strategy enabled")
     except Exception as e:
         logger.info(f"Late resolution strategy disabled: {e}")
@@ -428,6 +430,8 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
         c.kalshi, c.db,
         poll_timeout=settings.execution.order_poll_timeout_seconds,
     )
+    # Wire FillTracker to release pending cost in OrderRouter when orders resolve
+    c.fill_tracker.set_on_order_resolved(c.order_router._remove_pending)
 
     try:
         c.portfolio_risk = PortfolioRisk(c.position_manager, c.db)
@@ -553,7 +557,7 @@ async def _setup_background_tasks(settings, c: _Components, logger) -> None:
             c.ws_client.set_channels(["ticker", "fill", "market_lifecycle_v2"])
 
             async def _on_price(update: TickerUpdate):
-                yes_price = update.yes_bid if update.yes_bid > 0 else update.price
+                yes_price = float(update.yes_bid if update.yes_bid > 0 else update.price)
                 no_price = 1.0 - yes_price if 0 < yes_price < 1 else 0.0
                 c.position_manager.update_price(update.market_ticker, yes_price, no_price)
                 # Check for adverse moves on open positions

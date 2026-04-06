@@ -229,8 +229,9 @@ class OpenAIForecaster:
             async def get_context(self, _q: str) -> str:
                 return ""
 
-        # TODO: Wire enabled flag to settings.openai.ab_testing_enabled when ready
-        variant_manager = PromptVariantManager(enabled=False)
+        variant_manager = PromptVariantManager(
+            enabled=self.settings.openai.ab_testing_enabled,
+        )
         prompt, _model, _category, _temp, _variant = await build_forecaster_prompt(
             market,
             news_context,

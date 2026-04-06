@@ -63,6 +63,7 @@ class ReplayResult:
     profit_factor: float = 0.0
     avg_position_size: float = 0.0
     sharpe_ratio: float | None = None
+    is_oos: bool = False  # True = out-of-sample result
 
 
 def _simple_kelly_size(
@@ -243,9 +244,22 @@ def replay_signals(
 
 
 def load_data(
-    db: Database, days: int,
-) -> tuple[list[dict], dict[str, int]]:
-    """Load signals and outcomes from database."""
+    db: Database, days: int, train_pct: float = 0.60,
+) -> tuple[list[dict], list[dict], dict[str, int], bool]:
+    """Load signals and outcomes from database, split into train/test sets.
+
+    Splits signals temporally: first train_pct% by time for in-sample
+    parameter optimization, remaining for out-of-sample validation.
+
+    Args:
+        db: Database instance.
+        days: Lookback period in days.
+        train_pct: Fraction of signals for training (default 60%).
+
+    Returns:
+        (train_signals, test_signals, outcomes, has_synthetic)
+        has_synthetic: True if any market in the dataset has synthetic snapshots.
+    """
     conn = db._get_conn()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
@@ -280,10 +294,29 @@ def load_data(
     for row in outcomes_raw:
         outcomes[row["market_id"]] = int(row["actual_outcome"])
     for row in market_results:
-        if row["market_id"] not in outcomes and row["result"] is not None:
-            outcomes[row["market_id"]] = int(row["result"])
+        r = row["result"]
+        if row["market_id"] not in outcomes and r is not None and r != "":
+            try:
+                outcomes[row["market_id"]] = int(r)
+            except (ValueError, TypeError):
+                pass
 
-    return signals, outcomes
+    # Check for synthetic snapshots in the dataset
+    has_synthetic = False
+    try:
+        syn_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM market_snapshots WHERE is_synthetic = 1"
+        ).fetchone()
+        has_synthetic = (syn_count["cnt"] if syn_count else 0) > 0
+    except Exception:
+        pass  # Column may not exist yet in older DBs
+
+    # Temporal train/test split
+    split_idx = int(len(signals) * train_pct)
+    train_signals = signals[:split_idx]
+    test_signals = signals[split_idx:]
+
+    return train_signals, test_signals, outcomes, has_synthetic
 
 
 def generate_parameter_grid() -> list[ParameterSet]:
@@ -303,19 +336,11 @@ def generate_parameter_grid() -> list[ParameterSet]:
     return grid
 
 
-def format_replay_report(
-    results: list[ReplayResult], days: int, total_signals: int, total_outcomes: int,
-) -> str:
-    """Format replay results as a report."""
-    lines = [
-        f"{'=' * 80}",
-        f"PARAMETER REPLAY REPORT — Last {days} days",
-        f"{'=' * 80}",
-        f"Signals: {total_signals} | Resolved outcomes: {total_outcomes}",
-        "",
-    ]
-
-    # Sort by total P&L descending
+def _format_result_table(
+    results: list[ReplayResult], header: str, top_n: int = 20,
+) -> list[str]:
+    """Format a ranked table of replay results."""
+    lines = [header, ""]
     ranked = sorted(results, key=lambda r: r.total_pnl, reverse=True)
 
     lines.append(
@@ -324,7 +349,7 @@ def format_replay_report(
     )
     lines.append("─" * 80)
 
-    for i, r in enumerate(ranked[:20], 1):
+    for i, r in enumerate(ranked[:top_n], 1):
         pf_str = f"{r.profit_factor:.1f}" if r.profit_factor < 100 else "∞"
         sharpe_str = f"{r.sharpe_ratio:.2f}" if r.sharpe_ratio is not None else "N/A"
         lines.append(
@@ -347,17 +372,89 @@ def format_replay_report(
             )
         lines.append("")
 
-    # Current config comparison
-    current = ParameterSet()  # Defaults match current settings
-    current_result = next((r for r in ranked if _params_match(r.params, current)), None)
-    if current_result:
-        rank = ranked.index(current_result) + 1
+    return lines
+
+
+def format_replay_report(
+    is_results: list[ReplayResult],
+    oos_results: list[ReplayResult],
+    days: int,
+    train_signals: int,
+    test_signals: int,
+    total_outcomes: int,
+    has_synthetic: bool = False,
+) -> str:
+    """Format replay results as a report with in-sample and out-of-sample sections."""
+    lines = [
+        f"{'=' * 80}",
+        f"PARAMETER REPLAY REPORT — Last {days} days",
+        f"{'=' * 80}",
+        f"Train signals: {train_signals} | Test signals: {test_signals} | "
+        f"Resolved outcomes: {total_outcomes}",
+        "",
+    ]
+
+    if has_synthetic:
+        lines.extend([
+            "WARNING: Dataset contains SYNTHETIC snapshots (generated from known outcomes).",
+            "Results are an UPPER BOUND — do NOT use for live trading parameter selection.",
+            "",
+        ])
+
+    # In-sample results
+    lines.extend(_format_result_table(
+        is_results,
+        f"IN-SAMPLE (first {train_signals} signals — used for parameter fitting)",
+    ))
+
+    # Out-of-sample results
+    if oos_results:
+        lines.extend(_format_result_table(
+            oos_results,
+            f"OUT-OF-SAMPLE (last {test_signals} signals — validation, not used for fitting)",
+        ))
+
+        # Compare top IS params on OOS data
+        is_ranked = sorted(is_results, key=lambda r: r.total_pnl, reverse=True)
+        oos_by_label = {r.params.label(): r for r in oos_results}
+        lines.append("TOP 5 IN-SAMPLE → OUT-OF-SAMPLE COMPARISON:")
         lines.append(
-            f"Current config ranks #{rank}/{len(ranked)}: "
-            f"P&L=${current_result.total_pnl:.2f}, "
-            f"Win={current_result.win_rate:.0%}, "
-            f"MaxDD=${current_result.max_drawdown:.2f}"
+            f"  {'IS P&L':>9}  {'OOS P&L':>9}  {'IS Win%':>7}  {'OOS Win%':>8}  Parameters"
         )
+        lines.append("─" * 80)
+        for r in is_ranked[:5]:
+            oos_r = oos_by_label.get(r.params.label())
+            if oos_r:
+                lines.append(
+                    f"  ${r.total_pnl:>8.2f}  ${oos_r.total_pnl:>8.2f}  "
+                    f"{r.win_rate:>6.0%}  {oos_r.win_rate:>7.0%}  "
+                    f"{r.params.label()}"
+                )
+        lines.append("")
+
+    # Current config comparison
+    current = ParameterSet()
+    all_results = is_results + oos_results
+    is_ranked = sorted(is_results, key=lambda r: r.total_pnl, reverse=True)
+    current_is = next((r for r in is_ranked if _params_match(r.params, current)), None)
+    if current_is:
+        rank = is_ranked.index(current_is) + 1
+        lines.append(
+            f"Current config IS rank #{rank}/{len(is_ranked)}: "
+            f"P&L=${current_is.total_pnl:.2f}, "
+            f"Win={current_is.win_rate:.0%}, "
+            f"MaxDD=${current_is.max_drawdown:.2f}"
+        )
+        oos_ranked = sorted(oos_results, key=lambda r: r.total_pnl, reverse=True)
+        current_oos = next((r for r in oos_ranked if _params_match(r.params, current)), None)
+        if current_oos:
+            oos_rank = oos_ranked.index(current_oos) + 1
+            lines.append(
+                f"Current config OOS rank #{oos_rank}/{len(oos_ranked)}: "
+                f"P&L=${current_oos.total_pnl:.2f}, "
+                f"Win={current_oos.win_rate:.0%}, "
+                f"MaxDD=${current_oos.max_drawdown:.2f}"
+            )
 
     lines.append(f"{'=' * 80}")
     return "\n".join(lines)
@@ -377,29 +474,56 @@ def main():
     parser.add_argument("--db", default="data/markets.db", help="Database path")
     parser.add_argument("--days", type=int, default=30, help="Lookback period")
     parser.add_argument("--bankroll", type=float, default=500.0, help="Starting bankroll")
+    parser.add_argument("--train-pct", type=float, default=0.60,
+                        help="Fraction of signals for in-sample training (default 0.60)")
     args = parser.parse_args()
 
     db = Database(args.db)
-    signals, outcomes = load_data(db, args.days)
+    train_signals, test_signals, outcomes, has_synthetic = load_data(
+        db, args.days, train_pct=args.train_pct,
+    )
 
-    if not signals:
+    all_signals = train_signals + test_signals
+    if not all_signals:
         print("No signals found. Run some trading cycles first.")
         return
     if not outcomes:
         print(f"No resolved outcomes found in last {args.days} days. Need market resolutions.")
         return
 
-    print(f"Loaded {len(signals)} signals, {len(outcomes)} resolved outcomes")
+    if has_synthetic:
+        print(
+            "WARNING: Synthetic snapshots detected in database. "
+            "Results are an UPPER BOUND only."
+        )
+
+    print(
+        f"Loaded {len(all_signals)} signals "
+        f"(train={len(train_signals)}, test={len(test_signals)}), "
+        f"{len(outcomes)} resolved outcomes"
+    )
 
     grid = generate_parameter_grid()
     print(f"Testing {len(grid)} parameter combinations...")
 
-    results = []
+    # Run in-sample (training set)
+    is_results = []
     for params in grid:
-        result = replay_signals(signals, outcomes, params, args.bankroll)
-        results.append(result)
+        result = replay_signals(train_signals, outcomes, params, args.bankroll)
+        is_results.append(result)
 
-    print(format_replay_report(results, args.days, len(signals), len(outcomes)))
+    # Run out-of-sample (test set) with same parameter grid
+    oos_results = []
+    for params in grid:
+        result = replay_signals(test_signals, outcomes, params, args.bankroll)
+        result.is_oos = True
+        oos_results.append(result)
+
+    print(format_replay_report(
+        is_results, oos_results, args.days,
+        len(train_signals), len(test_signals), len(outcomes),
+        has_synthetic=has_synthetic,
+    ))
 
 
 if __name__ == "__main__":

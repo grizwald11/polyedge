@@ -107,19 +107,21 @@ class TestMessageParsing:
         }
         update = ws_client._parse_ticker(msg)
         assert update is not None
+        from decimal import Decimal
         assert update.market_ticker == "FED-RATE"
-        assert update.price == 0.45
-        assert update.yes_bid == 0.44
-        assert update.yes_ask == 0.46
+        assert update.price == Decimal("0.45")
+        assert update.yes_bid == Decimal("0.44")
+        assert update.yes_ask == Decimal("0.46")
         assert update.volume == 50000
         assert update.ts == 1710700000000
 
     def test_parse_ticker_missing_fields_defaults(self, ws_client):
+        from decimal import Decimal
         msg = {"msg": {"market_ticker": "X"}}
         update = ws_client._parse_ticker(msg)
         assert update is not None
-        assert update.price == 0
-        assert update.yes_bid == 0
+        assert update.price == Decimal("0")
+        assert update.yes_bid == Decimal("0")
 
     def test_parse_fill(self, ws_client):
         msg = {

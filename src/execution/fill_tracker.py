@@ -6,6 +6,7 @@ Polls Kalshi or Polymarket API for order status updates and reconciles with loca
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -51,15 +52,37 @@ class FillTracker:
         self._poll_timeout = poll_timeout
         self._pending_orders: dict[str, Order] = {}  # order_id -> Order
         self._ws_fills: list[Trade] = []  # Fills received via WebSocket
+        # Callback invoked when an order is resolved (filled, cancelled, stale).
+        # Set by the orchestrator to release pending cost in OrderRouter.
+        self._on_order_resolved: Optional[callable] = None
         # Load previously filled order IDs from database to prevent duplicate
         # recording after restart. Without this, a restart + re-detection of
         # old fills would double-count trades and corrupt position tracking.
-        self._processed_fills: set[str] = self._load_filled_order_ids()
+        # OrderedDict used as insertion-ordered set for correct oldest-first pruning
+        self._processed_fills: collections.OrderedDict[str, None] = self._load_filled_order_ids()
         # Track cumulative recorded fill count per order for partial fills.
         # This allows recording the delta when subsequent partials or the
         # final execution arrive. Load from DB on restart to prevent
         # duplicate trade records after crash during partial fill.
         self._partial_recorded: dict[str, int] = self._load_partial_recorded_counts()
+
+    def set_on_order_resolved(self, callback: callable) -> None:
+        """Register callback for when orders resolve (fill, cancel, stale).
+
+        The callback receives an order_id (str) and should release any
+        pending cost reservation in the OrderRouter.
+        """
+        self._on_order_resolved = callback
+
+    async def _notify_order_resolved(self, order_id: str) -> None:
+        """Invoke the on_order_resolved callback if set."""
+        if self._on_order_resolved is not None:
+            try:
+                result = self._on_order_resolved(order_id)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.error(f"on_order_resolved callback failed for {order_id}: {e}")
 
     def track(self, order: Order):
         """Register an order for fill tracking."""
@@ -166,6 +189,7 @@ class FillTracker:
 
         for oid in resolved:
             self._pending_orders.pop(oid, None)
+            await self._notify_order_resolved(oid)
 
         # H-3: Escalate orders stuck pending for >1 hour
         stale_escalate: list[str] = []
@@ -185,6 +209,7 @@ class FillTracker:
                 stale_escalate.append(oid)
         for oid in stale_escalate:
             self._pending_orders.pop(oid, None)
+            await self._notify_order_resolved(oid)
 
         if fills:
             logger.info(f"Fill tracker: {len(fills)} new fills detected")
@@ -206,16 +231,30 @@ class FillTracker:
             logger.debug(f"WebSocket fill for untracked order {order_id}")
             return None
 
-        # Build a minimal kalshi_data dict for _record_fill
+        # Extract actual fill price and count from the WebSocket event
+        fill_price = getattr(fill_update, "price", None)
+        fill_count = getattr(fill_update, "count", 0)
+
+        # Override order price with actual fill price if available
+        if fill_price is not None:
+            order.fill_price = float(fill_price)
+
         kalshi_data = {
             "order_id": order_id,
             "status": "executed",
+            "filled_count": fill_count if fill_count > 0 else int(order.size),
         }
         trade = self._record_fill(order, kalshi_data)
+        if trade and fill_price is not None:
+            trade.price = float(fill_price)
         if trade:
             self._pending_orders.pop(order_id, None)
+            await self._notify_order_resolved(order_id)
             self._ws_fills.append(trade)
-            logger.info(f"WebSocket fill detected for {order_id}")
+            logger.info(
+                f"WebSocket fill detected for {order_id}"
+                f" at ${float(fill_price):.2f}" if fill_price is not None else ""
+            )
         return trade
 
     def drain_ws_fills(self) -> list[Trade]:
@@ -340,14 +379,14 @@ class FillTracker:
         if order.id in self._processed_fills:
             logger.debug(f"Fill already processed for {order.id} — skipping duplicate")
             return None
-        self._processed_fills.add(order.id)
-        # M-13: Prune oldest entries when set exceeds cap
+        self._processed_fills[order.id] = None
+        # M-13: Prune oldest entries when OrderedDict exceeds cap
         if len(self._processed_fills) > MAX_PROCESSED_FILLS:
-            # Convert to list, drop oldest half, rebuild set
-            fill_list = list(self._processed_fills)
-            pruned = fill_list[len(fill_list) // 4:]  # M-5: Keep 75% (drop oldest 25%)
-            self._processed_fills = set(pruned)
-            logger.info(f"Pruned _processed_fills from {len(fill_list)} to {len(self._processed_fills)}")
+            old_size = len(self._processed_fills)
+            prune_count = old_size // 4  # Drop oldest 25%
+            for _ in range(prune_count):
+                self._processed_fills.popitem(last=False)  # Remove oldest (FIFO)
+            logger.info(f"Pruned _processed_fills from {old_size} to {len(self._processed_fills)}")
         # Clean up partial tracking now that order is fully resolved
         already_recorded = self._partial_recorded.pop(order.id, 0)
         now = datetime.now(timezone.utc)
@@ -462,17 +501,18 @@ class FillTracker:
             order.rejection_reason,
         ))
 
-    def _load_filled_order_ids(self) -> set[str]:
+    def _load_filled_order_ids(self) -> collections.OrderedDict[str, None]:
         """Load order IDs that already have trades recorded in the database.
 
         This prevents duplicate trade recording after a restart.
+        Returns an OrderedDict used as an insertion-ordered set.
         """
         try:
             conn = self.db._get_conn()
             rows = conn.execute(
                 "SELECT DISTINCT order_id FROM trades"
             ).fetchall()
-            ids = {row["order_id"] for row in rows if row["order_id"]}
+            ids = collections.OrderedDict((row["order_id"], None) for row in rows if row["order_id"])
             if ids:
                 logger.info(f"Fill tracker: loaded {len(ids)} previously filled order IDs")
             return ids
@@ -482,7 +522,7 @@ class FillTracker:
             err_str = str(e).lower()
             if "no such table" in err_str or "no such column" in err_str:
                 logger.info(f"Fill tracker: trades table not yet created — starting fresh")
-                return set()
+                return collections.OrderedDict()
             logger.error(f"C-4: Failed to load filled order IDs — failing fast to prevent duplicates: {e}")
             raise
 

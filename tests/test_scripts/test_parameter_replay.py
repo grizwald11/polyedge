@@ -8,6 +8,8 @@ from scripts.parameter_replay import (
     ParameterSet,
     ReplayResult,
     _simple_kelly_size,
+    format_replay_report,
+    load_data,
     replay_signals,
 )
 
@@ -160,3 +162,190 @@ class TestParameterSet:
         assert "kelly=" in label
         assert "edge_ai=" in label
         assert "conf=" in label
+
+
+class TestReplayResultOOS:
+    """Tests for out-of-sample flag on ReplayResult."""
+
+    def test_default_is_in_sample(self):
+        r = ReplayResult(params=ParameterSet())
+        assert r.is_oos is False
+
+    def test_can_set_oos(self):
+        r = ReplayResult(params=ParameterSet(), is_oos=True)
+        assert r.is_oos is True
+
+
+class TestLoadDataSplit:
+    """Tests for temporal train/test split in load_data."""
+
+    def test_load_data_splits_temporally(self, tmp_db):
+        """Signals should be split into train and test sets by timestamp order."""
+        conn = tmp_db._get_conn()
+        # Insert 10 signals with increasing timestamps
+        for i in range(10):
+            conn.execute(
+                """INSERT INTO signals (market_id, strategy, direction, edge,
+                   probability_estimate, market_price, confidence, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (f"MKT-{i}", "ai_probability", "BUY_YES", 0.08, 0.42, 0.34, 0.7,
+                 f"2026-04-0{i+1 if i < 9 else 9}T{i:02d}:00:00Z"),
+            )
+        conn.commit()
+
+        train, test, outcomes, has_synthetic = load_data(tmp_db, days=30, train_pct=0.60)
+
+        assert len(train) == 6
+        assert len(test) == 4
+        assert len(train) + len(test) == 10
+
+    def test_load_data_empty_db(self, tmp_db):
+        train, test, outcomes, has_synthetic = load_data(tmp_db, days=30)
+        assert train == []
+        assert test == []
+        assert outcomes == {}
+
+    def test_load_data_detects_synthetic(self, tmp_db):
+        """Should detect is_synthetic flag in market_snapshots."""
+        conn = tmp_db._get_conn()
+        # Insert a market first (for FK if enabled)
+        conn.execute(
+            """INSERT INTO markets (ticker, platform, question, first_seen, last_updated)
+               VALUES ('SYN-MKT', 'kalshi', 'Test?', '2026-04-01', '2026-04-01')"""
+        )
+        conn.execute(
+            """INSERT INTO market_snapshots (market_id, timestamp, yes_price, no_price, spread, is_synthetic)
+               VALUES ('SYN-MKT', '2026-04-01T00:00:00', 0.50, 0.50, 0.0, 1)"""
+        )
+        conn.commit()
+
+        _, _, _, has_synthetic = load_data(tmp_db, days=30)
+        assert has_synthetic is True
+
+    def test_load_data_no_synthetic(self, tmp_db):
+        """Should return False when no synthetic snapshots exist."""
+        _, _, _, has_synthetic = load_data(tmp_db, days=30)
+        assert has_synthetic is False
+
+    def test_train_pct_boundary(self, tmp_db):
+        """100% train should put everything in train set."""
+        conn = tmp_db._get_conn()
+        for i in range(5):
+            conn.execute(
+                """INSERT INTO signals (market_id, strategy, direction, edge,
+                   probability_estimate, market_price, confidence, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (f"MKT-{i}", "ai_probability", "BUY_YES", 0.08, 0.42, 0.34, 0.7,
+                 f"2026-04-0{i+1}T00:00:00Z"),
+            )
+        conn.commit()
+
+        train, test, _, _ = load_data(tmp_db, days=30, train_pct=1.0)
+        assert len(train) == 5
+        assert len(test) == 0
+
+
+class TestFormatReplayReport:
+    """Tests for the report formatter with IS/OOS sections."""
+
+    def _make_result(self, pnl: float, is_oos: bool = False) -> ReplayResult:
+        return ReplayResult(
+            params=ParameterSet(),
+            total_signals=10,
+            acted_signals=5,
+            total_pnl=pnl,
+            win_rate=0.6,
+            profit_factor=1.5,
+            is_oos=is_oos,
+        )
+
+    def test_report_contains_in_sample_section(self):
+        is_results = [self._make_result(50.0)]
+        oos_results = [self._make_result(30.0, is_oos=True)]
+        report = format_replay_report(is_results, oos_results, 30, 60, 40, 100)
+        assert "IN-SAMPLE" in report
+        assert "OUT-OF-SAMPLE" in report
+
+    def test_report_contains_synthetic_warning(self):
+        is_results = [self._make_result(50.0)]
+        oos_results = [self._make_result(30.0, is_oos=True)]
+        report = format_replay_report(
+            is_results, oos_results, 30, 60, 40, 100, has_synthetic=True
+        )
+        assert "SYNTHETIC" in report
+        assert "UPPER BOUND" in report
+
+    def test_report_no_synthetic_warning_when_clean(self):
+        is_results = [self._make_result(50.0)]
+        oos_results = [self._make_result(30.0, is_oos=True)]
+        report = format_replay_report(
+            is_results, oos_results, 30, 60, 40, 100, has_synthetic=False
+        )
+        assert "SYNTHETIC" not in report
+
+    def test_report_empty_oos(self):
+        """Report should handle empty OOS results gracefully."""
+        is_results = [self._make_result(50.0)]
+        report = format_replay_report(is_results, [], 30, 100, 0, 50)
+        assert "IN-SAMPLE" in report
+
+
+class TestSyntheticSnapshotFlag:
+    """Tests for is_synthetic flag on MarketSnapshot model and DB persistence."""
+
+    def test_snapshot_default_not_synthetic(self):
+        from src.core.models import MarketSnapshot
+        snap = MarketSnapshot(
+            market_id="TEST", yes_price=0.5, no_price=0.5, spread=0.0,
+        )
+        assert snap.is_synthetic is False
+
+    def test_snapshot_synthetic_flag(self):
+        from src.core.models import MarketSnapshot
+        snap = MarketSnapshot(
+            market_id="TEST", yes_price=0.5, no_price=0.5, spread=0.0,
+            is_synthetic=True,
+        )
+        assert snap.is_synthetic is True
+
+    def test_synthetic_persisted_to_db(self, tmp_db):
+        from src.core.models import MarketSnapshot
+        conn = tmp_db._get_conn()
+        # Create parent market
+        conn.execute(
+            """INSERT INTO markets (ticker, platform, question, first_seen, last_updated)
+               VALUES ('SYN-TEST', 'kalshi', 'Test?', '2026-04-01', '2026-04-01')"""
+        )
+        conn.commit()
+
+        snap = MarketSnapshot(
+            market_id="SYN-TEST", yes_price=0.5, no_price=0.5, spread=0.0,
+            is_synthetic=True,
+        )
+        tmp_db.log_snapshot(snap)
+
+        row = conn.execute(
+            "SELECT is_synthetic FROM market_snapshots WHERE market_id = 'SYN-TEST'"
+        ).fetchone()
+        assert row is not None
+        assert row["is_synthetic"] == 1
+
+    def test_real_snapshot_persisted_as_zero(self, tmp_db):
+        from src.core.models import MarketSnapshot
+        conn = tmp_db._get_conn()
+        conn.execute(
+            """INSERT INTO markets (ticker, platform, question, first_seen, last_updated)
+               VALUES ('REAL-TEST', 'kalshi', 'Test?', '2026-04-01', '2026-04-01')"""
+        )
+        conn.commit()
+
+        snap = MarketSnapshot(
+            market_id="REAL-TEST", yes_price=0.5, no_price=0.5, spread=0.0,
+        )
+        tmp_db.log_snapshot(snap)
+
+        row = conn.execute(
+            "SELECT is_synthetic FROM market_snapshots WHERE market_id = 'REAL-TEST'"
+        ).fetchone()
+        assert row is not None
+        assert row["is_synthetic"] == 0

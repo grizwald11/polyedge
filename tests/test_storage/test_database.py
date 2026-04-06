@@ -889,23 +889,23 @@ class TestEdgeCases:
 
 class TestWriteLockConstant:
 
-    def test_write_lock_uses_retry_helper(self):
-        """M-4: Verify write operations use _acquire_write_lock helper with 60s timeout."""
+    def test_write_lock_uses_context_manager(self):
+        """Verify write operations use _write() context manager with 60s timeout."""
         import inspect
         import re
-        from src.storage.db_trades import _acquire_write_lock
-        # Check the helper itself uses 60s default timeout
-        sig = inspect.signature(_acquire_write_lock)
+        from src.storage.database import Database
+        # Check _write() defaults to 60s timeout
+        sig = inspect.signature(Database._write)
         assert sig.parameters["timeout"].default == 60
-        # Check that TradesMixin methods use the helper (not raw acquire)
+        # Check that TradesMixin methods use self._write() (not raw acquire)
         from src.storage.db_trades import TradesMixin
         source = inspect.getsource(TradesMixin)
-        assert "_acquire_write_lock" in source
-        # Verify no raw acquire(timeout=...) calls remain in the mixin
+        assert "self._write(" in source
+        # Verify no raw acquire calls remain in the mixin
         raw_acquires = re.findall(r"_write_lock\.acquire\(", source)
         assert len(raw_acquires) == 0, (
             f"Found {len(raw_acquires)} raw lock.acquire() calls — "
-            f"should use _acquire_write_lock helper"
+            f"should use _write() context manager"
         )
 
 

@@ -431,7 +431,7 @@ class AIProbabilityStrategy:
         # 6. Ensemble: combine Claude + community forecasts + calibration adjustments
         ci_width = forecast.confidence_high - forecast.confidence_low
         ensemble, consensus_forecasts, market_eff, cat_brier_dict = await self._compute_ensemble(
-            market, forecast, category,
+            market, forecast, category, context,
         )
 
         # H-10: ensemble is None when post-ensemble validation fails
@@ -802,6 +802,7 @@ class AIProbabilityStrategy:
         market: Market,
         forecast: ForecastResult,
         category,
+        context: Optional[dict] = None,
     ) -> tuple:
         """Combine Claude + community forecasts + calibration adjustments.
 
@@ -813,9 +814,9 @@ class AIProbabilityStrategy:
             try:
                 gpt4o_forecast = await self.openai_forecaster.assess_market(
                     market=market,
-                    news_context="",
-                    base_rate_context="",
-                    accuracy_context="",
+                    news_context=context.get("news_context", "") if context else "",
+                    base_rate_context=context.get("base_rate_context", "") if context else "",
+                    accuracy_context=context.get("accuracy_context", "") if context else "",
                 )
                 if gpt4o_forecast and gpt4o_forecast.parse_failed:
                     gpt4o_forecast = None

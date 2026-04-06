@@ -575,6 +575,11 @@ class TestFullPaperTradeCycle:
         kelly_sizer = KellySizer(settings)
         risk_engine = RiskEngine(settings, position_manager, circuit_breaker, db)
 
+        # Patch paper fill simulation to always fill — this test exercises exit
+        # logic, not fill randomness. The 15% miss rate makes this test flaky
+        # without deterministic fills.
+        order_router._simulate_slippage = lambda order: (True, order.price)
+
         kwargs = dict(
             scanner=scanner, kalshi=mock_kalshi, ai_strategy=ai_strategy, no_strategy=no_strategy,
             news_strategy=None, cross_arb_strategy=None, whale_strategy=None,

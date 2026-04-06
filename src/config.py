@@ -144,6 +144,7 @@ class OpenAIConfig(BaseModel):
     timeout: int = 60
     max_tokens: int = 2000
     daily_budget: int = 500_000  # Soft daily token budget
+    ab_testing_enabled: bool = False  # Enable prompt A/B testing for OpenAI forecasts
 
 
 class ClaudeConfig(BaseModel):

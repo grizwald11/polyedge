@@ -35,6 +35,7 @@ WAL mode allows concurrent reads during writes.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import threading
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     spread REAL DEFAULT 0,
     volume_1h REAL DEFAULT 0,
     liquidity REAL DEFAULT 0,
+    is_synthetic INTEGER DEFAULT 0,
     FOREIGN KEY (market_id) REFERENCES markets(ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_market_time ON market_snapshots(market_id, timestamp);
@@ -369,6 +371,24 @@ class Database(
         conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
         return conn
+
+    @contextlib.contextmanager
+    def _write(self, caller: str = "unknown", timeout: int = 60):
+        """Context manager for serialized write access.
+
+        All database write operations (INSERT/UPDATE/DELETE) MUST use this
+        to prevent concurrent-write corruption under WAL mode. WAL allows
+        concurrent reads but only one writer at a time.
+        """
+        if not self._write_lock.acquire(timeout=timeout):
+            raise TimeoutError(
+                f"Database write lock acquisition timed out in {caller} "
+                f"after {timeout}s"
+            )
+        try:
+            yield self._get_conn()
+        finally:
+            self._write_lock.release()
 
     def close(self):
         """Close the persistent database connection."""
@@ -797,6 +817,14 @@ class Database(
                 "WHERE price_cents IS NULL"
             )
             logger.info("Migration v17: added price_cents/fee_cents INTEGER columns to trades (H-8)")
+
+        # Migration v18: is_synthetic flag on market_snapshots for backtest integrity
+        snapshot_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)").fetchall()
+        }
+        if "is_synthetic" not in snapshot_cols:
+            conn.execute("ALTER TABLE market_snapshots ADD COLUMN is_synthetic INTEGER DEFAULT 0")
+            logger.info("Migration v18: added is_synthetic column to market_snapshots")
 
         conn.commit()
 

@@ -111,6 +111,100 @@ class TestAlertManager:
         await manager.send_error_alert("test")  # Should not raise
 
 
+class TestCooldownDedup:
+    """Tests for alert cooldown/deduplication."""
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_suppressed_on_repeat(self):
+        """Same circuit breaker alert within cooldown should be suppressed."""
+        manager = AlertManager()
+        backend = MockBackend()
+        manager.register(backend)
+
+        await manager.send_circuit_breaker_alert("Daily loss limit")
+        await manager.send_circuit_breaker_alert("Daily loss limit")
+
+        assert len(backend.messages) == 1  # Second one suppressed
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_different_reason_not_suppressed(self):
+        """Different circuit breaker reasons should not be deduplicated."""
+        manager = AlertManager()
+        backend = MockBackend()
+        manager.register(backend)
+
+        await manager.send_circuit_breaker_alert("Daily loss limit")
+        await manager.send_circuit_breaker_alert("Consecutive losing days")
+
+        assert len(backend.messages) == 2
+
+    @pytest.mark.asyncio
+    async def test_error_suppressed_on_repeat(self):
+        """Same error within cooldown should be suppressed."""
+        manager = AlertManager()
+        backend = MockBackend()
+        manager.register(backend)
+
+        await manager.send_error_alert("API timeout")
+        await manager.send_error_alert("API timeout")
+
+        assert len(backend.messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_low_balance_suppressed_on_repeat(self):
+        """Low balance alerts should be suppressed within cooldown."""
+        manager = AlertManager()
+        backend = MockBackend()
+        manager.register(backend)
+
+        await manager.send_low_balance_alert(500.0, 1000.0)
+        await manager.send_low_balance_alert(480.0, 1000.0)
+
+        assert len(backend.messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_trade_alerts_never_suppressed(self):
+        """Trade alerts should always be sent (cooldown=0)."""
+        manager = AlertManager()
+        backend = MockBackend()
+        manager.register(backend)
+
+        for i in range(3):
+            await manager.send_trade_alert(
+                market_id="MKT-1", direction="BUY_YES",
+                size=10, price=0.50, cost=5.00,
+                strategy="ai_probability", edge=0.05,
+            )
+
+        assert len(backend.messages) == 3
+
+    @pytest.mark.asyncio
+    async def test_custom_cooldowns(self):
+        """Custom cooldown values should override defaults."""
+        manager = AlertManager(cooldowns={"error": 0})  # No cooldown for errors
+        backend = MockBackend()
+        manager.register(backend)
+
+        await manager.send_error_alert("test error")
+        await manager.send_error_alert("test error")
+
+        assert len(backend.messages) == 2
+
+    @pytest.mark.asyncio
+    async def test_cooldown_expires(self):
+        """After cooldown expires, the alert should be sent again."""
+        import time
+        manager = AlertManager(cooldowns={"error": 0.01})  # 10ms cooldown
+        backend = MockBackend()
+        manager.register(backend)
+
+        await manager.send_error_alert("test error")
+        time.sleep(0.02)  # Wait past cooldown
+        await manager.send_error_alert("test error")
+
+        assert len(backend.messages) == 2
+
+
 class TestLogBackend:
     @pytest.mark.asyncio
     async def test_log_backend(self):

@@ -593,7 +593,7 @@ class TestFillTracker:
         """_record_partial_fill returns None if order.id already in _processed_fills."""
         tracker = FillTracker(mock_kalshi, tmp_db)
         order = _make_order()
-        tracker._processed_fills.add(order.id)
+        tracker._processed_fills[order.id] = None
 
         result = tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
         assert result is None
@@ -760,7 +760,7 @@ class TestFillTracker:
 
         # Pre-fill with MAX_PROCESSED_FILLS entries
         for i in range(MAX_PROCESSED_FILLS):
-            tracker._processed_fills.add(f"old-order-{i}")
+            tracker._processed_fills[f"old-order-{i}"] = None
 
         assert len(tracker._processed_fills) == MAX_PROCESSED_FILLS
 
@@ -910,7 +910,7 @@ class TestFillTracker:
         mock_conn.execute.side_effect = OperationalError("no such table: trades")
         with patch.object(tmp_db, "_get_conn", return_value=mock_conn):
             tracker = FillTracker(mock_kalshi, tmp_db)
-        assert tracker._processed_fills == set()
+        assert len(tracker._processed_fills) == 0
 
     # ──────────────────────────────────────────────────────────────────
     # _load_partial_recorded_counts: success + exception (lines 474, 476-478)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,9 +25,11 @@ from src.storage.database import Database
 
 @pytest.fixture
 def mock_kalshi():
+    from decimal import Decimal
     client = AsyncMock(spec=KalshiClient)
     client.create_order = AsyncMock(return_value={"order_id": "kalshi-123", "status": "executed"})
     client.get_order = AsyncMock(return_value={"order_id": "kalshi-123", "status": "executed"})
+    client.get_balance = AsyncMock(return_value=Decimal("10000.00"))
     return client
 
 
@@ -355,6 +358,7 @@ class TestOrphanedOrderRecovery:
     async def test_recovery_succeeds_when_open_order_matches(self, live_settings, tmp_db):
         """If order_id is absent from create_order response, recovery finds it via open orders."""
         kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("10000.00"))
         # create_order returns response without order_id
         kalshi.create_order = AsyncMock(return_value={"status": "resting"})
         # get_open_orders returns a matching order
@@ -386,6 +390,7 @@ class TestOrphanedOrderRecovery:
     async def test_recovery_fails_when_no_match_found(self, live_settings, tmp_db):
         """If recovery finds no matching open order, order is REJECTED."""
         kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("10000.00"))
         kalshi.create_order = AsyncMock(return_value={"status": "resting"})
         # No matching orders in open orders list
         kalshi.get_open_orders = AsyncMock(return_value=[
@@ -413,6 +418,7 @@ class TestOrphanedOrderRecovery:
     async def test_recovery_handles_get_open_orders_exception(self, live_settings, tmp_db):
         """If get_open_orders raises, recovery fails gracefully and order is REJECTED."""
         kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("10000.00"))
         kalshi.create_order = AsyncMock(return_value={"status": "resting"})
         kalshi.get_open_orders = AsyncMock(side_effect=Exception("network error"))
         router = OrderRouter(live_settings, kalshi, tmp_db)
@@ -444,6 +450,7 @@ class TestPendingOrderPersistence:
     async def test_resting_order_persisted_to_db(self, live_settings, tmp_db):
         """When a live order rests, it is saved to the pending_orders table."""
         kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("10000.00"))
         kalshi.create_order = AsyncMock(return_value={"order_id": "kalshi-resting", "status": "resting"})
         # get_order is called during polling; must return a dict to avoid
         # unawaited coroutines from .get().lower() on an AsyncMock.
@@ -466,6 +473,7 @@ class TestPendingOrderPersistence:
     async def test_pending_order_removed_on_fill(self, live_settings, mock_kalshi, tmp_db):
         """When a resting order is filled, it is removed from the pending_orders table."""
         kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("10000.00"))
         # First call: resting; second call: executed
         kalshi.create_order = AsyncMock(return_value={"order_id": "kalshi-fill", "status": "resting"})
         kalshi.get_order = AsyncMock(return_value={"order_id": "kalshi-fill", "status": "executed"})
@@ -478,6 +486,7 @@ class TestPendingOrderPersistence:
         router2._session_confirmed = True
         # Use mock that returns "executed" immediately
         kalshi2 = AsyncMock(spec=KalshiClient)
+        kalshi2.get_balance = AsyncMock(return_value=Decimal("10000.00"))
         kalshi2.create_order = AsyncMock(return_value={"order_id": "kalshi-fill2", "status": "executed"})
         router3 = OrderRouter(live_settings, kalshi2, tmp_db)
         router3._session_confirmed = True
@@ -499,6 +508,7 @@ class TestPendingOrderPersistence:
         tmp_db.save_pending_order("PE-restart-test", 7.50)
 
         kalshi = AsyncMock(spec=KalshiClient)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("10000.00"))
         router = OrderRouter(live_settings, kalshi, tmp_db)
 
         # Restored state should reflect the persisted order
@@ -686,7 +696,7 @@ class TestLiveKalshiSubmission:
         """KalshiRateLimitError should be caught gracefully."""
         kalshi = AsyncMock(spec=KalshiClient)
         kalshi.create_order = AsyncMock(side_effect=KalshiRateLimitError("rate limited"))
-        kalshi.get_balance = AsyncMock(return_value=1000.0)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("1000.00"))
         router = OrderRouter(live_settings, kalshi, tmp_db)
         router._session_confirmed = True
         order = _make_order(paper=False)
@@ -704,7 +714,7 @@ class TestBalancePreFlight:
     async def test_insufficient_balance_rejects(self, live_settings, tmp_db):
         """Order rejected when balance is insufficient."""
         kalshi = AsyncMock(spec=KalshiClient)
-        kalshi.get_balance = AsyncMock(return_value=1.00)  # Only $1 available
+        kalshi.get_balance = AsyncMock(return_value=Decimal("1.00"))  # Only $1 available
         kalshi.create_order = AsyncMock(return_value={"order_id": "k-1", "status": "executed"})
         router = OrderRouter(live_settings, kalshi, tmp_db)
         router._session_confirmed = True
@@ -756,7 +766,7 @@ class TestTimeoutReconciliation:
     async def test_timeout_triggers_reconciliation(self, live_settings, tmp_db):
         """When create_order times out, reconciliation checks open orders."""
         kalshi = AsyncMock(spec=KalshiClient)
-        kalshi.get_balance = AsyncMock(return_value=1000.0)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("1000.00"))
         kalshi.create_order = AsyncMock(side_effect=asyncio.TimeoutError())
         kalshi.get_open_orders = AsyncMock(return_value=[
             {
@@ -783,7 +793,7 @@ class TestTimeoutReconciliation:
     async def test_timeout_no_match_returns_unknown(self, live_settings, tmp_db):
         """When timeout reconciliation finds no match, order status is unknown."""
         kalshi = AsyncMock(spec=KalshiClient)
-        kalshi.get_balance = AsyncMock(return_value=1000.0)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("1000.00"))
         kalshi.create_order = AsyncMock(side_effect=asyncio.TimeoutError())
         kalshi.get_open_orders = AsyncMock(return_value=[])
         router = OrderRouter(live_settings, kalshi, tmp_db)
@@ -1059,7 +1069,7 @@ class TestFillRecording:
     async def test_live_resting_order_no_trade(self, live_settings, tmp_db):
         """Resting (unfilled) live order should return no Trade object."""
         kalshi = AsyncMock(spec=KalshiClient)
-        kalshi.get_balance = AsyncMock(return_value=1000.0)
+        kalshi.get_balance = AsyncMock(return_value=Decimal("1000.00"))
         kalshi.create_order = AsyncMock(return_value={"order_id": "k-rest", "status": "resting"})
         # get_order is polled during status check; must return a dict (not AsyncMock)
         # so that .get("status", "").lower() doesn't produce unawaited coroutines.

@@ -91,8 +91,9 @@ async def _sync_bankroll(settings, kalshi, risk_engine, position_manager, bankro
     if settings.trading.mode != "live":
         return bankroll
     try:
-        live_balance = await kalshi.get_balance()
-        if live_balance is not None and live_balance > 0:
+        raw_balance = await kalshi.get_balance()
+        if raw_balance is not None and raw_balance > 0:
+            live_balance = float(raw_balance)
             if abs(live_balance - bankroll) > 1.0:
                 logger.info(f"Bankroll sync: config=${bankroll:.2f} → live=${live_balance:.2f}")
             bankroll = live_balance

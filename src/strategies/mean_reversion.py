@@ -30,6 +30,7 @@ MIN_VOLUME_24H = 20000          # Minimum 24h volume
 MIN_PRICE = 0.10                # Minimum price (avoid penny markets)
 MAX_PRICE = 0.90                # Maximum price (avoid near-certain markets)
 MAX_CONCURRENT_POSITIONS = 3    # Cap on simultaneous mean-reversion positions
+MIN_EDGE = 0.03                 # Minimum edge (3%) to generate signal — avoids noise trades
 
 
 class MeanReversionStrategy:
@@ -145,6 +146,10 @@ class MeanReversionStrategy:
             # Price went DOWN → buy YES (expect reversion up)
             direction = Direction.BUY_YES
             edge = price_move_pct * reversion_factor
+
+        # Reject signals with insufficient edge to cover transaction costs/noise
+        if edge < MIN_EDGE:
+            return None
 
         # Estimate probability of reversion
         # Higher moves have higher reversion probability up to a point

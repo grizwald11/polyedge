@@ -294,6 +294,7 @@ def generate_synthetic_snapshots(db: Database, limit: int = 500) -> int:
                 no_price=round(no_price, 4),
                 spread=round(abs(yes_price - no_price), 4),
                 volume_1h=float(random.randint(5, 200)),
+                is_synthetic=True,
             )
             db.log_snapshot(snap)
             total += 1
