@@ -13,6 +13,8 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from decimal import ROUND_HALF_UP, Decimal
+
 from src.core.models import (
     Direction,
     Order,
@@ -20,6 +22,9 @@ from src.core.models import (
     OrderType,
     Platform,
     Side,
+    dollars_to_cents,
+    kalshi_maker_fee,
+    kalshi_taker_fee,
 )
 from src.execution.order_builder import OrderBuilder
 from src.execution.order_router import OrderRouter
@@ -101,15 +106,30 @@ async def run_position_guard(
                     f"(entry={position.avg_entry_price:.2f}, now={exit_price:.2f})"
                 )
 
+                exit_platform = getattr(position, "platform", Platform.KALSHI)
+                if exit_platform == Platform.POLYMARKET:
+                    fee_dollars = 0.0
+                else:
+                    price_cents = dollars_to_cents(exit_price)
+                    if prefer_maker:
+                        fee_dollars = kalshi_maker_fee(position.size, price_cents) / 100.0
+                    else:
+                        fee_dollars = kalshi_taker_fee(position.size, price_cents) / 100.0
+                exit_cost = float(
+                    (Decimal(str(exit_price)) * Decimal(str(position.size))
+                     + Decimal(str(fee_dollars)))
+                    .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                )
+
                 exit_order = Order(
                     id=order_builder._generate_order_id(),
                     market_id=position.market_id,
-                    platform=getattr(position, "platform", Platform.KALSHI),
+                    platform=exit_platform,
                     token_id=position.token_id,
                     side=Side.SELL,
                     price=exit_price,
                     size=position.size,
-                    cost=round(exit_price * position.size, 4),
+                    cost=exit_cost,
                     order_type=OrderType.GTC if prefer_maker else OrderType.FOK,
                     status=OrderStatus.PENDING,
                     strategy=position.strategy,

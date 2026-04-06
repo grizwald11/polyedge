@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from decimal import ROUND_HALF_UP, Decimal
+
 from src.core.models import (
     Direction,
     Order,
@@ -13,6 +15,9 @@ from src.core.models import (
     Platform,
     Side,
     StrategyName,
+    dollars_to_cents,
+    kalshi_maker_fee,
+    kalshi_taker_fee,
 )
 
 
@@ -76,16 +81,32 @@ async def _process_exits(
             logger.warning(f"Skipping exit for {position.market_id}: invalid price ${exit_price}")
             continue
 
+        is_maker = settings.trading.prefer_maker
+        exit_platform = getattr(position, "platform", Platform.KALSHI)
+        if exit_platform == Platform.POLYMARKET:
+            fee_dollars = 0.0
+        else:
+            price_cents = dollars_to_cents(exit_price)
+            if is_maker:
+                fee_dollars = kalshi_maker_fee(position.size, price_cents) / 100.0
+            else:
+                fee_dollars = kalshi_taker_fee(position.size, price_cents) / 100.0
+        exit_cost = float(
+            (Decimal(str(exit_price)) * Decimal(str(position.size))
+             + Decimal(str(fee_dollars)))
+            .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        )
+
         exit_order = Order(
             id=order_builder._generate_order_id(),
             market_id=position.market_id,
-            platform=getattr(position, "platform", Platform.KALSHI),
+            platform=exit_platform,
             token_id=position.token_id,
             side=Side.SELL,
             price=exit_price,
             size=position.size,
-            cost=round(exit_price * position.size, 4),
-            order_type=OrderType.GTC if settings.trading.prefer_maker else OrderType.FOK,
+            cost=exit_cost,
+            order_type=OrderType.GTC if is_maker else OrderType.FOK,
             status=OrderStatus.PENDING,
             strategy=position.strategy,
             paper=position.paper,

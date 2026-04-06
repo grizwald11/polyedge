@@ -714,3 +714,39 @@ class TestFreshPriceInKellySizing:
         kelly_call = mocks["kelly_sizer"].calculate_position_size.call_args
         assert kelly_call is not None
         assert kelly_call.kwargs.get("order_price", kelly_call[1].get("order_price")) == 0.65
+
+
+class TestExitOrderCostIncludesFees:
+    """Exit order cost must include platform fees, not just price * size."""
+
+    @pytest.mark.asyncio
+    async def test_exit_order_cost_exceeds_raw_price_times_size(self, sample_market, sample_position):
+        """On Kalshi, exit order cost should be > price * size due to fees."""
+        mocks = _make_exit_mocks(sample_market, sample_position)
+
+        await _process_exits(**mocks)
+
+        route_call = mocks["order_router"].route_order.call_args
+        assert route_call is not None
+        exit_order = route_call[0][0]
+        raw_cost = exit_order.price * exit_order.size
+        # Cost must include fees, so it should be >= raw cost
+        assert exit_order.cost >= raw_cost, (
+            f"Exit order cost ${exit_order.cost} should include fees "
+            f"(raw price*size = ${raw_cost})"
+        )
+
+    @pytest.mark.asyncio
+    async def test_exit_order_cost_rounded_to_cents(self, sample_market, sample_position):
+        """Exit order cost should be rounded to 2 decimal places."""
+        mocks = _make_exit_mocks(sample_market, sample_position)
+
+        await _process_exits(**mocks)
+
+        route_call = mocks["order_router"].route_order.call_args
+        assert route_call is not None
+        exit_order = route_call[0][0]
+        cost_str = f"{exit_order.cost:.2f}"
+        assert exit_order.cost == float(cost_str), (
+            f"Exit cost {exit_order.cost!r} has float artifacts"
+        )

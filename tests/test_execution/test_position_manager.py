@@ -643,3 +643,43 @@ class TestDBLoadConsistencyValidation:
         pos = pm.get_position("VALID-MKT")
         assert pos.size == 8.0
         assert pos.avg_entry_price == pytest.approx(0.35)
+
+
+class TestStaleDataDoesNotBlockStopLoss:
+    """Regression: _price_stale must NOT prevent stop-loss from evaluating."""
+
+    def test_stop_loss_still_evaluates_when_price_stale(self, tmp_db):
+        """A position with _price_stale=True and fresh-enough price data should
+        still trigger stop-loss exit (the individual check allows price_age < 120s)."""
+        from datetime import timedelta
+        pm = PositionManager(tmp_db, bankroll=5000.0, hard_dollar_stop=150.0)
+        trade = _make_trade(price=0.96, size=200)
+        pm.update_from_trade(trade, "Test market")
+        # Large loss
+        pm.update_price("FED-RATE-CUT-MAY26", 0.16, 0.84)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        # Mark as stale (the flag), but keep last_updated recent (< 120s)
+        pos._price_stale = True
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=30)
+
+        should_exit, reason = pm.should_exit(pos)
+        # Must NOT be blocked — individual check sees price_age=30s which is fresh
+        assert should_exit is True
+        assert "hard dollar limit" in reason
+
+    def test_percentage_stop_loss_evaluates_when_price_stale_but_fresh(self, tmp_db):
+        """Percentage stop-loss should also fire when _price_stale=True but
+        price data is fresh (< 120s)."""
+        from datetime import timedelta
+        pm = PositionManager(tmp_db, bankroll=5000.0, stop_loss_pct=0.20)
+        trade = _make_trade(price=0.50, size=20)
+        pm.update_from_trade(trade, "Test market")
+        # 30% loss: current 0.35, cost_basis = 10.0, unrealized = (0.35-0.50)*20 = -3.0, loss_pct = 30%
+        pm.update_price("FED-RATE-CUT-MAY26", 0.35, 0.65)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        pos._price_stale = True
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=30)
+
+        should_exit, reason = pm.should_exit(pos)
+        assert should_exit is True
+        assert "stop_loss" in reason

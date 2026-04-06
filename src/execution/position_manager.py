@@ -461,24 +461,17 @@ class PositionManager:
         if cost_basis <= 0:
             return True, "Invalid cost basis (<=0) — closing position"
 
-        # H-1 FIX: Skip exit evaluation when price data is stale.
-        # Stale prices can trigger false stop-losses or edge-gone exits
-        # on illiquid markets where the data feed stopped updating.
-        # C-3 FIX: Allow exits after 10 minutes of stale data to prevent
-        # indefinite blocking if the data feed dies.
+        # H-1 / C-3: Each exit check below has its own stale-price guard
+        # (blocks 120-600s, forces through after 600s). We log a warning here
+        # but do NOT return early — the per-check guards handle staleness with
+        # appropriate severity (stop-loss checks are more aggressive than
+        # edge-gone or trailing-stop checks).
         if getattr(position, "_price_stale", False):
             stale_duration = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
-            if stale_duration < 600:  # Block exits for up to 10 minutes of stale data
-                logger.warning(
-                    f"Exit evaluation skipped for {position.market_id}: "
-                    f"price data is stale — waiting for fresh update"
-                )
-                return False, ""
-            else:
-                logger.error(
-                    f"C-3: Price stale for {stale_duration:.0f}s (>600s) for {position.market_id} — "
-                    f"allowing exit evaluation with stale data to prevent indefinite blocking"
-                )
+            logger.warning(
+                f"Price data stale for {position.market_id} ({stale_duration:.0f}s) — "
+                f"individual exit checks will apply their own stale-price guards"
+            )
 
         # 1a. Hard dollar stop-loss — fires before percentage check.
         #     Catches cases where percentage-based stops fire too late on
