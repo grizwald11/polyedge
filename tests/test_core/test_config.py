@@ -10,15 +10,23 @@ import pytest
 from src.config import Settings, load_settings
 
 
+@pytest.fixture
+def _required_env(monkeypatch):
+    """Set the three required env vars so load_settings doesn't raise."""
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "test-key")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", "/tmp/fake.pem")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+
 class TestLoadSettings:
-    def test_loads_defaults_when_no_yaml(self, tmp_path):
+    def test_loads_defaults_when_no_yaml(self, tmp_path, _required_env):
         """Missing YAML file should use all defaults."""
         settings = load_settings(tmp_path / "nonexistent.yaml")
         assert settings.trading.bankroll == 500.0
         assert settings.trading.mode == "paper"
         assert settings.kalshi.use_demo is True
 
-    def test_loads_valid_yaml(self, tmp_path):
+    def test_loads_valid_yaml(self, tmp_path, _required_env):
         yaml_file = tmp_path / "settings.yaml"
         yaml_file.write_text(
             "trading:\n"
@@ -31,14 +39,14 @@ class TestLoadSettings:
         assert settings.trading.mode == "live"
         assert settings.trading.kelly_fraction == 0.25
 
-    def test_malformed_yaml_raises(self, tmp_path):
+    def test_malformed_yaml_raises(self, tmp_path, _required_env):
         """Malformed YAML should raise RuntimeError, not silently use defaults."""
         yaml_file = tmp_path / "bad.yaml"
         yaml_file.write_text("trading:\n  bankroll: [invalid\n  unclosed bracket")
         with pytest.raises(RuntimeError, match="Failed to parse config"):
             load_settings(yaml_file)
 
-    def test_empty_yaml_uses_defaults(self, tmp_path):
+    def test_empty_yaml_uses_defaults(self, tmp_path, _required_env):
         yaml_file = tmp_path / "empty.yaml"
         yaml_file.write_text("")
         settings = load_settings(yaml_file)
@@ -46,6 +54,7 @@ class TestLoadSettings:
 
     def test_env_vars_overlay(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test-key-123")
+        monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", "/tmp/fake.pem")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
         monkeypatch.setenv("POLYEDGE_LIVE_ENABLED", "true")
 
@@ -54,10 +63,28 @@ class TestLoadSettings:
         assert settings.anthropic_api_key == "sk-ant-test"
         assert settings.live_enabled is True
 
-    def test_live_enabled_default_false(self, tmp_path, monkeypatch):
+    def test_live_enabled_default_false(self, tmp_path, monkeypatch, _required_env):
         monkeypatch.delenv("POLYEDGE_LIVE_ENABLED", raising=False)
         settings = load_settings(tmp_path / "nonexistent.yaml")
         assert settings.live_enabled is False
+
+    def test_missing_required_env_vars_raises(self, tmp_path, monkeypatch):
+        """load_settings should raise ValueError when required env vars are missing."""
+        monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
+        monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        with pytest.raises(ValueError, match="Required environment variable"):
+            load_settings(tmp_path / "nonexistent.yaml")
+
+    def test_partial_missing_env_vars_raises(self, tmp_path, monkeypatch):
+        """Even one missing required env var should raise."""
+        monkeypatch.setenv("KALSHI_API_KEY_ID", "test-key")
+        monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", "/tmp/fake.pem")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+            load_settings(tmp_path / "nonexistent.yaml")
 
 
 class TestSettingsValidation:
@@ -124,7 +151,7 @@ class TestExecutionConfig:
         assert s.execution.max_poll_attempts == 5
         assert s.execution.cycle_timeout_seconds == 300
 
-    def test_yaml_override(self, tmp_path):
+    def test_yaml_override(self, tmp_path, _required_env):
         yaml_file = tmp_path / "settings.yaml"
         yaml_file.write_text(
             "execution:\n"

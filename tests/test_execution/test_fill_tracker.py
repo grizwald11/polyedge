@@ -741,14 +741,18 @@ class TestFillTracker:
     # _record_partial_fill: DB transaction rollback (lines 293-295)
     # ──────────────────────────────────────────────────────────────────
 
-    def test_record_partial_fill_db_error_raises_and_rolls_back(self, mock_kalshi, tmp_db):
-        """DB error in partial fill transaction should rollback and re-raise."""
+    def test_record_partial_fill_db_error_returns_none_and_rolls_back(self, mock_kalshi, tmp_db):
+        """DB error in partial fill transaction should rollback and return None for retry."""
+        import sqlite3
         tracker = FillTracker(mock_kalshi, tmp_db)
         order = _make_order()
 
-        with patch.object(tmp_db, "log_trade", side_effect=RuntimeError("DB error")):
-            with pytest.raises(RuntimeError, match="DB error"):
-                tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
+        with patch.object(tmp_db, "log_trade", side_effect=sqlite3.OperationalError("database is locked")):
+            result = tracker._record_partial_fill(order, {"filled_count": 5, "remaining_count": 5})
+
+        assert result is None
+        # Partial recorded count should NOT have been updated (no DB write succeeded)
+        assert order.id not in tracker._partial_recorded
 
     # ──────────────────────────────────────────────────────────────────
     # _record_fill: _processed_fills pruning (lines 319-322)
@@ -862,14 +866,18 @@ class TestFillTracker:
     # _record_fill: DB transaction rollback (lines 378-380)
     # ──────────────────────────────────────────────────────────────────
 
-    def test_record_fill_db_error_raises_and_rolls_back(self, mock_kalshi, tmp_db):
-        """DB error in _record_fill transaction should rollback and re-raise."""
+    def test_record_fill_db_error_returns_none_and_allows_retry(self, mock_kalshi, tmp_db):
+        """DB error in _record_fill should rollback, undo dedup mark, and return None for retry."""
+        import sqlite3
         tracker = FillTracker(mock_kalshi, tmp_db)
         order = _make_order()
 
-        with patch.object(tmp_db, "log_trade", side_effect=RuntimeError("DB write fail")):
-            with pytest.raises(RuntimeError, match="DB write fail"):
-                tracker._record_fill(order, {"status": "executed"})
+        with patch.object(tmp_db, "log_trade", side_effect=sqlite3.OperationalError("database is locked")):
+            result = tracker._record_fill(order, {"status": "executed"})
+
+        assert result is None
+        # Dedup mark should be undone so the fill can be retried
+        assert order.id not in tracker._processed_fills
 
     # ──────────────────────────────────────────────────────────────────
     # _log_order_with_conn: missing platform defaults (lines 406-407)
@@ -1096,3 +1104,102 @@ class TestFillTracker:
 
         assert fills == []
         assert tracker.pending_count == 0
+
+    # ──────────────────────────────────────────────────────────────────
+    # Pending lock protects concurrent access
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_cleanup_stale_state_preserves_ordered_dict(self, mock_kalshi, tmp_db):
+        """cleanup_stale_state must keep _processed_fills as OrderedDict, not convert to set."""
+        import collections
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        # Fill beyond MAX_PROCESSED_FILLS to trigger pruning
+        for i in range(MAX_PROCESSED_FILLS + 100):
+            tracker._processed_fills[f"order-{i}"] = None
+
+        tracker.cleanup_stale_state()
+
+        assert isinstance(tracker._processed_fills, collections.OrderedDict), \
+            f"Expected OrderedDict, got {type(tracker._processed_fills)}"
+        # Should have pruned ~25%
+        assert len(tracker._processed_fills) < MAX_PROCESSED_FILLS + 100
+        # Oldest entries should be gone, newest should remain
+        assert f"order-{MAX_PROCESSED_FILLS + 99}" in tracker._processed_fills
+        assert "order-0" not in tracker._processed_fills
+
+    @pytest.mark.asyncio
+    async def test_pending_lock_exists(self, mock_kalshi, tmp_db):
+        """FillTracker should have an asyncio.Lock for _pending_orders."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        assert hasattr(tracker, "_pending_lock")
+        assert isinstance(tracker._pending_lock, asyncio.Lock)
+
+    @pytest.mark.asyncio
+    async def test_notify_lock_exists(self, mock_kalshi, tmp_db):
+        """FillTracker should have an asyncio.Lock for serializing order-resolved callbacks."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        assert hasattr(tracker, "_notify_lock")
+        assert isinstance(tracker._notify_lock, asyncio.Lock)
+
+    @pytest.mark.asyncio
+    async def test_notify_callback_serialized(self, mock_kalshi, tmp_db):
+        """Concurrent _notify_order_resolved calls should be serialized by lock."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+        call_log = []
+
+        async def slow_callback(order_id):
+            call_log.append(("start", order_id))
+            await asyncio.sleep(0.02)
+            call_log.append(("end", order_id))
+
+        tracker.set_on_order_resolved(slow_callback)
+
+        # Fire two notifications concurrently
+        await asyncio.gather(
+            tracker._notify_order_resolved("order-A"),
+            tracker._notify_order_resolved("order-B"),
+        )
+
+        # With serialization, start/end pairs should not interleave
+        assert call_log[0] == ("start", "order-A")
+        assert call_log[1] == ("end", "order-A")
+        assert call_log[2] == ("start", "order-B")
+        assert call_log[3] == ("end", "order-B")
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ws_fill_and_check_fills_safe(self, mock_kalshi, tmp_db):
+        """Concurrent handle_ws_fill and check_fills should not corrupt state."""
+        tracker = FillTracker(mock_kalshi, tmp_db)
+
+        # Track 10 orders
+        orders = []
+        for i in range(10):
+            order = Order(
+                id=f"PE-race-{i}",
+                market_id=f"MKT-{i}",
+                token_id=f"MKT-{i}_yes",
+                side=Side.BUY, price=0.50, size=5, cost=2.50,
+                order_type=OrderType.GTC, status=OrderStatus.OPEN,
+                strategy=StrategyName.AI_PROBABILITY, paper=False,
+            )
+            orders.append(order)
+            tracker.track(order)
+
+        # REST poll returns resting for all
+        mock_kalshi.get_order = AsyncMock(return_value={"status": "resting"})
+
+        # Fire WS fills for odd-numbered orders concurrently with check_fills
+        async def fire_ws_fills():
+            for i in range(1, 10, 2):
+                fill = type("FillUpdate", (), {"order_id": f"PE-race-{i}"})()
+                await tracker.handle_ws_fill(fill)
+
+        # Run both concurrently — should not raise
+        results = await asyncio.gather(
+            tracker.check_fills(),
+            fire_ws_fills(),
+            return_exceptions=True,
+        )
+        # No exceptions should have occurred
+        for r in results:
+            assert not isinstance(r, Exception), f"Unexpected error: {r}"

@@ -426,4 +426,18 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     settings.metaculus_api_token = os.environ.get("METACULUS_API_TOKEN") or None
     settings.live_enabled = os.environ.get("POLYEDGE_LIVE_ENABLED", "false").lower() == "true"
 
+    # Validate required API keys — fail fast with clear message rather than
+    # crashing mid-trade with a cryptic auth error
+    _REQUIRED_ENV_VARS = {
+        "KALSHI_API_KEY_ID": settings.kalshi_api_key_id,
+        "KALSHI_PRIVATE_KEY_PATH": settings.kalshi_private_key_path,
+        "ANTHROPIC_API_KEY": settings.anthropic_api_key,
+    }
+    missing = [name for name, value in _REQUIRED_ENV_VARS.items() if not value]
+    if missing:
+        raise ValueError(
+            f"Required environment variable(s) not set: {', '.join(missing)}. "
+            f"Export them before starting (see config/.env.example)."
+        )
+
     return settings

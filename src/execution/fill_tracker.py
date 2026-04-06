@@ -51,6 +51,8 @@ class FillTracker:
         self.db = db
         self._poll_timeout = poll_timeout
         self._pending_orders: dict[str, Order] = {}  # order_id -> Order
+        self._pending_lock = asyncio.Lock()  # Guards _pending_orders against concurrent mutation
+        self._notify_lock = asyncio.Lock()  # Serializes order-resolved callbacks
         self._ws_fills: list[Trade] = []  # Fills received via WebSocket
         # Callback invoked when an order is resolved (filled, cancelled, stale).
         # Set by the orchestrator to release pending cost in OrderRouter.
@@ -75,14 +77,19 @@ class FillTracker:
         self._on_order_resolved = callback
 
     async def _notify_order_resolved(self, order_id: str) -> None:
-        """Invoke the on_order_resolved callback if set."""
-        if self._on_order_resolved is not None:
-            try:
-                result = self._on_order_resolved(order_id)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as e:
-                logger.error(f"on_order_resolved callback failed for {order_id}: {e}")
+        """Invoke the on_order_resolved callback if set.
+
+        Serialized via _notify_lock to prevent REST and WebSocket from
+        double-invoking the callback for the same order concurrently.
+        """
+        async with self._notify_lock:
+            if self._on_order_resolved is not None:
+                try:
+                    result = self._on_order_resolved(order_id)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as e:
+                    logger.error(f"on_order_resolved callback failed for {order_id}: {e}")
 
     def track(self, order: Order):
         """Register an order for fill tracking."""
@@ -97,9 +104,10 @@ class FillTracker:
         if not self._pending_orders:
             return []
 
-        # Snapshot to avoid RuntimeError if handle_ws_fill() pops an entry
-        # during an await inside this loop.
-        order_snapshot = list(self._pending_orders.items())
+        # Hold lock while snapshotting to prevent handle_ws_fill() from
+        # mutating _pending_orders between the emptiness check and the copy.
+        async with self._pending_lock:
+            order_snapshot = list(self._pending_orders.items())
 
         # Poll all orders concurrently instead of sequentially
         async def _poll_one(order_id: str, order: Order):
@@ -187,28 +195,34 @@ class FillTracker:
                 resolved.append(order_id)
             # "resting" means still open — keep tracking
 
+        async with self._pending_lock:
+            for oid in resolved:
+                self._pending_orders.pop(oid, None)
+
         for oid in resolved:
-            self._pending_orders.pop(oid, None)
             await self._notify_order_resolved(oid)
 
         # H-3: Escalate orders stuck pending for >1 hour
         stale_escalate: list[str] = []
-        for oid, order in list(self._pending_orders.items()):
-            if oid in resolved:
-                continue
-            age = (now - order.created_at).total_seconds()
-            if age > 3600:  # 1 hour
-                logger.error(
-                    f"H-3: Order {oid} on {order.market_id} stuck pending for "
-                    f"{age / 60:.0f}min — removing from tracker. "
-                    f"Manual reconciliation may be needed."
-                )
-                order.status = OrderStatus.CANCELLED
-                order.rejection_reason = f"Stale: pending for {age / 60:.0f}min without fill/cancel"
-                self._log_order(order)
-                stale_escalate.append(oid)
+        async with self._pending_lock:
+            for oid, order in list(self._pending_orders.items()):
+                if oid in resolved:
+                    continue
+                age = (now - order.created_at).total_seconds()
+                if age > 3600:  # 1 hour
+                    logger.error(
+                        f"H-3: Order {oid} on {order.market_id} stuck pending for "
+                        f"{age / 60:.0f}min — removing from tracker. "
+                        f"Manual reconciliation may be needed."
+                    )
+                    order.status = OrderStatus.CANCELLED
+                    order.rejection_reason = f"Stale: pending for {age / 60:.0f}min without fill/cancel"
+                    self._log_order(order)
+                    stale_escalate.append(oid)
+            for oid in stale_escalate:
+                self._pending_orders.pop(oid, None)
+
         for oid in stale_escalate:
-            self._pending_orders.pop(oid, None)
             await self._notify_order_resolved(oid)
 
         if fills:
@@ -226,7 +240,8 @@ class FillTracker:
             Trade if the fill matches a tracked order, None otherwise
         """
         order_id = fill_update.order_id
-        order = self._pending_orders.get(order_id)
+        async with self._pending_lock:
+            order = self._pending_orders.get(order_id)
         if order is None:
             logger.debug(f"WebSocket fill for untracked order {order_id}")
             return None
@@ -248,7 +263,8 @@ class FillTracker:
         if trade and fill_price is not None:
             trade.price = float(fill_price)
         if trade:
-            self._pending_orders.pop(order_id, None)
+            async with self._pending_lock:
+                self._pending_orders.pop(order_id, None)
             await self._notify_order_resolved(order_id)
             self._ws_fills.append(trade)
             logger.info(
@@ -358,8 +374,11 @@ class FillTracker:
             conn.commit()
         except (sqlite3.Error, OSError, TimeoutError) as db_err:
             conn.rollback()
-            logger.error(f"DB error recording partial fill for {order.id}: {db_err}", exc_info=True)
-            raise
+            logger.error(
+                f"DB error recording partial fill for {order.id} — will retry next poll: {db_err}",
+                exc_info=True,
+            )
+            return None
         self._partial_recorded[order.id] = filled_count
         self._prune_partial_recorded()
 
@@ -444,8 +463,16 @@ class FillTracker:
             conn.commit()
         except (sqlite3.Error, OSError, TimeoutError) as db_err:
             conn.rollback()
-            logger.error(f"DB error recording fill for {order.id}: {db_err}", exc_info=True)
-            raise
+            # Undo dedup mark so the fill can be retried on the next poll cycle
+            self._processed_fills.pop(order.id, None)
+            # Restore partial tracking state
+            if already_recorded > 0:
+                self._partial_recorded[order.id] = already_recorded
+            logger.error(
+                f"DB error recording fill for {order.id} — will retry next poll: {db_err}",
+                exc_info=True,
+            )
+            return None
 
         logger.info(
             f"[FILL] {order.side.value} {remaining_size}x "
@@ -562,12 +589,13 @@ class FillTracker:
         Should be called every ~1 hour from the orchestrator main loop.
         """
         self._prune_partial_recorded()
-        # Also prune processed_fills if needed
+        # Also prune processed_fills if needed (must stay OrderedDict for FIFO dedup)
         if len(self._processed_fills) > MAX_PROCESSED_FILLS:
-            fill_list = list(self._processed_fills)
-            pruned = fill_list[len(fill_list) // 4:]
-            self._processed_fills = set(pruned)
-            logger.info(f"M-6: Pruned _processed_fills to {len(self._processed_fills)}")
+            old_size = len(self._processed_fills)
+            prune_count = old_size // 4  # Drop oldest 25%
+            for _ in range(prune_count):
+                self._processed_fills.popitem(last=False)
+            logger.info(f"M-6: Pruned _processed_fills from {old_size} to {len(self._processed_fills)}")
 
     def _prune_partial_recorded(self) -> None:
         """M-5: Remove stale entries from _partial_recorded for orders no longer pending.
