@@ -53,6 +53,7 @@ class RiskEngine:
         # re-entering bad positions, shorter for profitable exits.
         self.cooldown_loss_seconds = 14400   # 4 hours after a loss exit
         self.cooldown_profit_seconds = 3600  # 1 hour after a profit exit
+        self.cooldown_edge_gone_seconds = 28800  # 8 hours after edge-gone exit
         self.cooldown_seconds = 3600  # Default for legacy/unknown exits
         self._cooldown_durations: dict[str, int] = {}  # market_id -> seconds
         # Load persisted cooldowns if DB available, otherwise start empty
@@ -180,25 +181,58 @@ class RiskEngine:
 
         return result
 
-    def record_exit(self, market_id: str, pnl: float = 0.0):
+    def record_exit(
+        self, market_id: str, pnl: float = 0.0, exit_reason: str = "",
+    ):
         """Record a position exit for cooldown tracking.
 
-        Losses get a longer cooldown (4h) than profits (1h) to
-        reduce re-entry into positions that just burned us.
-        Persists duration to DB atomically so it survives crashes (H-15).
+        Losses get a longer cooldown (4h) than profits (1h).
+        Edge-gone exits get an extended cooldown (8h) to prevent
+        repeatedly re-entering a market where the thesis is wrong.
+        Also applies cooldown to sibling markets (same event_ticker)
+        to prevent re-entering via a different expiry date.
         """
         now = datetime.now(timezone.utc)
-        # Determine duration FIRST
-        if pnl < 0:
+        # Determine duration based on exit reason and P&L
+        if "edge_gone" in exit_reason.lower():
+            cd_duration = self.cooldown_edge_gone_seconds
+        elif pnl < 0:
             cd_duration = self.cooldown_loss_seconds
         else:
             cd_duration = self.cooldown_profit_seconds
-        # Persist to DB before updating in-memory state
+
+        # Apply to this market
+        self._apply_cooldown(market_id, now, cd_duration)
+
+        # Also apply to sibling markets (same event) to prevent
+        # re-entering via a different expiry variant
+        if self.db is not None and "edge_gone" in exit_reason.lower():
+            try:
+                conn = self.db._get_conn()
+                row = conn.execute(
+                    "SELECT event_ticker FROM markets WHERE ticker = ?",
+                    (market_id,),
+                ).fetchone()
+                if row and row["event_ticker"]:
+                    siblings = conn.execute(
+                        "SELECT ticker FROM markets WHERE event_ticker = ? AND ticker != ?",
+                        (row["event_ticker"], market_id),
+                    ).fetchall()
+                    for sib in siblings:
+                        self._apply_cooldown(sib["ticker"], now, cd_duration)
+                        logger.info(
+                            f"Edge-gone cooldown extended to sibling {sib['ticker']} "
+                            f"(event: {row['event_ticker']})"
+                        )
+            except Exception as e:
+                logger.debug(f"Sibling cooldown lookup failed: {e}")
+
+    def _apply_cooldown(self, market_id: str, now: datetime, duration: int):
+        """Apply a cooldown to a single market_id."""
         if self.db is not None:
-            self.db.save_cooldown(market_id, now, cd_duration)
-        # Then update in-memory
+            self.db.save_cooldown(market_id, now, duration)
         self._cooldowns[market_id] = now
-        self._cooldown_durations[market_id] = cd_duration
+        self._cooldown_durations[market_id] = duration
 
     # -- Backward-compatible private method aliases --------------------------------
     # These delegate to the standalone functions in risk_checks.py so that any

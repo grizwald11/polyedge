@@ -31,6 +31,8 @@ MIN_PRICE = 0.10                # Minimum price (avoid penny markets)
 MAX_PRICE = 0.90                # Maximum price (avoid near-certain markets)
 MAX_CONCURRENT_POSITIONS = 3    # Cap on simultaneous mean-reversion positions
 MIN_EDGE = 0.03                 # Minimum edge (3%) to generate signal — avoids noise trades
+MAX_MONOTONIC_RATIO = 0.85      # Reject if >85% of price steps move in one direction (trend, not noise)
+MAX_MOVE_PCT = 0.40             # Reject moves >40% — likely news-driven, not mean-reverting
 
 
 class MeanReversionStrategy:
@@ -123,6 +125,40 @@ class MeanReversionStrategy:
         price_range = max(all_prices) - min(all_prices)
         if price_range < MIN_PRICE_MOVE_PCT * oldest_price:
             return None
+
+        # TREND FILTER 1: Reject very large moves (>40%) — likely news-driven
+        # and won't revert. The KXBONDIOUT loss (-$79) was a 64% move.
+        if price_move_pct > MAX_MOVE_PCT:
+            logger.debug(
+                f"Mean reversion: skipping {market.ticker} — move {price_move_pct:.1%} "
+                f"exceeds {MAX_MOVE_PCT:.0%} cap (likely news-driven)"
+            )
+            return None
+
+        # TREND FILTER 2: Reject monotonic moves where >85% of steps go the
+        # same direction. These are sustained directional moves (trend), not
+        # noise spikes that revert. A true mean-reversion candidate should
+        # have some back-and-forth (noisy) price action.
+        if len(all_prices) >= 3:
+            steps_up = sum(1 for i in range(1, len(all_prices)) if all_prices[i] > all_prices[i-1])
+            steps_down = sum(1 for i in range(1, len(all_prices)) if all_prices[i] < all_prices[i-1])
+            total_steps = steps_up + steps_down
+            if total_steps == 0:
+                logger.debug(
+                    f"Mean reversion: skipping {market.ticker} — flat price "
+                    f"({len(all_prices)} identical snapshots), no actual volatility to revert"
+                )
+                return None
+            else:
+                max_directional = max(steps_up, steps_down)
+                monotonic_ratio = max_directional / total_steps
+                if monotonic_ratio > MAX_MONOTONIC_RATIO:
+                    logger.debug(
+                        f"Mean reversion: skipping {market.ticker} — monotonic ratio "
+                        f"{monotonic_ratio:.0%} (up={steps_up}, down={steps_down}) "
+                        f"indicates trend, not noise"
+                    )
+                    return None
 
         # M-9 FIX: Category-aware reversion factor instead of blanket 50%.
         # Political markets tend to trend (new information), while culture/entertainment

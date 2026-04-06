@@ -314,22 +314,29 @@ class CircuitBreaker:
             self._persist_state()
             logger.info("Circuit breaker: daily halt cleared for new day")
 
-    def record_daily_result(self, pnl: float) -> None:
+    def record_daily_result(self, pnl: float, day: str | None = None) -> None:
         """Record a day's P&L for consecutive loss tracking.
 
         Args:
             pnl: Day's total P&L in dollars
+            day: The calendar day being recorded (YYYY-MM-DD). Defaults to today.
+                 Must match the actual day whose P&L is being reported, NOT the
+                 current date — otherwise _update_consecutive_losses will
+                 misidentify unrecorded days and potentially double-count or
+                 reset the streak.
         """
+        if day is None:
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if pnl < 0:
             self._consecutive_losing_days += 1
             logger.info(
-                f"Losing day #{self._consecutive_losing_days}: ${pnl:.2f}"
+                f"Losing day #{self._consecutive_losing_days} ({day}): ${pnl:.2f}"
             )
         else:
             self._consecutive_losing_days = 0
             self._reduced_sizing = False
         # Track which day was last recorded to prevent double-counting on restart
-        self._last_recorded_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._last_recorded_day = day
         self._persist_state()
 
     @staticmethod
@@ -401,20 +408,31 @@ class CircuitBreaker:
         )
 
     def _update_consecutive_losses(self) -> None:
-        """Check consecutive losing day state (updated at day boundary via record_daily_result)."""
+        """Backfill any missed day-boundary recordings (e.g., after restart or gap).
+
+        Walks from the day after _last_recorded_day up to (but not including) today,
+        recording each day's realized P&L. This ensures multi-day gaps (weekends,
+        outages) are all counted toward the consecutive-loss streak.
+        """
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if self._last_day_checked == today:
             return  # Already checked today
 
         self._last_day_checked = today
-        # State is maintained via record_daily_result() called at day boundary.
-        # If we missed a day boundary (e.g., restart), check yesterday's P&L.
-        # _last_recorded_day is persisted to DB to prevent double-counting on restart (C-1).
+
+        if self._last_recorded_day is None:
+            return  # First run — nothing to backfill
+
         from datetime import timedelta
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-        if yesterday != self._last_recorded_day:
-            yesterday_pnl = self.db.get_daily_pnl(yesterday)
-            if abs(yesterday_pnl) > 0.50:  # Ignore near-zero P&L (rounding noise)
-                logger.info(f"Auto-recording missed day result: P&L=${yesterday_pnl:.2f}")
-                self.record_daily_result(yesterday_pnl)
-                self._last_recorded_day = yesterday
+
+        # Walk each calendar day from last_recorded_day+1 up to yesterday
+        cursor = datetime.strptime(self._last_recorded_day, "%Y-%m-%d") + timedelta(days=1)
+        today_dt = datetime.strptime(today, "%Y-%m-%d")
+
+        while cursor < today_dt:
+            day_str = cursor.strftime("%Y-%m-%d")
+            day_pnl = self.db.get_daily_pnl(day_str)
+            if abs(day_pnl) > 0.50:  # Ignore near-zero P&L (rounding noise)
+                logger.info(f"Auto-recording missed day result ({day_str}): P&L=${day_pnl:.2f}")
+                self.record_daily_result(day_pnl, day=day_str)
+            cursor += timedelta(days=1)

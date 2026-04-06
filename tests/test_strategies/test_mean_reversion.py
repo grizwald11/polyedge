@@ -11,6 +11,8 @@ from src.strategies.mean_reversion import (
     MeanReversionStrategy,
     MAX_CONCURRENT_POSITIONS,
     MAX_HOLD_HOURS,
+    MAX_MONOTONIC_RATIO,
+    MAX_MOVE_PCT,
     MIN_EDGE,
     MIN_PRICE_MOVE_PCT,
     MIN_SNAPSHOTS,
@@ -39,12 +41,22 @@ def _make_market(
 
 
 def _seed_snapshots(db, ticker, prices, hours_ago_start=2):
-    """Seed snapshots at regular intervals over the lookback window."""
+    """Seed snapshots at regular intervals over the lookback window.
+
+    Starts 10s before the lookback boundary to avoid race conditions
+    with generate_signals computing its own datetime.now().
+    """
     from src.core.models import MarketSnapshot
     now = datetime.now(timezone.utc)
-    interval = timedelta(hours=hours_ago_start) / max(len(prices), 1)
+    # Spread snapshots across 90% of the window, starting 5% in from the boundary.
+    # This avoids race conditions where generate_signals computes a slightly
+    # later datetime.now() and the first snapshot falls outside the lookback.
+    window = timedelta(hours=hours_ago_start)
+    margin = window * 0.05  # 5% buffer
+    usable_window = window * 0.90
+    interval = usable_window / max(len(prices) - 1, 1)
     for i, price in enumerate(prices):
-        ts = now - timedelta(hours=hours_ago_start) + interval * i
+        ts = now - window + margin + interval * i
         db.log_snapshot(
             MarketSnapshot(
                 market_id=ticker,
@@ -60,11 +72,11 @@ def _seed_snapshots(db, ticker, prices, hours_ago_start=2):
 
 class TestMeanReversionSignals:
     def test_signal_on_sharp_rise(self, tmp_db):
-        """A 15% price rise should generate a BUY_NO signal."""
+        """A 15% price rise (noisy path) should generate a BUY_NO signal."""
         strategy = MeanReversionStrategy(None, tmp_db)
         market = _make_market(yes_price=0.575)  # Current price after rise
-        # Price rose from 0.50 to 0.575 (15%)
-        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.52, 0.55, 0.575])
+        # Price rose from 0.50 to 0.575 (15%) with some noise
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.54, 0.52, 0.56, 0.575])
 
         signals = strategy.generate_signals([market])
         assert len(signals) == 1
@@ -72,11 +84,11 @@ class TestMeanReversionSignals:
         assert signals[0].edge > 0
 
     def test_signal_on_sharp_drop(self, tmp_db):
-        """A 15% price drop should generate a BUY_YES signal."""
+        """A 15% price drop (noisy path) should generate a BUY_YES signal."""
         strategy = MeanReversionStrategy(None, tmp_db)
         market = _make_market(yes_price=0.425)
-        # Price dropped from 0.50 to 0.425 (15%)
-        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.48, 0.45, 0.425])
+        # Price dropped from 0.50 to 0.425 (15%) with some noise
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.46, 0.48, 0.44, 0.425])
 
         signals = strategy.generate_signals([market])
         assert len(signals) == 1
@@ -187,7 +199,8 @@ class TestSignalDetails:
     def test_signal_has_correct_strategy(self, tmp_db):
         strategy = MeanReversionStrategy(None, tmp_db)
         market = _make_market(yes_price=0.60)
-        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.52, 0.55, 0.60])
+        # Noisy path to avoid monotonic filter
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.55, 0.52, 0.57, 0.60])
 
         signals = strategy.generate_signals([market])
         assert len(signals) == 1
@@ -201,8 +214,8 @@ class TestSignalDetails:
         """
         strategy = MeanReversionStrategy(None, tmp_db)
         market = _make_market(yes_price=0.60)
-        # ~15-20% move depending on snapshot timing
-        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.52, 0.55, 0.60])
+        # ~15-20% move with noisy path
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.55, 0.52, 0.57, 0.60])
 
         signals = strategy.generate_signals([market])
         assert len(signals) == 1
@@ -212,7 +225,7 @@ class TestSignalDetails:
     def test_signal_reasoning_contains_move_info(self, tmp_db):
         strategy = MeanReversionStrategy(None, tmp_db)
         market = _make_market(yes_price=0.60)
-        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.52, 0.55, 0.60])
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.55, 0.52, 0.57, 0.60])
 
         signals = strategy.generate_signals([market])
         assert "Mean reversion" in signals[0].reasoning
@@ -237,3 +250,62 @@ class TestSignalDetails:
     def test_min_edge_constant_is_positive(self):
         """MIN_EDGE should be a positive value."""
         assert MIN_EDGE > 0
+
+
+class TestTrendFilters:
+    def test_rejects_very_large_move(self, tmp_db):
+        """Moves >40% are likely news-driven and should be rejected."""
+        strategy = MeanReversionStrategy(None, tmp_db)
+        market = _make_market(yes_price=0.75)
+        # 50% move: 0.50 -> 0.75 — exceeds MAX_MOVE_PCT
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.55, 0.65, 0.75])
+
+        signals = strategy.generate_signals([market])
+        assert len(signals) == 0
+
+    def test_rejects_monotonic_trend(self, tmp_db):
+        """A perfectly monotonic move (all steps up) should be rejected as a trend."""
+        strategy = MeanReversionStrategy(None, tmp_db)
+        market = _make_market(yes_price=0.62)
+        # Each step goes up — monotonic ratio = 100%
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.53, 0.57, 0.60, 0.62])
+
+        signals = strategy.generate_signals([market])
+        assert len(signals) == 0
+
+    def test_accepts_noisy_move(self, tmp_db):
+        """A move with some reversion (noisy) should pass the trend filter."""
+        strategy = MeanReversionStrategy(None, tmp_db)
+        market = _make_market(yes_price=0.62)
+        # Net move is 0.50->0.62 (24%), but path is noisy: up, down, up, up
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.58, 0.54, 0.58, 0.62])
+
+        signals = strategy.generate_signals([market])
+        assert len(signals) == 1
+
+    def test_max_move_pct_boundary(self, tmp_db):
+        """A move at exactly MAX_MOVE_PCT should still be allowed."""
+        strategy = MeanReversionStrategy(None, tmp_db)
+        # 40% move: 0.50 -> 0.70. With noisy path.
+        market = _make_market(yes_price=0.70)
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.50, 0.60, 0.55, 0.65, 0.70])
+
+        signals = strategy.generate_signals([market])
+        # At exactly 40% boundary, should be allowed (> not >=)
+        assert len(signals) == 1
+
+    def test_rejects_flat_prices(self, tmp_db):
+        """Flat price snapshots (all identical) should be rejected — no real volatility."""
+        strategy = MeanReversionStrategy(None, tmp_db)
+        market = _make_market(yes_price=0.62)
+        # All snapshots at 0.62 — total_steps == 0
+        _seed_snapshots(tmp_db, "TEST-MKT", [0.62, 0.62, 0.62, 0.62])
+
+        signals = strategy.generate_signals([market])
+        assert len(signals) == 0
+
+    def test_monotonic_ratio_constant(self):
+        assert 0.5 < MAX_MONOTONIC_RATIO < 1.0
+
+    def test_max_move_pct_constant(self):
+        assert MAX_MOVE_PCT > MIN_PRICE_MOVE_PCT

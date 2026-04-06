@@ -38,6 +38,13 @@ env/
 *.swp
 *.swo
 
+# Coverage
+.coverage
+htmlcov/
+
+# Claude Code
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db

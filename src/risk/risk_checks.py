@@ -446,15 +446,23 @@ def check_obvious_no_limit(
     signal: Signal, bankroll: float, proposed_cost: float,
     failed: list[str],
 ) -> None:
-    """Obvious NO specific: max 10% bankroll in obvious-no positions."""
+    """Obvious NO specific: max 10% bankroll total, max 2% per position."""
     if signal.strategy != StrategyName.OBVIOUS_NO:
         return
+    # Total exposure cap
     no_exposure = positions.get_strategy_exposure(StrategyName.OBVIOUS_NO)
     max_no = bankroll * settings.trading.max_obvious_no_pct
     if no_exposure + proposed_cost > max_no:
         failed.append(
             f"Obvious NO exposure limit: ${no_exposure + proposed_cost:.2f} > "
             f"${max_no:.2f} ({settings.trading.max_obvious_no_pct:.0%} limit)"
+        )
+    # Per-position cap: 2% of bankroll to limit black-swan exposure
+    max_per_position = bankroll * 0.02
+    if proposed_cost > max_per_position:
+        failed.append(
+            f"Obvious NO per-position cap: ${proposed_cost:.2f} > "
+            f"${max_per_position:.2f} (2% of bankroll)"
         )
 
 

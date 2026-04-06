@@ -37,6 +37,7 @@ from src.execution.order_builder import OrderBuilder
 from src.execution.order_router import OrderRouter
 from src.execution.position_manager import PositionManager
 from src.metrics import Metrics
+from src.orchestrator.position_guard import run_position_guard
 from src.orchestrator.scan_cycle import scan_and_trade
 from src.orchestrator.startup import _acquire_pid_lock, _check_env_security, _check_pm2_logrotate, _release_pid_lock, setup_logging
 from src.risk.circuit_breaker import CircuitBreaker
@@ -81,11 +82,15 @@ async def run_trading_loop(
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if today != last_trading_day:
                 yesterday_pnl = scanner.db.get_daily_pnl(last_trading_day)
-                # Include unrealized P&L (discounted) in the daily result
-                # so positions held overnight contribute to consecutive loss tracking
+                # Include unrealized P&L only when it makes losses WORSE, not better.
+                # Positive unrealized must NOT mask real realized losses — that would
+                # incorrectly reset consecutive_losing_days. Negative unrealized
+                # (positions held overnight that are underwater) is included at 30%
+                # discount to reflect partial recovery potential.
                 unrealized = position_manager.get_total_unrealized_pnl()
-                total_daily_pnl = yesterday_pnl + unrealized * 0.3
-                circuit_breaker.record_daily_result(total_daily_pnl)
+                unrealized_adjustment = min(unrealized * 0.3, 0.0)
+                total_daily_pnl = yesterday_pnl + unrealized_adjustment
+                circuit_breaker.record_daily_result(total_daily_pnl, day=last_trading_day)
                 circuit_breaker.reset_daily()
                 logger.info(
                     f"New trading day: previous day P&L=${yesterday_pnl:.2f} "
@@ -249,6 +254,7 @@ class _Components:
         self.ws_client: KalshiWebSocket | None = None
         self.ws_task = None
         self.dashboard_task = None
+        self.position_guard_task = None
         self.kalshi_healthy: bool = False
 
 
@@ -411,6 +417,8 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
 async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
     """Initialize execution layer, risk management, and alerts."""
     c.order_builder = OrderBuilder(settings)
+    # Hard dollar stop: 3% of bankroll per position (e.g., $150 on $5000)
+    hard_dollar_stop = settings.trading.bankroll * 0.03
     c.position_manager = PositionManager(
         c.db,
         bankroll=settings.trading.bankroll,
@@ -421,6 +429,7 @@ async def _setup_execution_and_risk(settings, c: _Components, logger) -> None:
         trailing_stop_distance=settings.execution.trailing_stop_distance,
         take_profit_pct=settings.execution.take_profit_pct,
         capital_rotation_edge=settings.execution.capital_rotation_edge,
+        hard_dollar_stop=hard_dollar_stop,
     )
     c.order_router = OrderRouter(
         settings, c.kalshi, c.db,
@@ -636,6 +645,19 @@ async def _setup_background_tasks(settings, c: _Components, logger) -> None:
     else:
         logger.info("WebSocket client disabled (no API keys)")
 
+    # Start position guard (inter-cycle stop-loss monitoring every 30s)
+    c.position_guard_task = asyncio.create_task(run_position_guard(
+        position_manager=c.position_manager,
+        kalshi=c.kalshi,
+        order_builder=c.order_builder,
+        order_router=c.order_router,
+        circuit_breaker=c.circuit_breaker,
+        risk_engine=c.risk_engine,
+        settings=settings,
+        shutdown_event=getattr(c, "_shutdown_event", None),
+    ))
+    logger.info("Position guard started (30s inter-cycle monitoring)")
+
     # Start dashboard
     try:
         from src.dashboard.server import start_dashboard
@@ -671,6 +693,15 @@ async def _shutdown(c: _Components, logger) -> None:
             pass
         except Exception as e:
             logger.warning(f"WebSocket task cleanup error: {e}")
+
+    if c.position_guard_task is not None:
+        c.position_guard_task.cancel()
+        try:
+            await c.position_guard_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"Position guard task cleanup error: {e}")
 
     if c.dashboard_task is not None:
         c.dashboard_task.cancel()
@@ -812,11 +843,10 @@ async def main() -> None:
     except Exception as e:
         logger.warning(f"Monte Carlo startup validation failed (non-fatal): {e}")
 
-    # Phase 4: Start background tasks (WebSocket, dashboard)
-    await _setup_background_tasks(settings, c, logger)
-
-    # Graceful shutdown event
+    # Graceful shutdown event — created before background tasks so they can
+    # receive it and respond to shutdown requests.
     shutdown_event = asyncio.Event()
+    c._shutdown_event = shutdown_event
 
     def _signal_handler(sig, _frame):
         logger.info(f"Received signal {sig}, requesting graceful shutdown...")
@@ -825,6 +855,9 @@ async def main() -> None:
     import signal
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, _signal_handler)
+
+    # Phase 4: Start background tasks (WebSocket, dashboard, position guard)
+    await _setup_background_tasks(settings, c, logger)
 
     # Enter trading loop
     logger.info(f"\nEntering trading loop (every {settings.scanning.interval_seconds}s)...")

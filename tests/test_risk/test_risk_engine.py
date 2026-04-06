@@ -395,6 +395,54 @@ class TestCooldownPersistence:
         assert any("Cooldown" in c for c in result.failed_checks)
 
 
+class TestEdgeGoneCooldown:
+    def test_edge_gone_gets_longer_cooldown(self, settings, tmp_db):
+        """Edge-gone exits should get 8h cooldown instead of standard 4h."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        cb = CircuitBreaker(settings, tmp_db)
+        engine = RiskEngine(settings, pm, cb, tmp_db)
+
+        engine.record_exit("TEST-MKT", pnl=-5.0, exit_reason="edge_gone: remaining edge 0%")
+        assert engine._cooldown_durations["TEST-MKT"] == engine.cooldown_edge_gone_seconds
+        assert engine.cooldown_edge_gone_seconds == 28800  # 8 hours
+
+    def test_loss_exit_gets_standard_cooldown(self, settings, tmp_db):
+        """Regular loss exit should get standard 4h cooldown."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        cb = CircuitBreaker(settings, tmp_db)
+        engine = RiskEngine(settings, pm, cb, tmp_db)
+
+        engine.record_exit("TEST-MKT", pnl=-10.0, exit_reason="stop_loss: 20% loss")
+        assert engine._cooldown_durations["TEST-MKT"] == engine.cooldown_loss_seconds
+
+    def test_edge_gone_extends_to_siblings(self, settings, tmp_db):
+        """Edge-gone cooldown should also block sibling markets in same event."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        cb = CircuitBreaker(settings, tmp_db)
+        engine = RiskEngine(settings, pm, cb, tmp_db)
+
+        # Create market records with shared event_ticker
+        conn = tmp_db._get_conn()
+        conn.execute("PRAGMA foreign_keys=OFF")
+        now = datetime.now(timezone.utc).isoformat()
+        for ticker in ["EVT-MAY", "EVT-JUN", "EVT-JUL"]:
+            conn.execute(
+                "INSERT OR REPLACE INTO markets "
+                "(ticker, question, event_ticker, active, category, first_seen, last_updated) "
+                "VALUES (?, ?, ?, 1, 'Politics', ?, ?)",
+                (ticker, f"Test {ticker}", "EVT-EVENT", now, now),
+            )
+        conn.commit()
+
+        # Edge-gone exit on MAY
+        engine.record_exit("EVT-MAY", pnl=-3.0, exit_reason="edge_gone: 0% edge")
+
+        # Both JUN and JUL should now be on cooldown
+        assert "EVT-JUN" in engine._cooldowns
+        assert "EVT-JUL" in engine._cooldowns
+        assert engine._cooldown_durations["EVT-JUN"] == engine.cooldown_edge_gone_seconds
+
+
 class TestEdgeProbabilityValidation:
     def test_edge_exceeding_probability_rejected(self, engine, market):
         """Edge cannot exceed probability_estimate — implies negative market price."""

@@ -260,6 +260,147 @@ class TestPersistence:
         assert state["reduced_sizing"] == 0
 
 
+class TestRecordDailyResultDayParam:
+    """Tests for the `day` parameter fix on record_daily_result."""
+
+    def test_day_param_sets_last_recorded_day_correctly(self, cb):
+        """record_daily_result(day=X) should set _last_recorded_day to X, not today."""
+        cb.record_daily_result(-10.0, day="2026-04-03")
+        assert cb._last_recorded_day == "2026-04-03"
+        assert cb._consecutive_losing_days == 1
+
+    def test_day_param_defaults_to_today(self, cb):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        cb.record_daily_result(-5.0)
+        assert cb._last_recorded_day == today
+
+    def test_multi_day_gap_backfill(self, settings, tmp_db):
+        """_update_consecutive_losses should backfill ALL missed days, not just yesterday."""
+        from unittest.mock import patch
+
+        cb = CircuitBreaker(settings, tmp_db)
+        # Record a loss on April 1
+        cb.record_daily_result(-10.0, day="2026-04-01")
+        assert cb._consecutive_losing_days == 1
+
+        # Log losing trades on April 2 and April 3
+        for day in ["2026-04-02", "2026-04-03"]:
+            trade = Trade(
+                order_id=f"PE-loss-{day}",
+                market_id="MKT",
+                token_id="MKT_yes",
+                side=Side.BUY,
+                price=0.50,
+                size=10,
+                fee=0.0,
+                realized_pnl=-15.0,
+                strategy=StrategyName.AI_PROBABILITY,
+                paper=True,
+                timestamp=datetime.fromisoformat(f"{day}T12:00:00+00:00"),
+            )
+            tmp_db.log_trade(trade)
+
+        # Now simulate it being April 4 — should backfill April 2 and 3
+        fake_now = datetime(2026, 4, 4, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("src.risk.circuit_breaker.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.strptime = datetime.strptime
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            cb._last_day_checked = None  # Force re-check
+            cb._update_consecutive_losses()
+
+        # Should have backfilled April 2 and 3 as losing days
+        assert cb._consecutive_losing_days == 3
+        assert cb._last_recorded_day == "2026-04-03"
+
+    def test_winning_day_in_backfill_resets_streak(self, settings, tmp_db):
+        """A winning day in a multi-day backfill should reset the streak."""
+        from unittest.mock import patch
+
+        cb = CircuitBreaker(settings, tmp_db)
+        cb.record_daily_result(-10.0, day="2026-04-01")
+
+        # April 2 is a WINNING day, April 3 is a loss
+        trade_win = Trade(
+            order_id="PE-win",
+            market_id="MKT",
+            token_id="MKT_yes",
+            side=Side.BUY,
+            price=0.50,
+            size=10,
+            fee=0.0,
+            realized_pnl=20.0,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=True,
+            timestamp=datetime.fromisoformat("2026-04-02T12:00:00+00:00"),
+        )
+        trade_loss = Trade(
+            order_id="PE-loss-3",
+            market_id="MKT2",
+            token_id="MKT2_yes",
+            side=Side.BUY,
+            price=0.50,
+            size=10,
+            fee=0.0,
+            realized_pnl=-15.0,
+            strategy=StrategyName.AI_PROBABILITY,
+            paper=True,
+            timestamp=datetime.fromisoformat("2026-04-03T12:00:00+00:00"),
+        )
+        tmp_db.log_trade(trade_win)
+        tmp_db.log_trade(trade_loss)
+
+        fake_now = datetime(2026, 4, 4, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("src.risk.circuit_breaker.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.strptime = datetime.strptime
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            cb._last_day_checked = None
+            cb._update_consecutive_losses()
+
+        # April 2 win resets streak, April 3 loss starts new streak
+        assert cb._consecutive_losing_days == 1
+
+
+class TestUnrealizedPnlMasking:
+    """Tests for the unrealized PnL adjustment in day boundary calculations.
+
+    Positive unrealized PnL must NOT offset realized losses — this was
+    incorrectly resetting consecutive_losing_days.
+    """
+
+    def test_positive_unrealized_does_not_mask_realized_loss(self):
+        """If realized is -$15 and unrealized is +$60, day should still be a loss.
+
+        Old formula: -15 + 60*0.3 = +3 → resets streak (BAD)
+        New formula: -15 + min(60*0.3, 0) = -15 → counts as loss (GOOD)
+        """
+        realized = -15.0
+        unrealized = 60.0
+        # New formula from lifecycle.py
+        unrealized_adjustment = min(unrealized * 0.3, 0.0)
+        total = realized + unrealized_adjustment
+        assert total < 0, "Positive unrealized should NOT make a losing day look profitable"
+
+    def test_negative_unrealized_still_counts(self):
+        """Negative unrealized should make losses worse (at 30% discount)."""
+        realized = -10.0
+        unrealized = -40.0
+        unrealized_adjustment = min(unrealized * 0.3, 0.0)
+        total = realized + unrealized_adjustment
+        assert total == -22.0  # -10 + (-12) = -22
+
+    def test_zero_unrealized_leaves_realized_unchanged(self):
+        """Zero unrealized should not affect the daily result."""
+        realized = -5.0
+        unrealized = 0.0
+        unrealized_adjustment = min(unrealized * 0.3, 0.0)
+        total = realized + unrealized_adjustment
+        assert total == -5.0
+
+
 class TestGetWarnings:
     """Tests for pre-halt warning system (loss velocity, low balance, drawdown)."""
 

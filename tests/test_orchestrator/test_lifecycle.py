@@ -90,6 +90,19 @@ class TestComponents:
         c = _Components()
         assert c.kalshi_healthy is False
 
+    def test_position_guard_task_defaults_to_none(self):
+        c = _Components()
+        assert c.position_guard_task is None
+
+    def test_shutdown_event_can_be_set(self):
+        """_shutdown_event attribute is settable and readable via getattr."""
+        import asyncio
+        c = _Components()
+        assert getattr(c, "_shutdown_event", None) is None
+        event = asyncio.Event()
+        c._shutdown_event = event
+        assert getattr(c, "_shutdown_event", None) is event
+
 
 # ──────────────────────────────────────────────
 # _initialize_services tests

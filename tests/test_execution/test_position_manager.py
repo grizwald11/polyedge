@@ -77,6 +77,71 @@ class TestUpdateFromTrade:
         assert pos.direction == Direction.BUY_NO
 
 
+class TestHardDollarStop:
+    def test_hard_dollar_stop_triggers_exit(self, tmp_db):
+        """Hard dollar stop should trigger exit when loss exceeds threshold."""
+        pm = PositionManager(tmp_db, bankroll=5000.0, hard_dollar_stop=150.0)
+        trade = _make_trade(price=0.96, size=200)
+        pm.update_from_trade(trade, "Test market")
+        # Simulate price drop — loss of $160
+        pm.update_price("FED-RATE-CUT-MAY26", 0.16, 0.84)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+
+        should_exit, reason = pm.should_exit(pos)
+        assert should_exit is True
+        assert "hard dollar limit" in reason
+        assert "$150.00" in reason
+
+    def test_hard_dollar_stop_not_triggered_when_under(self, tmp_db):
+        """Hard dollar stop should not trigger when loss is under threshold."""
+        pm = PositionManager(tmp_db, bankroll=5000.0, hard_dollar_stop=150.0)
+        trade = _make_trade(price=0.60, size=10)
+        pm.update_from_trade(trade, "Test market")
+        # Small loss: $0.50 * 10 = $5
+        pm.update_price("FED-RATE-CUT-MAY26", 0.55, 0.45)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+
+        should_exit, reason = pm.should_exit(pos)
+        # Might exit for other reasons (pct stop) or not — just check it's not the dollar stop
+        if should_exit:
+            assert "hard dollar limit" not in reason
+
+    def test_hard_dollar_stop_disabled_by_default(self, tmp_db):
+        """When hard_dollar_stop is None, only percentage stop works."""
+        pm = PositionManager(tmp_db, bankroll=5000.0)
+        assert pm._hard_dollar_stop is None
+
+    def test_hard_dollar_stop_blocked_by_stale_price(self, tmp_db):
+        """Hard dollar stop should block exit when price is stale (2-10 min)."""
+        from datetime import timedelta
+        pm = PositionManager(tmp_db, bankroll=5000.0, hard_dollar_stop=150.0)
+        trade = _make_trade(price=0.96, size=200)
+        pm.update_from_trade(trade, "Test market")
+        pm.update_price("FED-RATE-CUT-MAY26", 0.16, 0.84)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        # Make the price stale (5 minutes old)
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=300)
+
+        should_exit, reason = pm.should_exit(pos)
+        # Should be blocked by stale price (300s is in 120-600 range)
+        assert should_exit is False or "hard dollar limit" not in reason
+
+    def test_hard_dollar_stop_forces_exit_after_critical_stale(self, tmp_db):
+        """Hard dollar stop should force exit after STALE_PRICE_CRITICAL_SECONDS (600s)."""
+        from datetime import timedelta
+        pm = PositionManager(tmp_db, bankroll=5000.0, hard_dollar_stop=150.0)
+        trade = _make_trade(price=0.96, size=200)
+        pm.update_from_trade(trade, "Test market")
+        pm.update_price("FED-RATE-CUT-MAY26", 0.16, 0.84)
+        pos = pm.get_position("FED-RATE-CUT-MAY26")
+        # Make the price critically stale (>600s) — should force exit
+        pos.last_updated = datetime.now(timezone.utc) - timedelta(seconds=700)
+
+        should_exit, reason = pm.should_exit(pos)
+        assert should_exit is True
+        assert "hard dollar limit" in reason
+
+
 class TestPriceUpdate:
     def test_unrealized_pnl_buy_yes(self, tmp_db):
         pm = PositionManager(tmp_db, bankroll=500.0)

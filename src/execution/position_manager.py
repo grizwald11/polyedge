@@ -56,6 +56,11 @@ DEFAULT_CAPITAL_ROTATION_EDGE = 0.40
 # original edge remains. Prioritizes deploying capital into higher-edge
 # opportunities over squeezing the last few percent from nearly-exhausted positions.
 
+DEFAULT_HARD_DOLLAR_STOP = None
+# Hard dollar stop loss per position. When set, triggers exit if unrealized loss
+# exceeds this dollar amount regardless of percentage. Catches cases where
+# percentage-based stops fire too late on high-cost-basis positions.
+
 # Slippage buffer: exits trigger slightly before the hard threshold
 # to account for execution slippage (typically 1-3%) — H-13
 SLIPPAGE_BUFFER = 0.02
@@ -96,6 +101,7 @@ class PositionManager:
         trailing_stop_distance: float = DEFAULT_TRAILING_STOP_DISTANCE,
         take_profit_pct: float = DEFAULT_TAKE_PROFIT_PCT,
         capital_rotation_edge: float = DEFAULT_CAPITAL_ROTATION_EDGE,
+        hard_dollar_stop: float | None = DEFAULT_HARD_DOLLAR_STOP,
     ):
         self.db = db
         self.bankroll = bankroll
@@ -107,6 +113,7 @@ class PositionManager:
         self._trailing_stop_distance = trailing_stop_distance
         self._take_profit_pct = take_profit_pct
         self._capital_rotation_edge = capital_rotation_edge
+        self._hard_dollar_stop = hard_dollar_stop
         self._positions: dict[str, Position] = {}  # market_id -> Position
         # C-4: Load pending exits from DB to survive restarts
         try:
@@ -473,7 +480,32 @@ class PositionManager:
                     f"allowing exit evaluation with stale data to prevent indefinite blocking"
                 )
 
-        # 1. Stop-loss check
+        # 1a. Hard dollar stop-loss — fires before percentage check.
+        #     Catches cases where percentage-based stops fire too late on
+        #     high-cost-basis positions (e.g., obvious_no buying 155 contracts @ $0.96).
+        #     Stale-price handling mirrors the percentage stop (1b): block at 2-10 min,
+        #     but force exit after STALE_PRICE_CRITICAL_SECONDS to prevent indefinite blocking.
+        if self._hard_dollar_stop is not None and position.unrealized_pnl < 0:
+            dollar_loss = abs(position.unrealized_pnl)
+            if dollar_loss >= self._hard_dollar_stop:
+                price_age = (datetime.now(timezone.utc) - position.last_updated).total_seconds()
+                if price_age > 120 and price_age < STALE_PRICE_CRITICAL_SECONDS:
+                    logger.warning(
+                        f"Hard dollar stop blocked by stale price for {position.market_id}: "
+                        f"loss=${dollar_loss:.2f}, price age={price_age:.0f}s"
+                    )
+                else:
+                    if price_age >= STALE_PRICE_CRITICAL_SECONDS:
+                        logger.error(
+                            f"C-3: Hard dollar stop proceeding with stale price ({price_age:.0f}s) "
+                            f"for {position.market_id} to prevent indefinite blocking"
+                        )
+                    return True, (
+                        f"stop_loss: ${dollar_loss:.2f} loss exceeds "
+                        f"${self._hard_dollar_stop:.2f} hard dollar limit"
+                    )
+
+        # 1b. Stop-loss check (percentage-based)
         #    Require fresh price data (<2 min) to avoid false exits on stale prices.
         #    Trigger slightly before threshold to account for slippage (H-13).
         effective_stop_loss = stop_loss_pct - SLIPPAGE_BUFFER

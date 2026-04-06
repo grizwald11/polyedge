@@ -27,6 +27,7 @@ from src.risk.risk_checks import (
     check_excluded_category,
     check_existing_position,
     check_liquidity,
+    check_obvious_no_limit,
     check_position_size,
     check_total_exposure,
     get_min_edge,
@@ -322,3 +323,73 @@ class TestCheckExistingPosition:
         check_existing_position(settings, positions, signal, failed, warnings)
         assert len(failed) > 0
         assert "Already have position" in failed[0]
+
+
+# ---------------------------------------------------------------------------
+# check_obvious_no_limit — per-position cap
+# ---------------------------------------------------------------------------
+
+
+class TestCheckObviousNoPerPositionCap:
+    def test_per_position_cap_rejects_oversized(self, settings):
+        """A single obvious_no position costing >2% bankroll should be rejected."""
+        signal = Signal(
+            strategy=StrategyName.OBVIOUS_NO,
+            market_id="TEST-MKT",
+            market_question="Test?",
+            direction=Direction.BUY_NO,
+            edge=0.03,
+            probability_estimate=0.99,
+            market_price=0.97,
+            confidence=0.95,
+            reasoning="Test",
+        )
+        positions = MagicMock()
+        positions.get_strategy_exposure.return_value = 0.0
+        bankroll = 5000.0
+        proposed_cost = 150.0  # 3% of bankroll — over 2% cap
+
+        failed = []
+        check_obvious_no_limit(settings, positions, signal, bankroll, proposed_cost, failed)
+        assert any("per-position cap" in f for f in failed)
+
+    def test_per_position_cap_allows_small(self, settings):
+        """A small obvious_no position under 2% should pass."""
+        signal = Signal(
+            strategy=StrategyName.OBVIOUS_NO,
+            market_id="TEST-MKT",
+            market_question="Test?",
+            direction=Direction.BUY_NO,
+            edge=0.03,
+            probability_estimate=0.99,
+            market_price=0.97,
+            confidence=0.95,
+            reasoning="Test",
+        )
+        positions = MagicMock()
+        positions.get_strategy_exposure.return_value = 0.0
+        bankroll = 5000.0
+        proposed_cost = 80.0  # 1.6% of bankroll — under cap
+
+        failed = []
+        check_obvious_no_limit(settings, positions, signal, bankroll, proposed_cost, failed)
+        assert not any("per-position cap" in f for f in failed)
+
+    def test_non_obvious_no_signal_skipped(self, settings):
+        """Non obvious_no strategies should bypass this check."""
+        signal = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="TEST-MKT",
+            market_question="Test?",
+            direction=Direction.BUY_YES,
+            edge=0.08,
+            probability_estimate=0.42,
+            market_price=0.34,
+            confidence=0.7,
+            reasoning="Test",
+        )
+        positions = MagicMock()
+        positions.get_strategy_exposure.return_value = 0.0
+        failed = []
+        check_obvious_no_limit(settings, positions, signal, 5000.0, 250.0, failed)
+        assert len(failed) == 0

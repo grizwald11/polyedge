@@ -103,7 +103,7 @@ async def _process_exits(
         if result is not None and result.success and result.trade:
             position_manager.clear_pending_exit(position.market_id)
             position_manager.update_from_trade(result.trade)
-            risk_engine.record_exit(position.market_id, pnl=result.trade.realized_pnl)
+            risk_engine.record_exit(position.market_id, pnl=result.trade.realized_pnl, exit_reason=exit_reason)
             # Record edge-vs-return for M-2 metrics tracking
             if metrics is not None and result.trade:
                 cost_basis = position.avg_entry_price * position.size
