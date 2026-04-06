@@ -126,3 +126,27 @@ class TestResolveSideAndToken:
 
         sell_no = builder._resolve_side_and_token(sample_market, Direction.SELL_NO)
         assert sell_no == (Side.SELL, "FED-RATE-CUT-MAY26_no", "no")
+
+
+class TestCostPrecision:
+    """Order cost should be rounded to cents, not have float artifacts."""
+
+    def test_cost_rounded_to_cents(self, builder, sample_market, sample_signal):
+        """Cost should be a clean cent value, not e.g. 3.4000000000000004."""
+        order = builder.build_limit_order(sample_market, sample_signal, 10, 0.34)
+        assert order is not None
+        # Cost should equal str representation with exactly 2 decimal places
+        cost_str = f"{order.cost:.2f}"
+        assert order.cost == float(cost_str), (
+            f"Cost {order.cost!r} has float artifacts (expected {cost_str})"
+        )
+
+    def test_cost_no_sub_cent_residue(self, builder, sample_market, sample_signal):
+        """10 contracts at $0.33 = $3.30 + fee, should be clean."""
+        order = builder.build_limit_order(sample_market, sample_signal, 10, 0.33)
+        assert order is not None
+        # Multiply cost by 100 and check it's close to an integer
+        cents = order.cost * 100
+        assert abs(cents - round(cents)) < 0.001, (
+            f"Cost ${order.cost} has sub-cent residue"
+        )

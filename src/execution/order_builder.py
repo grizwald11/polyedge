@@ -74,7 +74,9 @@ class OrderBuilder:
         side, token_id, k_side = resolved
         price = self._clamp_price(price)
         fee_dollars = self._calculate_fee(market.platform, size, price, maker=True)
-        cost = float((Decimal(str(price)) * Decimal(str(size)) + Decimal(str(fee_dollars))).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+        # Round to cents (0.01) — prediction markets operate in whole-cent
+        # increments; 4-place rounding then float conversion introduces artifacts.
+        cost = float((Decimal(str(price)) * Decimal(str(size)) + Decimal(str(fee_dollars))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         fee_bps = 0 if market.platform == Platform.POLYMARKET else 175
 
         order = Order(
@@ -150,7 +152,9 @@ class OrderBuilder:
 
         price = self._clamp_price(price)
         fee_dollars = self._calculate_fee(market.platform, size, price, maker=False)
-        cost = float((Decimal(str(price)) * Decimal(str(size)) + Decimal(str(fee_dollars))).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+        # Round to cents (0.01) — prediction markets operate in whole-cent
+        # increments; 4-place rounding then float conversion introduces artifacts.
+        cost = float((Decimal(str(price)) * Decimal(str(size)) + Decimal(str(fee_dollars))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         fee_bps = 0 if market.platform == Platform.POLYMARKET else 700
 
         order = Order(

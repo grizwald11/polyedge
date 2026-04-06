@@ -532,11 +532,11 @@ class KalshiClient:
     # Account Data (auth required)
     # ──────────────────────────────────────
 
-    async def get_balance(self) -> Optional[float]:
-        """Get account balance in dollars.
+    async def get_balance(self) -> "Optional[Decimal]":
+        """Get account balance in dollars as Decimal.
 
-        Uses Decimal arithmetic internally to avoid float rounding errors
-        on monetary values (C-1 audit fix).
+        Returns Decimal (not float) to preserve cent-level precision through
+        the entire balance → available → cost comparison path (C-1 audit fix).
         """
         from decimal import Decimal, ROUND_HALF_UP
 

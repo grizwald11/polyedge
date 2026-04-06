@@ -378,19 +378,28 @@ async def _balance_preflight(router: OrderRouter, order: Order) -> Optional[Orde
     for _bal_attempt in range(balance_retries):
         try:
             raw_balance = await asyncio.wait_for(router.kalshi.get_balance(), timeout=5.0)
-            if raw_balance is not None:
-                balance = float(raw_balance)
-                # H-1 FIX: Subtract pending order cost to avoid over-committing
-                available = balance - router.pending_order_cost
-                logger.debug(
-                    "Balance preflight: exchange=$%.2f - pending=$%.2f = available=$%.2f, order=$%.2f",
-                    balance, router.pending_order_cost, available, order.cost,
-                )
-            if raw_balance is not None and order.cost > available:
+            if raw_balance is None:
+                # Balance unavailable — skip preflight (will be caught by exchange)
+                balance_checked = False
+                break
+            # Keep Decimal precision through the entire comparison path (C-1).
+            # raw_balance is Decimal from get_balance(); convert pending and
+            # order cost to Decimal for cent-accurate arithmetic.
+            from decimal import Decimal
+            balance_dec = raw_balance  # Already Decimal from get_balance()
+            pending_dec = Decimal(str(router.pending_order_cost))
+            cost_dec = Decimal(str(order.cost))
+            available_dec = balance_dec - pending_dec
+            logger.debug(
+                "Balance preflight: exchange=$%.2f - pending=$%.2f = available=$%.2f, order=$%.2f",
+                float(balance_dec), float(pending_dec), float(available_dec), float(cost_dec),
+            )
+            if cost_dec > available_dec:
                 order.status = OrderStatus.REJECTED
                 order.rejection_reason = (
-                    f"Insufficient balance: order cost ${order.cost:.2f} > "
-                    f"available ${available:.2f} (exchange=${balance:.2f} - pending=${router.pending_order_cost:.2f})"
+                    f"Insufficient balance: order cost ${float(cost_dec):.2f} > "
+                    f"available ${float(available_dec):.2f} "
+                    f"(exchange=${float(balance_dec):.2f} - pending=${float(pending_dec):.2f})"
                 )
                 router._log_order(order)
                 logger.warning(f"Balance pre-flight failed: {order.rejection_reason}")

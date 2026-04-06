@@ -146,12 +146,31 @@ class TestLiveFillBalancePreflight:
     @pytest.mark.asyncio
     async def test_rejects_when_insufficient_balance(self):
         """Should reject when Kalshi reports insufficient balance."""
+        from decimal import Decimal
         router = _mock_router()
-        # Make balance check fail
-        router.kalshi.get_balance = AsyncMock(return_value=1.0)  # $1 balance
+        # get_balance returns Decimal (matching real KalshiClient)
+        router.kalshi.get_balance = AsyncMock(return_value=Decimal("1.00"))
         order = _make_order(cost=100.0, size=200)
 
         result = await live_fill(router, order)
 
         # Should fail at some validation point
         assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_balance_preflight_uses_decimal_precision(self):
+        """Balance comparison should use Decimal to avoid float rounding errors."""
+        from decimal import Decimal
+        router = _mock_router()
+        # Balance = $10.10, pending = $0.00, order cost = $10.10
+        # With float: 10.1 - 0.0 = 10.099999... which could fail comparison
+        router.kalshi.get_balance = AsyncMock(return_value=Decimal("10.10"))
+        router.pending_order_cost = 0.0
+        order = _make_order(cost=10.10, size=20)
+
+        result = await live_fill(router, order)
+
+        # Should NOT be rejected for insufficient balance —
+        # Decimal("10.10") - Decimal("0.0") >= Decimal("10.10") is True
+        if result.success is False and order.rejection_reason:
+            assert "balance" not in order.rejection_reason.lower()
