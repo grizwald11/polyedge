@@ -13,6 +13,7 @@ from src.core.models import (
     MarketToken,
     Side,
     StrategyName,
+    TokenOutcome,
     Trade,
 )
 from src.execution.position_manager import PositionManager
@@ -133,3 +134,71 @@ class TestEventExposure:
 
         assert pr.get_event_exposure("EVENT-1") == pytest.approx(7.04)  # 3.02 + 4.02
         assert pr.get_event_exposure("EVENT-2") == pytest.approx(0.0)
+
+
+class TestFallbackCorrelationScan:
+    """Tests for question-text similarity fallback when event_ticker is missing."""
+
+    def test_fallback_finds_correlated_positions_by_question(self, tmp_db):
+        """When event_ticker is missing, should find correlated positions via question similarity."""
+        # Two markets with same question but no event_ticker
+        m1 = Market(
+            ticker="MKT-A",
+            question="Will the Fed cut rates in May 2026?",
+            category=MarketCategory.FED_MACRO,
+            tokens=[MarketToken(token_id="MKT-A_yes", outcome=TokenOutcome.YES, price=0.50)],
+        )
+        m2 = Market(
+            ticker="MKT-B",
+            question="Will the Fed cut rates in May 2026?",
+            category=MarketCategory.FED_MACRO,
+            tokens=[MarketToken(token_id="MKT-B_yes", outcome=TokenOutcome.YES, price=0.50)],
+        )
+        tmp_db.upsert_market(m1)
+        tmp_db.upsert_market(m2)
+
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade("MKT-A", "MKT-A_yes", price=0.30, size=10))
+        pm.update_from_trade(_make_trade("MKT-B", "MKT-B_yes", price=0.40, size=10))
+
+        pr = PortfolioRisk(pm, tmp_db)
+        exposure = pr.get_correlated_exposure("MKT-A")
+
+        # Should find BOTH positions (MKT-A + MKT-B), not just MKT-A
+        assert exposure > 3.0  # MKT-A alone is ~3.02
+        assert exposure > 6.0  # Both positions: ~3.02 + ~4.02
+
+    def test_fallback_does_not_match_unrelated_questions(self, tmp_db):
+        """Fallback should not match markets with different questions."""
+        m1 = Market(
+            ticker="MKT-A",
+            question="Will the Fed cut rates?",
+            category=MarketCategory.FED_MACRO,
+            tokens=[MarketToken(token_id="MKT-A_yes", outcome=TokenOutcome.YES, price=0.50)],
+        )
+        m2 = Market(
+            ticker="MKT-B",
+            question="Will Trump win the election?",
+            category=MarketCategory.POLITICS,
+            tokens=[MarketToken(token_id="MKT-B_yes", outcome=TokenOutcome.YES, price=0.50)],
+        )
+        tmp_db.upsert_market(m1)
+        tmp_db.upsert_market(m2)
+
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pm.update_from_trade(_make_trade("MKT-A", "MKT-A_yes", price=0.30, size=10))
+        pm.update_from_trade(_make_trade("MKT-B", "MKT-B_yes", price=0.40, size=10))
+
+        pr = PortfolioRisk(pm, tmp_db)
+        exposure = pr.get_correlated_exposure("MKT-A")
+
+        # Should only find MKT-A (~3.02), not MKT-B
+        assert exposure < 4.0
+
+    def test_fallback_returns_zero_for_unknown_market(self, tmp_db):
+        """Fallback with no market data and no position should return 0."""
+        pm = PositionManager(tmp_db, bankroll=500.0)
+        pr = PortfolioRisk(pm, tmp_db)
+
+        exposure = pr.get_correlated_exposure("NONEXISTENT")
+        assert exposure == 0.0

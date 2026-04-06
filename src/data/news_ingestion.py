@@ -62,9 +62,10 @@ class NewsIngestion:
         ]
         self.max_article_age_seconds = max_article_age_minutes * 60
         self.min_relevance = min_relevance
-        from collections import OrderedDict
-        self._seen_urls: OrderedDict[str, None] = OrderedDict()
+        import time as _time
+        self._seen_urls: dict[str, float] = {}  # url -> timestamp
         self._max_seen_urls = 10000  # Cap to prevent unbounded memory growth
+        self._seen_url_expiry_seconds = 86400  # 24h dedup window
         self._feed_failures: dict[str, int] = {}  # feed_url -> consecutive failure count
         self._feed_last_retry_cycle: dict[str, int] = {}  # feed_url -> cycle number of last retry attempt
 
@@ -130,13 +131,24 @@ class NewsIngestion:
                 feed = feedparser.parse(feed_url)
                 for entry in feed.entries[:10]:
                     url = entry.get("link", "")
+                    import time
                     normalized = self._normalize_url(url)
+                    now = time.time()
                     if normalized in self._seen_urls:
-                        continue
-                    # Evict oldest entries (FIFO) when cap reached
-                    while len(self._seen_urls) >= self._max_seen_urls:
-                        self._seen_urls.popitem(last=False)  # Remove oldest
-                    self._seen_urls[normalized] = None
+                        if now - self._seen_urls[normalized] < self._seen_url_expiry_seconds:
+                            continue
+                    # Periodic cleanup: remove expired entries when cap reached
+                    if len(self._seen_urls) >= self._max_seen_urls:
+                        cutoff = now - self._seen_url_expiry_seconds
+                        expired = [u for u, ts in self._seen_urls.items() if ts < cutoff]
+                        for u in expired:
+                            del self._seen_urls[u]
+                        # If still over cap after expiry cleanup, remove oldest
+                        if len(self._seen_urls) >= self._max_seen_urls:
+                            oldest = sorted(self._seen_urls.items(), key=lambda x: x[1])
+                            for u, _ in oldest[:len(self._seen_urls) // 4]:
+                                del self._seen_urls[u]
+                    self._seen_urls[normalized] = now
 
                     published = self._parse_date(entry)
                     item = NewsItem(

@@ -522,3 +522,33 @@ class TestEnsembleExtremeCombinations:
         result = multi_model_ensemble(forecasts=[f1, f2], market_price=0.50)
         # Disagreement should tank confidence
         assert result.confidence < 0.5
+
+
+class TestMarketPriceValidation:
+    """Tests for market_price bounds validation in ensemble_forecast."""
+
+    def test_zero_market_price_clamped(self):
+        """market_price=0.0 should be clamped to 0.01, not cause errors."""
+        f = _make_forecast(0.60)
+        result = ensemble_forecast(f, market_price=0.0)
+        assert 0.01 <= result.final_probability <= 0.99
+        assert result.market_price == 0.01
+
+    def test_one_market_price_clamped(self):
+        """market_price=1.0 should be clamped to 0.99, not cause errors."""
+        f = _make_forecast(0.40)
+        result = ensemble_forecast(f, market_price=1.0)
+        assert 0.01 <= result.final_probability <= 0.99
+        assert result.market_price == 0.99
+
+    def test_negative_market_price_clamped(self):
+        """market_price=-0.5 should be clamped to 0.01."""
+        f = _make_forecast(0.60)
+        result = ensemble_forecast(f, market_price=-0.5)
+        assert result.market_price == 0.01
+
+    def test_valid_market_price_unchanged(self):
+        """Valid market_price should pass through unchanged."""
+        f = _make_forecast(0.60)
+        result = ensemble_forecast(f, market_price=0.50)
+        assert result.market_price == 0.50

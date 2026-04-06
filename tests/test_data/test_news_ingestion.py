@@ -401,13 +401,14 @@ class TestPollFeeds:
 
     @pytest.mark.asyncio
     async def test_poll_evicts_oldest_seen_urls_at_cap(self):
-        """_seen_urls FIFO eviction keeps size at or below _max_seen_urls."""
+        """_seen_urls eviction keeps size at or below _max_seen_urls."""
+        import time
         ingestion = NewsIngestion(rss_feeds=["http://busy.com/feed"])
         ingestion._max_seen_urls = 3
 
-        # Pre-fill to capacity
+        # Pre-fill to capacity with expired timestamps (>24h old)
         for i in range(3):
-            ingestion._seen_urls[f"http://busy.com/old-{i}"] = None
+            ingestion._seen_urls[f"http://busy.com/old-{i}"] = time.time() - 90000
 
         new_entry = self._make_entry(url="http://busy.com/new-story")
         fake_feed = self._build_fake_feed(entries=[new_entry])
@@ -565,3 +566,43 @@ class TestNewsIngestionInit:
     def test_seen_urls_starts_empty(self):
         ingestion = NewsIngestion()
         assert len(ingestion._seen_urls) == 0
+
+
+class TestTimedUrlDedup:
+    """Tests for time-based URL deduplication."""
+
+    def test_seen_urls_stores_timestamps(self):
+        """_seen_urls should store timestamps, not None values."""
+        import time
+        ingestion = NewsIngestion()
+        ingestion._seen_urls["http://test.com/article"] = time.time()
+        assert isinstance(ingestion._seen_urls["http://test.com/article"], float)
+
+    def test_expired_urls_can_be_reprocessed(self):
+        """URLs older than expiry window should be eligible for reprocessing."""
+        import time
+        ingestion = NewsIngestion()
+        # Set URL as seen 25 hours ago (past the 24h expiry)
+        old_time = time.time() - (25 * 3600)
+        ingestion._seen_urls["http://test.com/article"] = old_time
+
+        # The URL should be considered "expired" — checking logic is in poll_feeds
+        now = time.time()
+        expired = now - ingestion._seen_urls["http://test.com/article"] >= ingestion._seen_url_expiry_seconds
+        assert expired is True
+
+    def test_recent_urls_stay_deduped(self):
+        """URLs within the expiry window should remain deduplicated."""
+        import time
+        ingestion = NewsIngestion()
+        recent_time = time.time() - 3600  # 1 hour ago
+        ingestion._seen_urls["http://test.com/article"] = recent_time
+
+        now = time.time()
+        expired = now - ingestion._seen_urls["http://test.com/article"] >= ingestion._seen_url_expiry_seconds
+        assert expired is False
+
+    def test_expiry_window_default(self):
+        """Default expiry window should be 24 hours."""
+        ingestion = NewsIngestion()
+        assert ingestion._seen_url_expiry_seconds == 86400

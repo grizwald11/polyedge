@@ -645,3 +645,72 @@ class TestExecuteSignals:
         assert call_kwargs is not None
         # 1 - 0.42 = 0.58
         assert abs(call_kwargs.kwargs.get("predicted_probability", call_kwargs[1]["predicted_probability"]) - 0.58) < 0.01
+
+
+class TestFreshPriceInKellySizing:
+    """Kelly sizing and order building must use fresh market price, not stale signal price."""
+
+    @pytest.mark.asyncio
+    async def test_kelly_uses_fresh_market_price_not_signal_price(self, sample_market, sample_signal):
+        """Kelly sizer should receive the current market price, not the stale signal.market_price."""
+        # Signal was generated with stale price 0.34
+        sample_signal.market_price = 0.34
+        # But market has since moved to 0.40 (yes) / 0.60 (no)
+        sample_market.tokens[0].price = 0.40  # YES token
+        sample_market.tokens[1].price = 0.60  # NO token
+
+        mocks = _make_signal_mocks(sample_market, sample_signal)
+        mocks["all_signals"] = [sample_signal]
+        mocks["ai_signals"] = [sample_signal]
+
+        await _execute_signals(**mocks)
+
+        # Kelly sizer should have been called with fresh price 0.40, not stale 0.34
+        kelly_call = mocks["kelly_sizer"].calculate_position_size.call_args
+        assert kelly_call is not None
+        assert kelly_call.kwargs.get("order_price", kelly_call[1].get("order_price")) == 0.40
+
+    @pytest.mark.asyncio
+    async def test_order_built_with_fresh_price(self, sample_market, sample_signal):
+        """Order builder should receive the fresh market price for limit orders."""
+        sample_signal.market_price = 0.34
+        sample_market.tokens[0].price = 0.40
+        sample_market.tokens[1].price = 0.60
+
+        mocks = _make_signal_mocks(sample_market, sample_signal)
+        mocks["all_signals"] = [sample_signal]
+        mocks["ai_signals"] = [sample_signal]
+
+        await _execute_signals(**mocks)
+
+        # build_limit_order should receive fresh price 0.40
+        build_call = mocks["order_builder"].build_limit_order.call_args
+        assert build_call is not None
+        # 4th positional arg is price
+        assert build_call[0][3] == 0.40
+
+    @pytest.mark.asyncio
+    async def test_buy_no_uses_no_price(self, sample_market):
+        """BUY_NO signals should use the fresh NO token price."""
+        sig = Signal(
+            strategy=StrategyName.AI_PROBABILITY,
+            market_id="FED-RATE-CUT-MAY26",
+            market_question="Will the Fed cut rates?",
+            direction=Direction.BUY_NO,
+            edge=0.08,
+            probability_estimate=0.42,
+            market_price=0.60,  # Stale
+            confidence=0.7,
+        )
+        sample_market.tokens[0].price = 0.35  # YES moved
+        sample_market.tokens[1].price = 0.65  # NO moved
+
+        mocks = _make_signal_mocks(sample_market, sig)
+        mocks["all_signals"] = [sig]
+        mocks["ai_signals"] = [sig]
+
+        await _execute_signals(**mocks)
+
+        kelly_call = mocks["kelly_sizer"].calculate_position_size.call_args
+        assert kelly_call is not None
+        assert kelly_call.kwargs.get("order_price", kelly_call[1].get("order_price")) == 0.65

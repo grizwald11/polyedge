@@ -144,6 +144,15 @@ def ensemble_forecast(
     Returns:
         EnsembleForecast with final combined probability
     """
+    # Validate market_price is in a sane range. Stale or corrupt data can
+    # produce 0.0 or 1.0 which breaks divergence/weighting calculations.
+    if market_price <= 0 or market_price >= 1.0:
+        logger.warning(
+            f"Ensemble: invalid market_price={market_price:.4f} — "
+            f"clamping to [0.01, 0.99]"
+        )
+        market_price = max(0.01, min(0.99, market_price))
+
     # Adaptive weighting based on CI width AND divergence from market.
     # Use abs() so inverted bounds still produce a meaningful CI penalty
     # rather than silently zeroing out.

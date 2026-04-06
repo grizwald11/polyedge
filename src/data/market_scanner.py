@@ -7,6 +7,7 @@ ranks by opportunity score, and persists to the database.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from datetime import datetime, timezone
@@ -21,6 +22,11 @@ from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
+# Rate limit / retry constants for market scanning
+SCAN_MAX_RETRIES = 3
+SCAN_BASE_DELAY = 2.0  # seconds, doubles each retry
+SCAN_MAX_CONSECUTIVE_FAILURES = 3  # skip scan entirely after this many
+
 
 class MarketScanner:
     """Scans Kalshi for qualifying trading opportunities."""
@@ -29,19 +35,55 @@ class MarketScanner:
         self.discovery = discovery
         self.db = db
         self.settings = settings
+        self._consecutive_scan_failures = 0
 
     async def scan_all_markets(self) -> list[Market]:
-        """Fetch all active markets from Kalshi API and parse into models."""
-        raw_markets = await self.discovery.get_all_active_markets()
-        markets = []
-        for raw in raw_markets:
-            event_category = raw.get("_event_category", "")
-            market = parse_market(raw, event_category=event_category)
-            if market is not None:
-                markets.append(market)
+        """Fetch all active markets from Kalshi API and parse into models.
 
-        logger.info(f"Parsed {len(markets)} markets from {len(raw_markets)} raw records")
-        return markets
+        Retries with exponential backoff on API failures. After
+        SCAN_MAX_CONSECUTIVE_FAILURES consecutive full failures, returns
+        empty to let the orchestrator use cached data rather than
+        hammering a degraded API.
+        """
+        if self._consecutive_scan_failures >= SCAN_MAX_CONSECUTIVE_FAILURES:
+            logger.error(
+                f"Market scan skipped: {self._consecutive_scan_failures} consecutive "
+                f"failures — API may be degraded. Will retry next cycle."
+            )
+            # Reset counter so we try again next cycle
+            self._consecutive_scan_failures = SCAN_MAX_CONSECUTIVE_FAILURES
+            return []
+
+        last_error = None
+        for attempt in range(SCAN_MAX_RETRIES):
+            try:
+                raw_markets = await self.discovery.get_all_active_markets()
+                self._consecutive_scan_failures = 0  # Reset on success
+                markets = []
+                for raw in raw_markets:
+                    event_category = raw.get("_event_category", "")
+                    market = parse_market(raw, event_category=event_category)
+                    if market is not None:
+                        markets.append(market)
+
+                logger.info(f"Parsed {len(markets)} markets from {len(raw_markets)} raw records")
+                return markets
+            except Exception as e:
+                last_error = e
+                delay = SCAN_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"Market scan attempt {attempt + 1}/{SCAN_MAX_RETRIES} failed: {e} "
+                    f"— retrying in {delay:.0f}s"
+                )
+                if attempt < SCAN_MAX_RETRIES - 1:
+                    await asyncio.sleep(delay)
+
+        self._consecutive_scan_failures += 1
+        logger.error(
+            f"Market scan failed after {SCAN_MAX_RETRIES} retries: {last_error} "
+            f"(consecutive failures: {self._consecutive_scan_failures})"
+        )
+        return []
 
     def filter_markets(self, markets: list[Market]) -> list[Market]:
         """Apply all configured filters to raw market list."""

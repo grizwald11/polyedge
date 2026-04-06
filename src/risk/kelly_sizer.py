@@ -348,6 +348,16 @@ class KellySizer:
         # Use the higher of market_price and order_price for contract conversion
         cost_price = max(market_price, order_price) if order_price and order_price > 0 else market_price
 
+        # Validate cost_price is in a sane range. Corrupt market data or
+        # extreme edge values can produce cost_price <= 0 or >= 1, which
+        # would cause division errors or nonsensical contract counts.
+        if cost_price <= 0 or cost_price >= 1.0:
+            logger.warning(
+                f"Kelly: invalid cost_price={cost_price:.4f} "
+                f"(market_price={market_price:.4f}, order_price={order_price}) — returning 0"
+            )
+            return 0
+
         kelly_dollars = self._apply_liquidity_adjustment(kelly_dollars, cost_price, market_liquidity)
 
         kelly_dollars, max_position = self._apply_caps(kelly_dollars, bankroll, probability, current_exposure, strategy=strategy)

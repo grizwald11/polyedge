@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     volume_1h REAL DEFAULT 0,
     liquidity REAL DEFAULT 0,
     is_synthetic INTEGER DEFAULT 0,
-    FOREIGN KEY (market_id) REFERENCES markets(ticker)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_market_time ON market_snapshots(market_id, timestamp);
 
@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS signals (
     risk_failed_checks TEXT DEFAULT '',  -- H-5: comma-separated failed gate names
     risk_warnings TEXT DEFAULT '',       -- H-5: comma-separated warning messages
     status TEXT DEFAULT 'generated',     -- H-1: generated|risk_gated|executed|skipped
-    FOREIGN KEY (market_id) REFERENCES markets(ticker)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_signals_market ON signals(market_id);
 CREATE INDEX IF NOT EXISTS idx_signals_strategy ON signals(strategy);
@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS orders (
     cancelled_at TEXT,
     rejection_reason TEXT,
     exchange_order_id TEXT,  -- Kalshi/Polymarket order ID for cancel/lookup
-    FOREIGN KEY (market_id) REFERENCES markets(ticker)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_orders_market ON orders(market_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS calibration_records (
     brier_score REAL,        -- (predicted - actual)^2
     profit_loss REAL,        -- realized P&L for this prediction
     prompt_variant TEXT DEFAULT '',  -- A/B test variant used for this prediction
-    FOREIGN KEY (market_id) REFERENCES markets(ticker)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_market ON calibration_records(market_id);
 CREATE INDEX IF NOT EXISTS idx_calibration_resolved ON calibration_records(actual_outcome);
@@ -255,7 +255,7 @@ CREATE TABLE IF NOT EXISTS whale_trades (
     size REAL DEFAULT 0,
     price REAL DEFAULT 0,
     detected_at TEXT NOT NULL,
-    FOREIGN KEY (wallet_address) REFERENCES whale_wallets(address)
+    FOREIGN KEY (wallet_address) REFERENCES whale_wallets(address) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_whale_trades_market ON whale_trades(market_id);
 
@@ -291,7 +291,7 @@ CREATE TABLE IF NOT EXISTS divergence_records (
     actual_outcome INTEGER,
     claude_was_right INTEGER,
     resolved_at TEXT,
-    FOREIGN KEY (market_id) REFERENCES markets(ticker)
+    FOREIGN KEY (market_id) REFERENCES markets(ticker) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_divergence_market ON divergence_records(market_id);
 CREATE INDEX IF NOT EXISTS idx_divergence_category ON divergence_records(category);
@@ -707,7 +707,7 @@ class Database(
                     position_size REAL DEFAULT 0,
                     realized_pnl REAL DEFAULT 0,
                     timestamp TEXT NOT NULL,
-                    FOREIGN KEY (market_id) REFERENCES markets(ticker)
+                    FOREIGN KEY (market_id) REFERENCES markets(ticker) ON DELETE CASCADE
                 )
             """)
             conn.execute(

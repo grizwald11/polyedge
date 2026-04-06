@@ -370,3 +370,17 @@ class TestAuthMiddleware:
             # /static/ path — should not return 401 (may 404 if no file, but not 401)
             resp = client.get("/static/style.css")
             assert resp.status_code != 401
+
+    def test_empty_client_host_rejected(self, mock_db):
+        """When client.host is empty (e.g., behind proxy), should be rejected without key."""
+        import os
+        with patch.dict(os.environ, {}, clear=True):
+            # Ensure no dashboard key is set
+            os.environ.pop("POLYEDGE_DASHBOARD_KEY", None)
+            app = create_app(mock_db)
+
+            # Patch the request.client to have empty host (simulates proxy)
+            client = TestClient(app, raise_server_exceptions=False)
+            with patch("starlette.requests.Request.client", new=None):
+                resp = client.get("/api/stats")
+                assert resp.status_code == 401

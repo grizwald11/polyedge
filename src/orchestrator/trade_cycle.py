@@ -247,24 +247,37 @@ async def _execute_signals(
 
         current_exposure = position_manager.get_total_exposure()
         strategy_name = signal.strategy.value if hasattr(signal.strategy, 'value') else str(signal.strategy)
+
+        # Use fresh market price instead of stale signal.market_price which
+        # was captured at signal generation time (potentially minutes ago).
+        # Stale prices cause Kelly to mis-size positions on moved markets.
+        if signal.direction in (Direction.BUY_YES, Direction.SELL_YES):
+            fresh_price = market.yes_price
+        else:
+            fresh_price = market.no_price
+        # Fall back to signal price if fresh price is unavailable (e.g. missing tokens)
+        if fresh_price <= 0:
+            fresh_price = signal.market_price
+
         contracts = kelly_sizer.calculate_position_size(
             edge=signal.edge,
             probability=signal.probability_estimate,
             bankroll=bankroll,
             current_exposure=current_exposure,
-            order_price=signal.market_price,
+            order_price=fresh_price,
             confidence=signal.confidence,
             strategy=strategy_name,
         )
 
         # M-12: Log Kelly sizing details for debugging and audit
         if contracts > 0:
-            cost_price = max(signal.probability_estimate - signal.edge, signal.market_price) if signal.market_price > 0 else (signal.probability_estimate - signal.edge)
+            cost_price = max(signal.probability_estimate - signal.edge, fresh_price) if fresh_price > 0 else (signal.probability_estimate - signal.edge)
             bankroll_fraction = (contracts * cost_price) / bankroll if bankroll > 0 else 0.0
             logger.debug(
                 f"Kelly details for {signal.market_id}: edge={signal.edge:.3f}, "
                 f"prob={signal.probability_estimate:.3f}, bankroll_frac={bankroll_fraction:.4f}, "
                 f"final_contracts={contracts}, cost_price=${cost_price:.3f}, "
+                f"fresh_price=${fresh_price:.3f}, stale_price=${signal.market_price:.3f}, "
                 f"strategy={strategy_name}"
             )
 
@@ -279,7 +292,7 @@ async def _execute_signals(
             )
             continue
 
-        price = signal.market_price
+        price = fresh_price
         if settings.trading.prefer_maker:
             order = order_builder.build_limit_order(market, signal, contracts, price)
         else:

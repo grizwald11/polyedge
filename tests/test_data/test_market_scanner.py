@@ -13,7 +13,11 @@ from src.core.models import (
     MarketCategory,
     MarketToken,
 )
-from src.data.market_scanner import MarketScanner
+from src.data.market_scanner import (
+    MarketScanner,
+    SCAN_MAX_RETRIES,
+    SCAN_MAX_CONSECUTIVE_FAILURES,
+)
 from src.storage.database import Database
 
 
@@ -240,3 +244,64 @@ class TestScanCycle:
         scanner = MarketScanner(discovery, scanner_db, scanner_settings)
         result = await scanner.run_scan_cycle()
         assert result == []
+
+
+class TestScanRetryAndRateLimit:
+    """Tests for retry/backoff and consecutive failure tracking in scan_all_markets."""
+
+    @pytest.mark.asyncio
+    async def test_retries_on_api_failure(self, scanner_settings, scanner_db):
+        """scan_all_markets should retry SCAN_MAX_RETRIES times on failure."""
+        discovery = MagicMock()
+        discovery.get_all_active_markets = AsyncMock(
+            side_effect=RuntimeError("API error")
+        )
+        scanner = MarketScanner(discovery, scanner_db, scanner_settings)
+
+        result = await scanner.scan_all_markets()
+
+        assert result == []
+        assert discovery.get_all_active_markets.call_count == SCAN_MAX_RETRIES
+        assert scanner._consecutive_scan_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_succeeds_on_retry(self, scanner_settings, scanner_db):
+        """If API fails once then succeeds, should return markets."""
+        discovery = MagicMock()
+        discovery.get_all_active_markets = AsyncMock(
+            side_effect=[RuntimeError("timeout"), []]
+        )
+        scanner = MarketScanner(discovery, scanner_db, scanner_settings)
+
+        result = await scanner.scan_all_markets()
+
+        assert result == []  # Empty list but success
+        assert scanner._consecutive_scan_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_consecutive_failures_skip_scan(self, scanner_settings, scanner_db):
+        """After SCAN_MAX_CONSECUTIVE_FAILURES, scan should be skipped."""
+        discovery = MagicMock()
+        discovery.get_all_active_markets = AsyncMock(
+            side_effect=RuntimeError("API down")
+        )
+        scanner = MarketScanner(discovery, scanner_db, scanner_settings)
+        scanner._consecutive_scan_failures = SCAN_MAX_CONSECUTIVE_FAILURES
+
+        result = await scanner.scan_all_markets()
+
+        assert result == []
+        # Should NOT have called the API — skipped entirely
+        discovery.get_all_active_markets.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_consecutive_failures_reset_on_success(self, scanner_settings, scanner_db):
+        """Successful scan should reset the consecutive failure counter."""
+        discovery = MagicMock()
+        discovery.get_all_active_markets = AsyncMock(return_value=[])
+        scanner = MarketScanner(discovery, scanner_db, scanner_settings)
+        scanner._consecutive_scan_failures = 2
+
+        await scanner.scan_all_markets()
+
+        assert scanner._consecutive_scan_failures == 0

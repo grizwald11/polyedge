@@ -19,6 +19,14 @@ class ObviousNoStrategy:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        # Validate probability multiplier — misconfiguration causes bad signals
+        multiplier = settings.trading.obvious_no_probability_multiplier
+        if multiplier <= 0 or multiplier > 0.50:
+            raise ValueError(
+                f"obvious_no_probability_multiplier must be in (0, 0.50], "
+                f"got {multiplier}. Values >0.50 overestimate P(YES), "
+                f"values <=0 produce nonsensical probabilities."
+            )
 
     def scan_for_opportunities(self, markets: list[Market]) -> list[Signal]:
         """Scan markets for obvious NO opportunities.

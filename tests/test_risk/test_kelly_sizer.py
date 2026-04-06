@@ -540,3 +540,29 @@ class TestConfidenceAdjustment:
         # Monotonically non-decreasing
         for i in range(len(sizes) - 1):
             assert sizes[i] <= sizes[i + 1]
+
+
+class TestCostPriceValidation:
+    """Tests for cost_price bounds validation in Kelly sizing."""
+
+    def test_negative_cost_price_returns_zero(self, sizer):
+        """When probability - edge < 0, cost_price is negative → should return 0."""
+        # edge > probability means market_price = probability - edge < 0
+        result = sizer.calculate_position_size(
+            edge=0.60, probability=0.50, bankroll=500.0, order_price=-0.10,
+        )
+        assert result == 0
+
+    def test_cost_price_at_one_returns_zero(self, sizer):
+        """cost_price >= 1.0 is invalid for prediction markets → should return 0."""
+        result = sizer.calculate_position_size(
+            edge=0.05, probability=0.99, bankroll=500.0, order_price=1.0,
+        )
+        assert result == 0
+
+    def test_valid_cost_price_returns_contracts(self, sizer):
+        """Normal cost_price in (0, 1) should produce non-zero contracts."""
+        result = sizer.calculate_position_size(
+            edge=0.10, probability=0.50, bankroll=500.0, order_price=0.40,
+        )
+        assert result > 0

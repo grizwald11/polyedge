@@ -1,6 +1,7 @@
 """Tests for the Obvious NO strategy."""
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -160,3 +161,32 @@ class TestObviousNoStrategy:
         high_sig = next(s for s in signals if s.market_id == "HIGH")
         # YES=0.02 should have higher confidence than YES=0.05
         assert low_sig.confidence > high_sig.confidence
+
+
+class TestMultiplierValidation:
+    """Tests for obvious_no_probability_multiplier validation."""
+
+    def test_zero_multiplier_raises(self):
+        settings = MagicMock()
+        settings.trading.obvious_no_probability_multiplier = 0.0
+        with pytest.raises(ValueError, match="obvious_no_probability_multiplier"):
+            ObviousNoStrategy(settings)
+
+    def test_excessive_multiplier_raises(self):
+        settings = MagicMock()
+        settings.trading.obvious_no_probability_multiplier = 0.8
+        with pytest.raises(ValueError, match="obvious_no_probability_multiplier"):
+            ObviousNoStrategy(settings)
+
+    def test_negative_multiplier_raises(self):
+        settings = MagicMock()
+        settings.trading.obvious_no_probability_multiplier = -0.1
+        with pytest.raises(ValueError, match="obvious_no_probability_multiplier"):
+            ObviousNoStrategy(settings)
+
+    def test_valid_multiplier_accepted(self):
+        settings = MagicMock()
+        settings.trading.obvious_no_probability_multiplier = 0.30
+        settings.trading.min_edge_ai = 0.03
+        strategy = ObviousNoStrategy(settings)
+        assert strategy is not None

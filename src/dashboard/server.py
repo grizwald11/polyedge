@@ -118,14 +118,17 @@ def create_app(
         else:
             # M-12: No key configured — restrict to localhost only
             client_host = getattr(request.client, "host", "") if request.client else ""
-            # H-9: Removed "testclient" — testing artifact that bypassed auth in production
-            _localhost_hosts = {"127.0.0.1", "::1", "localhost", ""}
-            if client_host not in _localhost_hosts:
+            # H-9: Removed "testclient" and empty string — both could bypass auth.
+            # Empty string occurs when request.client is None (e.g., behind a
+            # proxy that doesn't forward client info), which must NOT be trusted.
+            _localhost_hosts = {"127.0.0.1", "::1", "localhost"}
+            if not client_host or client_host not in _localhost_hosts:
                 return Response(
                     content='{"detail": "Unauthorized — set POLYEDGE_DASHBOARD_KEY for remote access"}',
                     status_code=401,
                     media_type="application/json",
                 )
+            logger.debug(f"Dashboard accessed from localhost ({client_host}) without auth key")
         return await call_next(request)
 
     # Static files

@@ -44,11 +44,14 @@ class PortfolioRisk:
         """
         event_ticker = self._get_event_ticker(market_id)
         if not event_ticker:
-            # Fallback: use market_id itself as the "event" — this ensures we
-            # at least count our own exposure in this market, rather than
-            # returning 0 and silently allowing correlated overexposure.
-            pos = self.positions.get_position(market_id)
-            return pos.cost_basis if pos else 0.0
+            # Fallback: scan all positions for question-text similarity.
+            # Without this, missing event_ticker causes undercounting of
+            # correlated exposure, allowing risk limits to be exceeded.
+            logger.warning(
+                f"Missing event_ticker for {market_id} — falling back to "
+                f"question-text similarity scan for correlation"
+            )
+            return self._fallback_correlation_scan(market_id)
 
         # Normalize event ticker to enable cross-platform correlation (M-14).
         # e.g., "KALSHI:TRUMP-WINS" and "POLY:TRUMP-WINS" → "TRUMP-WINS"
@@ -133,6 +136,41 @@ class PortfolioRisk:
                 )
 
         return warnings
+
+    def _fallback_correlation_scan(self, market_id: str) -> float:
+        """Scan all positions for question-text similarity when event_ticker is missing.
+
+        Matches markets whose normalized question text shares a common stem
+        (first 60 chars, lowered, stripped). This catches cross-platform
+        duplicates and related markets that should be treated as correlated.
+        """
+        market_data = self.db.get_market(market_id)
+        if not market_data:
+            pos = self.positions.get_position(market_id)
+            return pos.cost_basis if pos else 0.0
+
+        target_question = (market_data.get("question") or "").lower().strip()
+        if not target_question:
+            pos = self.positions.get_position(market_id)
+            return pos.cost_basis if pos else 0.0
+
+        # Use first 60 chars as a similarity stem — catches "Will the Fed cut
+        # rates in May 2026?" vs "Will the Fed cut rates in May 2026? (Kalshi)"
+        target_stem = target_question[:60]
+        total = 0.0
+        for pos in self.positions.get_all_positions():
+            pos_market = self.db.get_market(pos.market_id)
+            if pos_market:
+                pos_q = (pos_market.get("question") or "").lower().strip()
+                if pos_q[:60] == target_stem:
+                    total += pos.cost_basis
+
+        if total > 0:
+            logger.info(
+                f"Fallback correlation scan for {market_id}: found ${total:.2f} "
+                f"correlated exposure via question similarity"
+            )
+        return total
 
     def _get_event_ticker(self, market_id: str, platform: str = None) -> Optional[str]:
         """Look up the event_ticker for a market from the database (cached)."""
