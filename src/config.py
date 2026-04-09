@@ -72,6 +72,7 @@ class TradingConfig(BaseModel):
     min_edge_news: float = 0.04  # News edges are fast/temporary but 3% was too noisy
     min_edge_mean_reversion: float = 0.05  # Mean reversion: moderate edge required
     min_edge_late_resolution: float = 0.10  # Late resolution: high edge (speed advantage)
+    min_edge_macro_dip_sniper: float = 0.05  # Macro dip sniper: asymmetric payoff, modest edge OK
     kelly_fraction: float = 0.25
     prefer_maker: bool = True
     daily_loss_limit_pct: float = 0.08
@@ -95,7 +96,7 @@ class TradingConfig(BaseModel):
             raise ValueError(f"mode must be 'paper' or 'live', got '{v}'")
         return v
 
-    @field_validator("min_edge_ai", "min_edge_arb", "min_edge_obvious_no", "min_edge_news", "min_edge_mean_reversion", "min_edge_late_resolution")
+    @field_validator("min_edge_ai", "min_edge_arb", "min_edge_obvious_no", "min_edge_news", "min_edge_mean_reversion", "min_edge_late_resolution", "min_edge_macro_dip_sniper")
     @classmethod
     def min_edge_non_negative(cls, v: float, info) -> float:
         if v < 0:

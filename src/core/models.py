@@ -133,6 +133,7 @@ class StrategyName(str, Enum):
     CROSS_PLATFORM_ARB = "cross_platform_arb"
     MEAN_REVERSION = "mean_reversion"
     LATE_RESOLUTION = "late_resolution"
+    MACRO_DIP_SNIPER = "macro_dip_sniper"
 
 
 class MarketCategory(str, Enum):

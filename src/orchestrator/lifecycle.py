@@ -51,6 +51,7 @@ from src.strategies.ai_probability import AIProbabilityStrategy
 from src.strategies.cross_arb import CrossArbStrategy
 from src.strategies.cross_platform_arb import CrossPlatformArbStrategy
 from src.strategies.late_resolution import LateResolutionStrategy
+from src.strategies.macro_dip_sniper import MacroDipSniperStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.news_reactive import NewsReactiveStrategy
 from src.strategies.obvious_no import ObviousNoStrategy
@@ -65,6 +66,7 @@ async def run_trading_loop(
     alert_manager, daily_report, metrics, settings, interval,
     poly_scanner=None, cross_platform_arb=None,
     mean_reversion_strategy=None, late_resolution_strategy=None,
+    macro_dip_sniper_strategy=None,
     price_monitor=None,
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
@@ -140,6 +142,7 @@ async def run_trading_loop(
                 cross_platform_arb=cross_platform_arb,
                 mean_reversion_strategy=mean_reversion_strategy,
                 late_resolution_strategy=late_resolution_strategy,
+                macro_dip_sniper_strategy=macro_dip_sniper_strategy,
                 price_monitor=price_monitor,
             ), timeout=settings.execution.cycle_timeout_seconds)
             stats = scanner.db.get_stats()
@@ -237,6 +240,7 @@ class _Components:
         self.portfolio_risk: PortfolioRisk | None = None
         self.mean_reversion_strategy: MeanReversionStrategy | None = None
         self.late_resolution_strategy: LateResolutionStrategy | None = None
+        self.macro_dip_sniper_strategy: MacroDipSniperStrategy | None = None
         self.poly_scanner = None
         self.cross_platform_arb: CrossPlatformArbStrategy | None = None
         self.order_builder: OrderBuilder | None = None
@@ -338,6 +342,12 @@ async def _setup_strategies(settings, c: _Components, logger) -> None:
         logger.info("Mean reversion strategy enabled")
     except Exception as e:
         logger.info(f"Mean reversion strategy disabled: {e}")
+
+    try:
+        c.macro_dip_sniper_strategy = MacroDipSniperStrategy(settings, c.forecaster)
+        logger.info("Macro dip sniper strategy enabled")
+    except Exception as e:
+        logger.info(f"Macro dip sniper strategy disabled: {e}")
 
     try:
         news_researcher = None  # Will be set below if news ingestion is available
@@ -874,6 +884,7 @@ async def main() -> None:
             cross_platform_arb=c.cross_platform_arb,
             mean_reversion_strategy=c.mean_reversion_strategy,
             late_resolution_strategy=c.late_resolution_strategy,
+            macro_dip_sniper_strategy=c.macro_dip_sniper_strategy,
             price_monitor=c.price_monitor,
             shutdown_event=shutdown_event,
         )

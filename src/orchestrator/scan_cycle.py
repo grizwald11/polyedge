@@ -179,6 +179,7 @@ async def _generate_all_signals(
     cross_arb_strategy, whale_strategy, cross_platform_arb,
     alert_manager, metrics, logger,
     mean_reversion_strategy=None, late_resolution_strategy=None,
+    macro_dip_sniper_strategy=None, regime_analysis=None,
 ):
     """Generate signals from all strategies. Returns (all_signals, ai_signals, no_signals)."""
     all_signals: list = []
@@ -255,6 +256,17 @@ async def _generate_all_signals(
         except Exception as e:
             logger.error(f"Late resolution strategy failed: {e}", exc_info=True)
             _strategy_failures.append("late_resolution")
+
+    if macro_dip_sniper_strategy is not None:
+        _strategies_attempted += 1
+        try:
+            dip_signals = await macro_dip_sniper_strategy.generate_signals(
+                markets, regime_analysis=regime_analysis,
+            )
+            all_signals.extend(dip_signals)
+        except Exception as e:
+            logger.error(f"Macro dip sniper strategy failed: {e}", exc_info=True)
+            _strategy_failures.append("macro_dip_sniper")
 
     # M-20: Warn if ANY strategies failed (degraded mode), escalate if ALL failed
     if _strategy_failures and _strategies_attempted > 0:
@@ -463,6 +475,7 @@ async def scan_and_trade(
     cross_platform_arb=None,
     mean_reversion_strategy=None,
     late_resolution_strategy=None,
+    macro_dip_sniper_strategy=None,
     price_monitor=None,
 ):
     """Execute one complete scan-assess-trade cycle.
@@ -551,6 +564,7 @@ async def scan_and_trade(
         logger.debug(f"Warning check failed: {e}")
 
     # 3b. Regime detection — adaptive thresholds based on market volatility
+    regime_analysis = None
     try:
         from src.analysis.regime_detector import RegimeDetector
         _regime_detector = RegimeDetector()
@@ -630,6 +644,8 @@ async def scan_and_trade(
         alert_manager, metrics, logger,
         mean_reversion_strategy=mean_reversion_strategy,
         late_resolution_strategy=late_resolution_strategy,
+        macro_dip_sniper_strategy=macro_dip_sniper_strategy,
+        regime_analysis=regime_analysis,
     )
 
     if not all_signals:
