@@ -127,6 +127,10 @@ class TestGracefulDegradation:
             patch.object(enricher.metaculus, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.manifold, "get_context", new_callable=AsyncMock, return_value=""),
             patch.object(enricher.polymarket, "get_context", new_callable=AsyncMock, return_value=""),
+            # event_calendar is a synchronous local source that emits upcoming
+            # catalysts (e.g., FOMC meetings) from a static list — must also
+            # return empty for the "no sources at all" case to hold.
+            patch.object(enricher.event_calendar, "get_context_string", return_value=""),
         ):
             context = await enricher.get_context(market)
 

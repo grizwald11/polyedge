@@ -491,8 +491,13 @@ class TestDateParsing:
         assert researcher._is_stale(result, max_age_days=7) is False
 
     def test_date_only(self):
+        # Use a dynamic date 2 days ago — hardcoded dates drift over time and
+        # cause this test to fail once the fixed date crosses the max_age_days
+        # window. 2 days is comfortably within the 7-day default.
+        from datetime import datetime, timedelta, timezone
+        two_days_ago = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
         researcher = NewsResearcher()
-        result = self._make_result("2026-04-01")
+        result = self._make_result(two_days_ago)
         assert researcher._is_stale(result, max_age_days=7) is False
 
     def test_space_separator_with_tz(self):
