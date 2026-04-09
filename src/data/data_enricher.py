@@ -79,38 +79,44 @@ class DataEnricher:
         tasks: dict[str, asyncio.Task] = {}
         results: dict[str, str] = {}
 
-        def _check_or_fetch(name: str, cache: 'TTLCache', cache_key: str, coro):
-            """Use cache if available, otherwise schedule the coroutine."""
+        def _check_or_fetch(name: str, cache: 'TTLCache', cache_key: str, coro_factory):
+            """Use cache if available, otherwise schedule the coroutine.
+
+            Takes a *factory* (zero-arg callable returning a coroutine) rather
+            than an already-built coroutine, so that nothing is awaited on a
+            cache hit — avoids "coroutine was never awaited" warnings and the
+            wasted allocation.
+            """
             cached = cache.get(cache_key)
             if cached is not None:
                 results[name] = cached
             else:
-                tasks[name] = coro
+                tasks[name] = coro_factory()
 
         # News — always (short cache)
         _check_or_fetch("news", self._news_cache, f"news:{market.question[:80]}",
-                        self.news_researcher.get_context(market.question))
+                        lambda: self.news_researcher.get_context(market.question))
 
         # Economic data — FED_MACRO and EARNINGS (long cache)
         if category in (MarketCategory.FED_MACRO, MarketCategory.EARNINGS):
             _check_or_fetch("fred", self._econ_cache, "fred:macro",
-                            self.fred.get_macro_summary())
+                            lambda: self.fred.get_macro_summary())
 
         # Cleveland Fed + FedWatch — FED_MACRO only (long cache)
         if category == MarketCategory.FED_MACRO:
             _check_or_fetch("cleveland_fed", self._econ_cache, "cleveland_fed",
-                            self.cleveland_fed.get_context())
+                            lambda: self.cleveland_fed.get_context())
             _check_or_fetch("fedwatch", self._econ_cache, "fedwatch",
-                            self.fedwatch.get_context())
+                            lambda: self.fedwatch.get_context())
 
         # Community forecasts and cross-platform — all categories (medium cache)
         _check_or_fetch("manifold", self._community_cache, f"manifold:{market.question[:80]}",
-                        self.manifold.get_context(market.question))
+                        lambda: self.manifold.get_context(market.question))
         _check_or_fetch("metaculus", self._community_cache, f"metaculus:{market.question[:80]}",
-                        self.metaculus.get_context(market.question))
+                        lambda: self.metaculus.get_context(market.question))
         _check_or_fetch("polymarket", self._community_cache,
                         f"polymarket:{market.question[:80]}",
-                        self.polymarket.get_context(market.question, market.yes_price))
+                        lambda: self.polymarket.get_context(market.question, market.yes_price))
 
         # Run remaining (non-cached) tasks concurrently with per-source timeouts
         # to prevent priority inversion (C-12). Higher-priority sources get more time.
