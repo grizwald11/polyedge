@@ -390,6 +390,20 @@ class AIProbabilityStrategy:
             )
             return None
 
+        # Wide-spread filter: if the bid-ask spread exceeds 5¢, the risk engine
+        # will almost certainly reject the signal downstream (its rule is
+        # "spread consumes >50% of edge"), and a spread that wide means the
+        # market is illiquid enough that Kelly can't size a real position
+        # anyway. Filter before calling Claude to save tokens. We still run
+        # Claude on markets up to 5¢ spread because ai_probability is
+        # sometimes called on wider-spread news-catalyst markets.
+        if market.spread > 0.05:
+            logger.debug(
+                f"Wide spread rejection: {market.ticker} spread={market.spread:.1%} "
+                f"(> 5¢ threshold, would be gated by risk engine)"
+            )
+            return None
+
         # 1. Staleness check
         if self._check_staleness(market):
             return None

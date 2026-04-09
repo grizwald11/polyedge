@@ -127,24 +127,29 @@ class MacroDipSniperStrategy:
         """
         # Regime gate — only hunt in calm / euphoric regimes
         if not self._is_low_vol_regime(regime_analysis):
-            logger.debug(
+            logger.info(
                 "Macro dip sniper: regime gate closed "
-                f"(regime={getattr(regime_analysis, 'regime', 'unknown')})"
+                f"(regime={getattr(regime_analysis, 'regime', 'unknown')}, "
+                f"scanned {len(markets)} markets)"
             )
             return []
 
         # Concurrency cap
         if len(self._active_entries) >= MAX_CONCURRENT_POSITIONS:
-            logger.debug(
+            logger.info(
                 f"Macro dip sniper: at max concurrent positions "
-                f"({MAX_CONCURRENT_POSITIONS})"
+                f"({MAX_CONCURRENT_POSITIONS}) — skipping cycle"
             )
             return []
 
-        # Filter to candidate threshold markets
+        # Filter to candidate threshold markets. Log the count unconditionally
+        # so operators can see empty-universe cycles and tune filters.
         candidates = [m for m in markets if self._is_candidate(m)]
         if not candidates:
-            logger.debug("Macro dip sniper: no candidate threshold markets this cycle")
+            logger.info(
+                f"Macro dip sniper: scanned {len(markets)} markets, "
+                f"0 threshold candidates (regime=LOW_VOL)"
+            )
             return []
 
         # Cap Claude API spend per cycle. Prefer cheaper entries first since

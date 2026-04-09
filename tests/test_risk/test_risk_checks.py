@@ -324,6 +324,51 @@ class TestCheckExistingPosition:
         assert len(failed) > 0
         assert "Already have position" in failed[0]
 
+    def test_rejects_same_ticker_add_exceeding_per_position_cap(
+        self, settings, signal
+    ):
+        """Regression: a second BUY_YES on the same ticker must be rejected
+        when the combined cost would exceed max_position_pct, even if
+        position additions are allowed."""
+        settings.trading.allow_position_additions = True
+        settings.trading.max_position_pct = 0.05
+        bankroll = 10_000.0
+        # Existing position already at 4.5% of bankroll ($450).
+        positions = MagicMock()
+        positions.has_position.return_value = True
+        existing = MagicMock()
+        existing.direction = Direction.BUY_YES
+        existing.cost_basis = 450.0
+        positions.get_position.return_value = existing
+        failed, warnings = [], []
+        # A $150 add would push combined to $600, over the $500 cap.
+        check_existing_position(
+            settings, positions, signal, failed, warnings,
+            proposed_cost=150.0, bankroll=bankroll,
+        )
+        assert any("concentration cap" in f.lower() for f in failed), failed
+
+    def test_allows_same_ticker_add_within_per_position_cap(
+        self, settings, signal
+    ):
+        settings.trading.allow_position_additions = True
+        settings.trading.max_position_pct = 0.05
+        bankroll = 10_000.0
+        positions = MagicMock()
+        positions.has_position.return_value = True
+        existing = MagicMock()
+        existing.direction = Direction.BUY_YES
+        existing.cost_basis = 200.0
+        positions.get_position.return_value = existing
+        failed, warnings = [], []
+        # A $100 add → combined $300, well under $500 cap.
+        check_existing_position(
+            settings, positions, signal, failed, warnings,
+            proposed_cost=100.0, bankroll=bankroll,
+        )
+        assert len(failed) == 0
+        assert any("adding to existing" in w.lower() for w in warnings)
+
 
 # ---------------------------------------------------------------------------
 # check_obvious_no_limit — per-position cap

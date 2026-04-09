@@ -264,6 +264,9 @@ async def _execute_signals(
                 f"Signal for unknown market {signal.market_id} "
                 f"(strategy={signal.strategy.value}) — skipped"
             )
+            scanner.db.update_signal_risk_result(
+                signal_id, False, ["market_not_in_lookup"], [],
+            )
             continue
 
         current_exposure = position_manager.get_total_exposure()
@@ -311,6 +314,9 @@ async def _execute_signals(
                 f"Kelly sized to 0 contracts for {signal.market_id} "
                 f"(exposure=${current_exposure:.2f}, edge={signal.edge:.1%})"
             )
+            scanner.db.update_signal_risk_result(
+                signal_id, False, ["kelly_zero_contracts"], [],
+            )
             continue
 
         price = fresh_price
@@ -320,6 +326,9 @@ async def _execute_signals(
             order = order_builder.build_market_order(market, signal, contracts)
         if order is None:
             logger.warning(f"Could not build order for {signal.market_id} — missing tokens")
+            scanner.db.update_signal_risk_result(
+                signal_id, False, ["order_build_failed"], [],
+            )
             continue
         proposed_cost = order.cost
 

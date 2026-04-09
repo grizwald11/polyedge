@@ -270,9 +270,24 @@ class CrossArbStrategy:
         if not self._is_mutually_exclusive(markets):
             return []
 
-        # Skip events with stale/zero prices — these create false edge signals
-        valid_markets = [m for m in markets if m.yes_price > 0]
+        # Skip events with stale/zombie prices — these create false edge signals.
+        # A valid mutual-exclusivity arb requires prices in a tradeable range;
+        # inactive markets often default to yes_price ≈ 0.995 or ≈ 0.005 on
+        # every outcome, producing absurd basket sums like 3.98 across 4
+        # candidates that Kelly's _check_price_viability will then reject
+        # (market_price < $0.03). Filter those upstream instead of generating
+        # signals we know will be silently dropped.
+        valid_markets = [
+            m for m in markets
+            if 0.03 <= m.yes_price <= 0.97
+        ]
         if len(valid_markets) < 2:
+            return []
+
+        # Require at least one market in the basket to have non-zero 24h
+        # volume. If the whole event is dormant, the prices are stale quotes
+        # and no arb can actually be filled.
+        if not any(getattr(m, "volume_24h", 0) > 0 for m in valid_markets):
             return []
 
         yes_sum = sum(m.yes_price for m in valid_markets)

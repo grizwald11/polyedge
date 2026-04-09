@@ -403,7 +403,10 @@ def load_settings(config_path: str | Path = "config/settings.yaml") -> Settings:
     # Load .env file (relative to config_path's parent directory)
     config_path = Path(config_path)
     env_path = config_path.parent / ".env"
-    load_dotenv(env_path)
+    # override=True: config/.env is the source of truth for secrets. Without
+    # this, a stale KALSHI_API_KEY_ID lingering in the parent shell's
+    # environment silently shadows the .env file and causes baffling 401s.
+    load_dotenv(env_path, override=True)
 
     # Load YAML if it exists
     yaml_data = {}

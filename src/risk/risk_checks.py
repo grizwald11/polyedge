@@ -233,22 +233,54 @@ def check_liquidity(
 def check_existing_position(
     settings: Settings, positions: PositionManager,
     signal: Signal, failed: list[str], warnings: list[str],
+    proposed_cost: float = 0.0, bankroll: float = 0.0,
 ) -> None:
-    """7. Existing position check (including cross-strategy hedge detection)."""
+    """7. Existing position check (including cross-strategy hedge detection).
+
+    Also enforces per-ticker concentration: when position additions are
+    allowed, the combined (existing + proposed) cost basis must still
+    respect the global per-position cap (max_position_pct). This prevents
+    the bot from doubling down on the same ticker past the 5% limit by
+    treating each add as a fresh trade (observed in production on a
+    zero-volume Kalshi market where two 310-contract buys stacked to ~$499
+    exposure on a single illiquid ticker).
+    """
     if not positions.has_position(signal.market_id):
         return
     existing = positions.get_position(signal.market_id)
     if not settings.trading.allow_position_additions:
         failed.append(f"Already have position in {signal.market_id}")
+        return
+
+    if existing and hasattr(existing, 'direction') and existing.direction != signal.direction:
+        warnings.append(
+            f"Hedge detected: new {signal.direction.value} opposes existing "
+            f"{existing.direction.value} in {signal.market_id}"
+        )
     else:
-        if existing and hasattr(existing, 'direction') and existing.direction != signal.direction:
-            warnings.append(
-                f"Hedge detected: new {signal.direction.value} opposes existing "
-                f"{existing.direction.value} in {signal.market_id}"
-            )
-        else:
-            warnings.append(
-                f"Adding to existing {signal.direction.value} position in {signal.market_id}"
+        warnings.append(
+            f"Adding to existing {signal.direction.value} position in {signal.market_id}"
+        )
+
+    # Per-ticker concentration cap: combined cost must stay under the
+    # per-position limit. Only enforced for same-direction adds (hedges
+    # are netting, not concentration).
+    if (
+        existing
+        and bankroll > 0
+        and proposed_cost > 0
+        and hasattr(existing, 'direction')
+        and existing.direction == signal.direction
+    ):
+        existing_cost = getattr(existing, 'cost_basis', 0.0) or 0.0
+        combined = existing_cost + proposed_cost
+        max_position = bankroll * settings.trading.max_position_pct
+        if combined > max_position:
+            failed.append(
+                f"Same-ticker concentration cap: combined cost "
+                f"${combined:.2f} (existing ${existing_cost:.2f} + "
+                f"new ${proposed_cost:.2f}) > per-position limit "
+                f"${max_position:.2f} ({settings.trading.max_position_pct:.0%})"
             )
 
 

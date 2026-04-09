@@ -142,6 +142,7 @@ class RiskEngine:
         risk_checks.check_liquidity(market, proposed_cost, failed, warnings)
         risk_checks.check_existing_position(
             self.settings, self.positions, signal, failed, warnings,
+            proposed_cost=proposed_cost, bankroll=bankroll,
         )
         risk_checks.check_signal_quality(self.settings, signal, proposed_cost, failed)
         risk_checks.check_resolution_date(market, failed, warnings)

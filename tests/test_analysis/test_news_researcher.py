@@ -475,19 +475,25 @@ class TestDateParsing:
 
     def test_iso8601_zulu_suffix(self):
         """ISO 8601 with Z suffix for UTC."""
+        from datetime import datetime, timedelta, timezone
+        d = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
         researcher = NewsResearcher()
-        result = self._make_result("2026-04-01T09:01:00Z")
+        result = self._make_result(f"{d}T09:01:00Z")
         assert researcher._is_stale(result, max_age_days=7) is False
 
     def test_iso8601_fractional_seconds(self):
+        from datetime import datetime, timedelta, timezone
+        d = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
         researcher = NewsResearcher()
-        result = self._make_result("2026-04-01T09:01:00.123+00:00")
+        result = self._make_result(f"{d}T09:01:00.123+00:00")
         assert researcher._is_stale(result, max_age_days=7) is False
 
     def test_iso8601_no_timezone(self):
         """ISO 8601 without timezone — assume UTC."""
+        from datetime import datetime, timedelta, timezone
+        d = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
         researcher = NewsResearcher()
-        result = self._make_result("2026-04-01T10:00:00")
+        result = self._make_result(f"{d}T10:00:00")
         assert researcher._is_stale(result, max_age_days=7) is False
 
     def test_date_only(self):
@@ -501,8 +507,10 @@ class TestDateParsing:
         assert researcher._is_stale(result, max_age_days=7) is False
 
     def test_space_separator_with_tz(self):
+        from datetime import datetime, timedelta, timezone
+        d = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
         researcher = NewsResearcher()
-        result = self._make_result("2026-04-01 10:00:00+00:00")
+        result = self._make_result(f"{d} 10:00:00+00:00")
         assert researcher._is_stale(result, max_age_days=7) is False
 
     def test_text_month_with_tz(self):
